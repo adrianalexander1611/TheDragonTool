@@ -83,9 +83,9 @@ function Global:Wait-UI {
 # <Window.Resources>. Es una variable GLOBAL (y no $Script:) para que tambien se
 # vea desde funciones llamadas a traves de closures.
 $Global:RecursosNeonXaml = @'
-    <LinearGradientBrush x:Key="NeonBrush" StartPoint="0,0" EndPoint="1,1">
+    <LinearGradientBrush x:Key="NeonBrush" StartPoint="0,0" EndPoint="0.5,0.5" SpreadMethod="Repeat">
       <LinearGradientBrush.RelativeTransform>
-        <RotateTransform CenterX="0.5" CenterY="0.5" Angle="0"/>
+        <TranslateTransform X="0" Y="0"/>
       </LinearGradientBrush.RelativeTransform>
       <GradientStop Color="#1F6BFF" Offset="0"/>
       <GradientStop Color="#00C8FF" Offset="0.25"/>
@@ -110,7 +110,7 @@ $Global:RecursosNeonXaml = @'
                   <BlurEffect Radius="10"/>
                 </Border.Effect>
               </Border>
-              <Border x:Name="Bd" Background="#33141C30" BorderBrush="{StaticResource NeonBrush}"
+              <Border x:Name="Bd" Background="#33141C30" BorderBrush="{DynamicResource NeonBrush}"
                       BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="14" SnapsToDevicePixels="True">
                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}" RecognizesAccessKey="False"/>
               </Border>
@@ -187,7 +187,7 @@ $Global:RecursosNeonXaml = @'
                   <Border VerticalAlignment="Top" Height="8" CornerRadius="12,12,0,0" Background="#33FFFFFF" IsHitTestVisible="False"/>
                 </Grid>
               </Border>
-              <Border CornerRadius="12" BorderThickness="1.5" BorderBrush="{StaticResource NeonBrush}" IsHitTestVisible="False"/>
+              <Border CornerRadius="12" BorderThickness="1.5" BorderBrush="{DynamicResource NeonBrush}" IsHitTestVisible="False"/>
               <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White" FontWeight="Bold" FontSize="12"
                          Text="{Binding Value, RelativeSource={RelativeSource TemplatedParent}, StringFormat={}{0:0}%}"/>
             </Grid>
@@ -214,7 +214,7 @@ $Global:RecursosNeonXaml = @'
                   <Thumb>
                     <Thumb.Template>
                       <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="Pulgar" CornerRadius="5" Background="#8800B7FF" BorderBrush="{StaticResource NeonBrush}" BorderThickness="1"/>
+                        <Border x:Name="Pulgar" CornerRadius="5" Background="#8800B7FF" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="1"/>
                         <ControlTemplate.Triggers>
                           <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
@@ -251,7 +251,7 @@ $Global:RecursosNeonXaml = @'
                       <Thumb>
                         <Thumb.Template>
                           <ControlTemplate TargetType="Thumb">
-                            <Border x:Name="Pulgar" CornerRadius="5" Background="#8800B7FF" BorderBrush="{StaticResource NeonBrush}" BorderThickness="1"/>
+                            <Border x:Name="Pulgar" CornerRadius="5" Background="#8800B7FF" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="1"/>
                             <ControlTemplate.Triggers>
                               <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
@@ -289,7 +289,7 @@ $Global:RecursosNeonXaml = @'
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsKeyboardFocused" Value="True">
-                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource NeonBrush}"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource NeonBrush}"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
@@ -332,6 +332,31 @@ $Global:RecursosGridXaml = @'
       </Style.Triggers>
     </Style>
 '@
+
+# Hace "correr" el degradado del pincel neon: el patron de colores se repite y se desplaza
+# sin parar, asi los colores fluyen alrededor de todos los bordes (una sola animacion mueve
+# todos los bordes a la vez). -Detener la congela. Devuelve $false si no se pudo animar.
+function Global:Animar-PincelNeon {
+    param($Pincel, [switch]$Detener)
+    if (-not $Pincel) { return $false }
+    try {
+        $mov = $Pincel.RelativeTransform
+        if ($Detener) {
+            $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null)
+            $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null)
+            return $true
+        }
+        foreach ($propiedad in @([System.Windows.Media.TranslateTransform]::XProperty, [System.Windows.Media.TranslateTransform]::YProperty)) {
+            $flujo = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $flujo.From = 0
+            $flujo.To = 0.5
+            $flujo.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(2500))
+            $flujo.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+            $mov.BeginAnimation($propiedad, $flujo)
+        }
+        return $true
+    } catch { return $false }
+}
 
 # Envuelve una ventana (todavia no mostrada) en un marco neon animado y translucido:
 # borde de color que gira, halo suave, "aurora" de luces que se mueven detras del contenido
@@ -598,18 +623,12 @@ function Global:Aplicar-MarcoNeon {
                         $estadoFx.Activo = $false
                         & $detenerFx
                         $aurora.Visibility = 'Collapsed'
-                        if ($pincelNeon) { $pincelNeon.RelativeTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null) }
+                        [void](Animar-PincelNeon -Pincel $pincelNeon -Detener)
                     } else {
                         $estadoFx.Activo = $true
                         $aurora.Visibility = 'Visible'
                         & $iniciarFx
-                        if ($pincelNeon) {
-                            $giro2 = New-Object System.Windows.Media.Animation.DoubleAnimation
-                            $giro2.From = 0; $giro2.To = 360
-                            $giro2.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(4))
-                            $giro2.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-                            $pincelNeon.RelativeTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $giro2)
-                        }
+                        [void](Animar-PincelNeon -Pincel $pincelNeon)
                     }
                 } catch { }
             }.GetNewClosure())
@@ -667,12 +686,7 @@ function Global:Iniciar-EfectosNeon {
     try {
         if ($Ventana.Resources.Contains("NeonBrush")) {
             $pincel = $Ventana.Resources["NeonBrush"]
-            $giro = New-Object System.Windows.Media.Animation.DoubleAnimation
-            $giro.From = 0
-            $giro.To = 360
-            $giro.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(4))
-            $giro.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-            $pincel.RelativeTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $giro)
+            [void](Animar-PincelNeon -Pincel $pincel)
         }
     } catch { }
     try {
@@ -7874,9 +7888,9 @@ function Show-VentanaNavegador {
         Title="$Titulo" Height="760" Width="1080" WindowStartupLocation="CenterScreen" Background="White">
   <Window.Resources>
     <!-- Mismo efecto neon del panel lateral: boton redondeado, semitransparente, borde con degradado giratorio -->
-    <LinearGradientBrush x:Key="NeonBrushNav" StartPoint="0,0" EndPoint="1,1">
+    <LinearGradientBrush x:Key="NeonBrushNav" StartPoint="0,0" EndPoint="0.5,0.5" SpreadMethod="Repeat">
       <LinearGradientBrush.RelativeTransform>
-        <RotateTransform CenterX="0.5" CenterY="0.5" Angle="0"/>
+        <TranslateTransform X="0" Y="0"/>
       </LinearGradientBrush.RelativeTransform>
       <GradientStop Color="#1F6BFF" Offset="0"/>
       <GradientStop Color="#00C8FF" Offset="0.25"/>
@@ -7902,7 +7916,7 @@ function Show-VentanaNavegador {
                   <BlurEffect Radius="10"/>
                 </Border.Effect>
               </Border>
-              <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{StaticResource NeonBrushNav}"
+              <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{DynamicResource NeonBrushNav}"
                       BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="14" SnapsToDevicePixels="True">
                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}" RecognizesAccessKey="False"/>
               </Border>
@@ -7945,12 +7959,7 @@ function Show-VentanaNavegador {
     # (el giro del borde neon de este navegador usa su propio pincel NeonBrushNav)
     try {
         $pincelNav = $winNav.FindResource("NeonBrushNav")
-        $giroNav = New-Object System.Windows.Media.Animation.DoubleAnimation
-        $giroNav.From = 0
-        $giroNav.To = 360
-        $giroNav.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(4))
-        $giroNav.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-        $pincelNav.RelativeTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $giroNav)
+        [void](Animar-PincelNeon -Pincel $pincelNav)
     } catch { }
     $urlRespaldo = if ($TextoRespaldo) { Get-UrlRespaldoBusqueda -Texto $TextoRespaldo } else { $null }
     $browserLocal = New-NavegadorEmbebido -ContenedorBorder $winNav.FindName("BrowserPopupContenedor") -UrlRespaldo $urlRespaldo
@@ -8737,9 +8746,9 @@ function Buscar-DriverLaptop {
         <SolidColorBrush x:Key="TextoAcento" Color="#66AEFF"/>
 
         <!-- Pincel neon compartido: su angulo se anima desde codigo (una sola animacion mueve todos los bordes a la vez) -->
-        <LinearGradientBrush x:Key="NeonBrush" StartPoint="0,0" EndPoint="1,1">
+        <LinearGradientBrush x:Key="NeonBrush" StartPoint="0,0" EndPoint="0.5,0.5" SpreadMethod="Repeat">
             <LinearGradientBrush.RelativeTransform>
-                <RotateTransform CenterX="0.5" CenterY="0.5" Angle="0"/>
+                <TranslateTransform X="0" Y="0"/>
             </LinearGradientBrush.RelativeTransform>
             <GradientStop Color="#1F6BFF" Offset="0"/>
             <GradientStop Color="#00C8FF" Offset="0.25"/>
@@ -8769,7 +8778,7 @@ function Buscar-DriverLaptop {
                                 </Border.Effect>
                             </Border>
                             <Border x:Name="Bd" Background="{TemplateBinding Background}"
-                                    BorderBrush="{StaticResource NeonBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                                    BorderBrush="{DynamicResource NeonBrush}" BorderThickness="{TemplateBinding BorderThickness}"
                                     CornerRadius="14" SnapsToDevicePixels="True">
                                 <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                                    VerticalAlignment="Center" Margin="{TemplateBinding Padding}" RecognizesAccessKey="False"/>
@@ -8854,7 +8863,7 @@ function Buscar-DriverLaptop {
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource NeonBrush}"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource NeonBrush}"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
@@ -8884,7 +8893,7 @@ function Buscar-DriverLaptop {
                   <Thumb>
                     <Thumb.Template>
                       <ControlTemplate TargetType="Thumb">
-                        <Border x:Name="Pulgar" CornerRadius="5" Background="#8800B7FF" BorderBrush="{StaticResource NeonBrush}" BorderThickness="1"/>
+                        <Border x:Name="Pulgar" CornerRadius="5" Background="#8800B7FF" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="1"/>
                         <ControlTemplate.Triggers>
                           <Trigger Property="IsMouseOver" Value="True">
                             <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
@@ -8921,7 +8930,7 @@ function Buscar-DriverLaptop {
                       <Thumb>
                         <Thumb.Template>
                           <ControlTemplate TargetType="Thumb">
-                            <Border x:Name="Pulgar" CornerRadius="5" Background="#8800B7FF" BorderBrush="{StaticResource NeonBrush}" BorderThickness="1"/>
+                            <Border x:Name="Pulgar" CornerRadius="5" Background="#8800B7FF" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="1"/>
                             <ControlTemplate.Triggers>
                               <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
@@ -9038,7 +9047,7 @@ function Buscar-DriverLaptop {
         <!-- Tarjeta de agrupacion visual (usada para reorganizar paneles) -->
         <Style x:Key="TarjetaSeccion" TargetType="Border">
             <Setter Property="Background" Value="#9910142A"/>
-            <Setter Property="BorderBrush" Value="{StaticResource NeonBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource NeonBrush}"/>
             <Setter Property="BorderThickness" Value="1.2"/>
             <Setter Property="CornerRadius" Value="14"/>
             <Setter Property="Padding" Value="16"/>
@@ -9078,7 +9087,7 @@ function Buscar-DriverLaptop {
             <Setter Property="Background" Value="#88101420"/>
             <Setter Property="RowBackground" Value="#55101420"/>
             <Setter Property="AlternatingRowBackground" Value="#55151B27"/>
-            <Setter Property="BorderBrush" Value="{StaticResource NeonBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource NeonBrush}"/>
             <Setter Property="BorderThickness" Value="1.2"/>
             <Setter Property="HorizontalGridLinesBrush" Value="{StaticResource Borde}"/>
             <Setter Property="VerticalGridLinesBrush" Value="{StaticResource Borde}"/>
@@ -9122,7 +9131,7 @@ function Buscar-DriverLaptop {
                                     <BlurEffect Radius="12"/>
                                 </Border.Effect>
                             </Border>
-                            <Border x:Name="Neon" CornerRadius="14" BorderThickness="1.5" BorderBrush="{StaticResource NeonBrush}"
+                            <Border x:Name="Neon" CornerRadius="14" BorderThickness="1.5" BorderBrush="{DynamicResource NeonBrush}"
                                     Background="#33141C30" SnapsToDevicePixels="True">
                                 <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center" Margin="18,0,10,0" RecognizesAccessKey="False"/>
                             </Border>
@@ -9146,11 +9155,11 @@ function Buscar-DriverLaptop {
     </Window.Resources>
     <DockPanel>
         <!-- Encabezado -->
-        <Border DockPanel.Dock="Top" Background="#55141C30" BorderBrush="{StaticResource NeonBrush}" BorderThickness="0,0,0,2" Padding="16,10">
+        <Border DockPanel.Dock="Top" Background="#55141C30" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="0,0,0,2" Padding="16,10">
             <StackPanel Orientation="Horizontal">
                 <Image x:Name="ImgLogo" Height="56" Margin="0,0,16,0"/>
                 <StackPanel VerticalAlignment="Center">
-                    <TextBlock Text="THE DRAGON TOOL" Foreground="{StaticResource NeonBrush}" FontSize="24" FontWeight="Black">
+                    <TextBlock Text="THE DRAGON TOOL" Foreground="{DynamicResource NeonBrush}" FontSize="24" FontWeight="Black">
                         <TextBlock.Effect>
                             <DropShadowEffect Color="#00B7FF" BlurRadius="16" ShadowDepth="0" Opacity="0.75"/>
                         </TextBlock.Effect>
@@ -9163,13 +9172,13 @@ function Buscar-DriverLaptop {
         </Border>
 
         <!-- Log inferior -->
-        <Border DockPanel.Dock="Bottom" Background="#55101420" BorderBrush="{StaticResource NeonBrush}" BorderThickness="0,1.5,0,0" Padding="10">
+        <Border DockPanel.Dock="Bottom" Background="#55101420" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="0,1.5,0,0" Padding="10">
             <DockPanel Height="170">
                 <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
                     <TextBlock Text="Registro de actividad" Foreground="{StaticResource TextoAcento}" FontWeight="Bold"/>
                     <Button x:Name="BtnLimpiarLog" Content="Limpiar" Width="80" HorizontalAlignment="Right" Margin="0"/>
                 </DockPanel>
-                <TextBox x:Name="LogBox" IsReadOnly="True" Background="#AA070A10" Foreground="#66AEFF" BorderBrush="{StaticResource NeonBrush}"
+                <TextBox x:Name="LogBox" IsReadOnly="True" Background="#AA070A10" Foreground="#66AEFF" BorderBrush="{DynamicResource NeonBrush}"
                          FontFamily="Consolas" FontSize="12" TextWrapping="Wrap"
                          VerticalScrollBarVisibility="Auto" AcceptsReturn="True"/>
             </DockPanel>
@@ -9183,11 +9192,11 @@ function Buscar-DriverLaptop {
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0" Margin="10,10,10,0" Padding="8,6" CornerRadius="14" BorderThickness="1.5"
-                BorderBrush="{StaticResource NeonBrush}" Background="#33141C30">
+                BorderBrush="{DynamicResource NeonBrush}" Background="#33141C30">
             <DockPanel LastChildFill="True">
                 <Button x:Name="BtnMenuLateral" DockPanel.Dock="Left" Content="☰  MENÚ" Width="120" Height="34" Margin="0,0,14,0"
                         Padding="0" HorizontalContentAlignment="Center" FontWeight="Bold"
-                        Background="#33141C30" BorderBrush="{StaticResource NeonBrush}" ToolTip="Abrir el menu de secciones"/>
+                        Background="#33141C30" BorderBrush="{DynamicResource NeonBrush}" ToolTip="Abrir el menu de secciones"/>
                 <TextBlock x:Name="TxtSeccionActual" Text="" Foreground="{StaticResource TextoPrimario}" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
             </DockPanel>
         </Border>
@@ -10168,7 +10177,7 @@ function Buscar-DriverLaptop {
 
         <!-- Panel lateral izquierdo (se desliza y se auto-oculta al elegir una opcion) -->
         <Border x:Name="PanelLateral" Grid.RowSpan="2" HorizontalAlignment="Left" Width="300" Margin="0,8,0,8" Visibility="Collapsed"
-                Background="#D9101420" BorderBrush="{StaticResource NeonBrush}" BorderThickness="0,2,2,2" CornerRadius="0,22,22,0">
+                Background="#D9101420" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="0,2,2,2" CornerRadius="0,22,22,0">
             <Border.RenderTransform>
                 <TranslateTransform x:Name="DesplazaPanel" X="-340"/>
             </Border.RenderTransform>
@@ -11096,12 +11105,7 @@ try {
 # los colores alrededor de todos los botones y bordes a la vez (muy barato de dibujar).
 try {
     $pincelNeon = $window.FindResource("NeonBrush")
-    $giroNeon = New-Object System.Windows.Media.Animation.DoubleAnimation
-    $giroNeon.From = 0
-    $giroNeon.To = 360
-    $giroNeon.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(4))
-    $giroNeon.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-    $pincelNeon.RelativeTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $giroNeon)
+    if (-not (Animar-PincelNeon -Pincel $pincelNeon)) { throw "el pincel no admite animacion" }
 } catch {
     Write-Log "No se pudo animar el borde neon (se muestra estatico): $($_.Exception.Message)" -Tipo AVISO
 }
