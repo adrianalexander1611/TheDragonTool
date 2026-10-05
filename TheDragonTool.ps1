@@ -10140,7 +10140,7 @@ function Buscar-DriverLaptop {
                             <Image x:Name="ImgLogoAcerca" Width="64" Height="64" Margin="0,0,14,0"/>
                             <StackPanel VerticalAlignment="Center">
                                 <TextBlock Text="The Dragon Tool" Foreground="White" FontSize="24" FontWeight="Bold"/>
-                                <TextBlock x:Name="TxtVersionAcerca" Text="Herramienta de optimizacion, diagnostico y mantenimiento de Windows" Foreground="{StaticResource TextoAcento}" FontSize="13"/>
+                                <TextBlock x:Name="TxtVersionAcerca" Text="Version 2.0 · Edicion Neon  |  Optimizacion, diagnostico y mantenimiento de Windows" Foreground="{StaticResource TextoAcento}" FontSize="13"/>
                             </StackPanel>
                         </StackPanel>
 
@@ -10154,8 +10154,25 @@ function Buscar-DriverLaptop {
 
                         <Border Style="{StaticResource TarjetaSeccion}">
                             <StackPanel>
+                                <TextBlock Text="✨ Novedades de esta version" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
+                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🎨 Nueva interfaz neon: borde de ventana animado con degradado azul-verde que fluye, fondo translucido con luces suaves en movimiento y barra de titulo propia (minimizar, maximizar, cerrar).&#10;✨ Boton de la barra de titulo para apagar o encender los efectos animados (modo rendimiento).&#10;☰ Panel lateral de navegacion: oculto al abrir; pulsa MENU para elegir una pestaña y se esconde solo (Esc tambien lo cierra).&#10;🔘 Todos los botones, campos de texto, tablas y barras de desplazamiento con estilo neon redondeado y translucido.&#10;📊 Barras de progreso animadas, con brillo que las recorre, aura y porcentaje en vivo.&#10;⬅ Boton 'Volver' en todas las ventanas que se abren.&#10;🧩 Controladores: el explorador ahora abre ventanas con listas rapidas (todos, que necesitan atencion, faltantes) y se agrego la busqueda de controladores obsoletos o no compatibles para seleccionarlos y borrarlos con copia de seguridad.&#10;🗑️ Programas: 'Desinstalar programas' abre una ventana con la lista de programas instalados, con buscador y los botones 'Desinstalar sin dejar rastros' y 'Forzar desinstalacion'.&#10;🛠️ Pestaña Modificacion: camara (rotar/voltear), pantalla (frecuencia de actualizacion), teclado, parlante y almacenamiento.&#10;🩺 Diagnostico ampliado: camara, teclado, microfono, altavoces, pantalla, RAM, almacenamiento, ventiladores, GPU, mouse, bateria, red, temperatura, arranque, Bluetooth, USB y diagnostico completo automatico.&#10;🚀 Ejecucion desde GitHub con un solo comando en cualquier equipo (ver abajo)."/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource TarjetaSeccion}">
+                            <StackPanel>
                                 <TextBlock Text="📋 Que hace cada pestaña" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
-                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🏠 Inicio: resumen en vivo del equipo y accesos rapidos.&#10;⚙️ Optimizar Windows: perfiles, acelerar CPU, liberar RAM.&#10;🧩 Controladores: buscar, analizar, reparar, respaldar e instalar controladores.&#10;📦 Programas: instalar/desinstalar apps, ISOs de Windows/Office/Linux, Microsoft Store.&#10;🗂️ Registro de Windows: edicion, optimizacion y reparacion de errores del registro.&#10;💾 Disco y almacenamiento: limpieza de archivos y espacio en disco.&#10;🧠 Memoria y rendimiento: herramientas de RAM y procesos.&#10;🔄 Windows Update: control de actualizaciones.&#10;🌐 Red y seguridad: diagnostico de red y Windows Defender.&#10;🖥️ Sistema: reparacion de Windows, ajustes de Windows 11, activacion.&#10;🎨 Personalizacion: fondo de pantalla, temas.&#10;💀 BSOD: historial y analisis de pantallas azules.&#10;🩺 Diagnosticar equipo: pruebas de hardware independientes.&#10;🐞 Registro de errores: bitacora de todo lo que falla en el programa."/>
+                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🏠 Inicio: resumen en vivo del equipo y accesos rapidos.&#10;⚙️ Optimizar Windows: perfiles, acelerar CPU, liberar RAM.&#10;🧩 Controladores: buscar e instalar controladores, explorador de instalados, faltantes y obsoletos, respaldo y limpieza.&#10;📦 Programas: instalar apps, desinstalar sin dejar rastros o forzado, ISOs de Windows/Office/Linux, Microsoft Store.&#10;🗂️ Registro de Windows: edicion, optimizacion y reparacion de errores del registro.&#10;💾 Disco y almacenamiento: limpieza de archivos y espacio en disco.&#10;🧠 Memoria y rendimiento: herramientas de RAM y procesos.&#10;🔄 Windows Update: control de actualizaciones.&#10;🌐 Red y seguridad: diagnostico de red y Windows Defender.&#10;🖥️ Sistema: reparacion de Windows, ajustes de Windows 11, activacion.&#10;🎨 Personalizacion: fondo de pantalla, temas.&#10;💀 BSOD: historial y analisis de pantallas azules.&#10;🩺 Diagnosticar equipo: pruebas de hardware independientes.&#10;🛠️ Modificacion: ajustes de camara, pantalla, teclado, parlante y almacenamiento.&#10;🐞 Registro de errores: bitacora de todo lo que falla en el programa."/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource TarjetaSeccion}">
+                            <StackPanel>
+                                <TextBlock Text="🚀 Abrir desde cualquier equipo" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,6"
+                                           Text="Abre PowerShell y ejecuta este comando; descarga siempre la ultima version y la abre como administrador:"/>
+                                <TextBox IsReadOnly="True" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" Foreground="#66AEFF"
+                                         Text="irm https://raw.githubusercontent.com/adrianalexander1611/TheDragonTool/main/iniciar.ps1 | iex"/>
                             </StackPanel>
                         </Border>
 
