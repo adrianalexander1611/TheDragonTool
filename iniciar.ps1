@@ -3,8 +3,8 @@
 # Descarga SIEMPRE la ultima version (por numero de commit, sin cache) a
 # %LOCALAPPDATA%\TheDragonTool y la abre como administrador.
 
-# ---- Cambia SOLO estas 3 lineas ----
-$usuario = 'TU_USUARIO'
+# ---- Datos de tu repositorio (ya configurados) ----
+$usuario = 'adrianalexander1611'
 $repo    = 'TheDragonTool'
 $rama    = 'main'
 # ------------------------------------
@@ -17,15 +17,15 @@ try {
     $destino = Join-Path $dir 'TheDragonTool.ps1'
 
     # 1) Averigua el commit mas reciente: la URL con el codigo del commit nunca esta en cache
-    $ref = $main
+    $ref = $rama
     try {
-        $info = Invoke-RestMethod -UseBasicParsing -Headers @{ 'User-Agent' = 'DragonTool' } -Uri "https://api.github.com/repos/$adrianalexander1611/$TheDragonTool/commits/$main"
+        $info = Invoke-RestMethod -UseBasicParsing -Headers @{ 'User-Agent' = 'DragonTool' } -Uri "https://api.github.com/repos/$usuario/$repo/commits/$rama"
         $ref = $info.sha
         Write-Host ("Ultima version en GitHub: " + $ref.Substring(0, 7) + " (" + $info.commit.committer.date + ")") -ForegroundColor Cyan
     } catch {
         Write-Host "No se pudo consultar el ultimo commit; se usa la rama '$rama' (puede tardar unos minutos en actualizarse)." -ForegroundColor Yellow
     }
-    $base = "https://raw.githubusercontent.com/$adrianalexander1611/$TheDragonTool/$ref"
+    $base = "https://raw.githubusercontent.com/$usuario/$repo/$ref"
 
     # 2) Descarga (si la copia anterior esta abierta/bloqueada, avisa)
     try { if (Test-Path $destino) { Remove-Item $destino -Force } }
