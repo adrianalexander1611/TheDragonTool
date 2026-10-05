@@ -87,11 +87,11 @@ $Global:RecursosNeonXaml = @'
       <LinearGradientBrush.RelativeTransform>
         <RotateTransform CenterX="0.5" CenterY="0.5" Angle="0"/>
       </LinearGradientBrush.RelativeTransform>
-      <GradientStop Color="#00E5FF" Offset="0"/>
-      <GradientStop Color="#2F7CF6" Offset="0.25"/>
-      <GradientStop Color="#B026FF" Offset="0.5"/>
-      <GradientStop Color="#FF2BD6" Offset="0.75"/>
-      <GradientStop Color="#00E5FF" Offset="1"/>
+      <GradientStop Color="#1F6BFF" Offset="0"/>
+      <GradientStop Color="#00C8FF" Offset="0.25"/>
+      <GradientStop Color="#00FF9C" Offset="0.5"/>
+      <GradientStop Color="#00C8FF" Offset="0.75"/>
+      <GradientStop Color="#1F6BFF" Offset="1"/>
     </LinearGradientBrush>
     <Style TargetType="Button">
       <Setter Property="Foreground" Value="#EAF0FA"/>
@@ -168,7 +168,7 @@ $Global:RecursosNeonXaml = @'
                   <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
                     <GradientStop Color="#00B7FF" Offset="0"/>
                     <GradientStop Color="#2F7CF6" Offset="0.55"/>
-                    <GradientStop Color="#B026FF" Offset="1"/>
+                    <GradientStop Color="#00FF9C" Offset="1"/>
                   </LinearGradientBrush>
                 </Border.Background>
                 <Grid>
@@ -220,7 +220,7 @@ $Global:RecursosNeonXaml = @'
                             <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
                           </Trigger>
                           <Trigger Property="IsDragging" Value="True">
-                            <Setter TargetName="Pulgar" Property="Background" Value="#FFB026FF"/>
+                            <Setter TargetName="Pulgar" Property="Background" Value="#FF00FF9C"/>
                           </Trigger>
                         </ControlTemplate.Triggers>
                       </ControlTemplate>
@@ -257,7 +257,7 @@ $Global:RecursosNeonXaml = @'
                                 <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
                               </Trigger>
                               <Trigger Property="IsDragging" Value="True">
-                                <Setter TargetName="Pulgar" Property="Background" Value="#FFB026FF"/>
+                                <Setter TargetName="Pulgar" Property="Background" Value="#FF00FF9C"/>
                               </Trigger>
                             </ControlTemplate.Triggers>
                           </ControlTemplate>
@@ -383,7 +383,7 @@ function Global:Aplicar-MarcoNeon {
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="Fondo" CornerRadius="9" Background="#22FFFFFF" BorderBrush="#44FF2BD6" BorderThickness="1">
+            <Border x:Name="Fondo" CornerRadius="9" Background="#22FFFFFF" BorderBrush="#4400FF9C" BorderThickness="1">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -402,7 +402,7 @@ function Global:Aplicar-MarcoNeon {
   </Grid.Resources>
   <Border x:Name="MnHalo3" Margin="1" CornerRadius="24" BorderThickness="3" BorderBrush="#1200B7FF" IsHitTestVisible="False"/>
   <Border x:Name="MnHalo2" Margin="4" CornerRadius="21" BorderThickness="3" BorderBrush="#2200B7FF" IsHitTestVisible="False"/>
-  <Border x:Name="MnHalo1" Margin="7" CornerRadius="19" BorderThickness="3" BorderBrush="#3A7B5CFF" IsHitTestVisible="False"/>
+  <Border x:Name="MnHalo1" Margin="7" CornerRadius="19" BorderThickness="3" BorderBrush="#3A00E0A0" IsHitTestVisible="False"/>
   <Border x:Name="MnMarco" Margin="10" CornerRadius="18" BorderThickness="2.5">
     <Border.Background>
       <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
@@ -425,8 +425,8 @@ function Global:Aplicar-MarcoNeon {
         <Ellipse x:Name="MnLuzB" Width="520" Height="520" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-160,-180">
           <Ellipse.Fill>
             <RadialGradientBrush>
-              <GradientStop Color="#33B026FF" Offset="0"/>
-              <GradientStop Color="#00B026FF" Offset="1"/>
+              <GradientStop Color="#3300FF9C" Offset="0"/>
+              <GradientStop Color="#0000FF9C" Offset="1"/>
             </RadialGradientBrush>
           </Ellipse.Fill>
           <Ellipse.RenderTransform><TranslateTransform x:Name="MnMoverB"/></Ellipse.RenderTransform>
@@ -7878,11 +7878,11 @@ function Show-VentanaNavegador {
       <LinearGradientBrush.RelativeTransform>
         <RotateTransform CenterX="0.5" CenterY="0.5" Angle="0"/>
       </LinearGradientBrush.RelativeTransform>
-      <GradientStop Color="#00E5FF" Offset="0"/>
-      <GradientStop Color="#2F7CF6" Offset="0.25"/>
-      <GradientStop Color="#B026FF" Offset="0.5"/>
-      <GradientStop Color="#FF2BD6" Offset="0.75"/>
-      <GradientStop Color="#00E5FF" Offset="1"/>
+      <GradientStop Color="#1F6BFF" Offset="0"/>
+      <GradientStop Color="#00C8FF" Offset="0.25"/>
+      <GradientStop Color="#00FF9C" Offset="0.5"/>
+      <GradientStop Color="#00C8FF" Offset="0.75"/>
+      <GradientStop Color="#1F6BFF" Offset="1"/>
     </LinearGradientBrush>
     <Style TargetType="Button">
       <Setter Property="Background" Value="#33141C30"/>
@@ -8741,11 +8741,11 @@ function Buscar-DriverLaptop {
             <LinearGradientBrush.RelativeTransform>
                 <RotateTransform CenterX="0.5" CenterY="0.5" Angle="0"/>
             </LinearGradientBrush.RelativeTransform>
-            <GradientStop Color="#00E5FF" Offset="0"/>
-            <GradientStop Color="#2F7CF6" Offset="0.25"/>
-            <GradientStop Color="#B026FF" Offset="0.5"/>
-            <GradientStop Color="#FF2BD6" Offset="0.75"/>
-            <GradientStop Color="#00E5FF" Offset="1"/>
+            <GradientStop Color="#1F6BFF" Offset="0"/>
+            <GradientStop Color="#00C8FF" Offset="0.25"/>
+            <GradientStop Color="#00FF9C" Offset="0.5"/>
+            <GradientStop Color="#00C8FF" Offset="0.75"/>
+            <GradientStop Color="#1F6BFF" Offset="1"/>
         </LinearGradientBrush>
 
         <!-- Boton moderno: redondeado, semitransparente y con borde neon animado (igual que el panel lateral) -->
@@ -8890,7 +8890,7 @@ function Buscar-DriverLaptop {
                             <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
                           </Trigger>
                           <Trigger Property="IsDragging" Value="True">
-                            <Setter TargetName="Pulgar" Property="Background" Value="#FFB026FF"/>
+                            <Setter TargetName="Pulgar" Property="Background" Value="#FF00FF9C"/>
                           </Trigger>
                         </ControlTemplate.Triggers>
                       </ControlTemplate>
@@ -8927,7 +8927,7 @@ function Buscar-DriverLaptop {
                                 <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
                               </Trigger>
                               <Trigger Property="IsDragging" Value="True">
-                                <Setter TargetName="Pulgar" Property="Background" Value="#FFB026FF"/>
+                                <Setter TargetName="Pulgar" Property="Background" Value="#FF00FF9C"/>
                               </Trigger>
                             </ControlTemplate.Triggers>
                           </ControlTemplate>
