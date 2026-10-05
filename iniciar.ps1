@@ -23,7 +23,7 @@ try {
         $ref = $info.sha
         Write-Host ("Ultima version en GitHub: " + $ref.Substring(0, 7) + " (" + $info.commit.committer.date + ")") -ForegroundColor Cyan
     } catch {
-        Write-Host "No se pudo consultar el ultimo commit; se usa la rama '$rama' (puede tardar unos minutos en actualizarse)." -ForegroundColor Yellow
+        Write-Host "No se pudo consultar el ultimo commit; se usa la rama '$main' (puede tardar unos minutos en actualizarse)." -ForegroundColor Yellow
     }
     $base = "https://raw.githubusercontent.com/$usuario/$repo/$ref"
 
