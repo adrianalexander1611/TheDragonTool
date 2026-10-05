@@ -2,3 +2,5 @@ para ejecutar el programa abra powershell como administrador y ejecute el siguie
 
 ## Usar en cualquier equipo (PowerShell)
     irm https://raw.githubusercontent.com/adrianalexander1611/TheDragonTool/main/iniciar.ps1 | iex
+
+<img width="1357" height="719" alt="image" src="https://github.com/user-attachments/assets/98834653-4a8d-4f0d-acb2-a38466b2288b" />
