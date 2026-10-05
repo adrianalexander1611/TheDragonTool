@@ -1,3 +1,5 @@
+este es un programa gratuito de uso libre para la comunidad.
+
 para ejecutar el programa abra powershell como administrador y ejecute el siguiente comando:
 
 ## Usar en cualquier equipo (PowerShell)
