@@ -821,7 +821,7 @@ function Global:Get-CategoriaOrigenError {
     param([string]$Origen)
     if ($Origen -match '^(Show-Prueba|Accion-Probar|Accion-DiagnosticoCompleto|Accion-VerDetallesPantalla)') { return 'Prueba de diagnostico' }
     if ($Origen -match '^(Accion-DescargarISO|Get-EnlaceDescarga|Descargar-ArchivoConProgreso|Accion-DescargarInstalarControladorFaltante|Accion-InstalarControladorDesdeArchivo)') { return 'Descarga de archivos' }
-    if ($Origen -match '^(Accion-Instalar|Accion-Desinstalar|Cargar-ProgramasInstalados|Limpiar-RastrosPrograma)') { return 'Instalar/Desinstalar programas' }
+    if ($Origen -match '^(Accion-Instalar|Accion-Desinstalar|Show-VentanaProgramasInstalados|Limpiar-RastrosPrograma)') { return 'Instalar/Desinstalar programas' }
     if ($Origen -match 'Registro') { return 'Registro de Windows' }
     if ($Origen -match 'Driver|Controlador') { return 'Controladores' }
     if ($Origen -match '^Perfil-|^Accion-Acelerar|^Accion-LiberarRAM') { return 'Perfiles de optimizacion' }
@@ -8342,6 +8342,94 @@ function Accion-DesinstalarPrograma {
     }
 }
 
+# Ventana con la lista de programas instalados y los botones de desinstalar sin dejar
+# rastros / forzar desinstalacion. Se abre al instante y carga la lista despues.
+function Show-VentanaProgramasInstalados {
+    [xml]$xamlProgs = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Programas instalados - The Dragon Tool" Height="660" Width="1000"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)
+$($Global:RecursosGridXaml)
+  </Window.Resources>
+  <DockPanel Margin="14">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+    <TextBlock DockPanel.Dock="Top" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"
+               Text="Selecciona un programa y elige como quitarlo. 'Sin dejar rastros' ejecuta su desinstalador y despues borra archivos, datos y registro sobrantes. 'Forzar' NO usa el desinstalador: borra directamente (usalo solo si la forma normal fallo)."/>
+    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <TextBlock Text="🔍" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="14"/>
+      <TextBox x:Name="TxtProgBuscar" MaxWidth="460" HorizontalAlignment="Left"/>
+    </DockPanel>
+    <TextBlock x:Name="TxtProgResumen" DockPanel.Dock="Top" Foreground="#66AEFF" FontWeight="Bold" Margin="0,0,0,8" Text="Cargando programas instalados..."/>
+    <WrapPanel DockPanel.Dock="Bottom" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="BtnProgActualizar" Content="🔄 Actualizar lista" Width="160" Margin="0,0,8,0"/>
+      <Button x:Name="BtnProgDesinstalar" Content="🗑️ Desinstalar sin dejar rastros" Width="250" Margin="0,0,8,0" FontWeight="Bold"/>
+      <Button x:Name="BtnProgForzar" Content="💥 Forzar desinstalacion" Width="210" Margin="0,0,8,0" FontWeight="Bold"/>
+      <Button x:Name="BtnProgCerrar" Content="Cerrar" Width="100"/>
+    </WrapPanel>
+    <DataGrid x:Name="GridProgInst" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" SelectionUnit="FullRow"
+              Background="#151B27" RowBackground="#151B27" AlternatingRowBackground="#1C2635" Foreground="White"
+              BorderBrush="#232B3D" HorizontalGridLinesBrush="#232B3D" VerticalGridLinesBrush="#232B3D" RowHeaderWidth="0"
+              CanUserAddRows="False" HeadersVisibility="Column">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="Programa" Binding="{Binding Nombre}" Width="2.4*"/>
+        <DataGridTextColumn Header="Publicador" Binding="{Binding Publicador}" Width="1.5*"/>
+        <DataGridTextColumn Header="Version" Binding="{Binding Version}" Width="*"/>
+      </DataGrid.Columns>
+    </DataGrid>
+  </DockPanel>
+</Window>
+"@
+    $readerProgs = New-Object System.Xml.XmlNodeReader $xamlProgs
+    $win = [Windows.Markup.XamlReader]::Load($readerProgs)
+    Iniciar-EfectosNeon -Ventana $win
+    $grid = $win.FindName("GridProgInst")
+    $txtResumen = $win.FindName("TxtProgResumen")
+    $txtBuscar = $win.FindName("TxtProgBuscar")
+    $est = @{ Todos = @(); Cargado = $false }
+
+    $mostrarFiltrado = {
+        $texto = $txtBuscar.Text
+        if ([string]::IsNullOrWhiteSpace($texto)) {
+            $grid.ItemsSource = @($est.Todos)
+            $txtResumen.Text = "Total: $(@($est.Todos).Count) programa(s) instalado(s)."
+        } else {
+            $patron = [regex]::Escape($texto.Trim())
+            $filtrados = @($est.Todos | Where-Object { $_.Nombre -match $patron -or $_.Publicador -match $patron })
+            $grid.ItemsSource = $filtrados
+            $txtResumen.Text = "Mostrando $($filtrados.Count) de $(@($est.Todos).Count) programa(s)."
+        }
+    }
+    $cargarLista = {
+        $txtResumen.Text = "Cargando programas instalados..."
+        Wait-UI -Milisegundos 1
+        $est.Todos = @(Get-ProgramasInstalados)
+        $est.Cargado = $true
+        & $mostrarFiltrado
+    }
+
+    $win.Add_ContentRendered({
+        if (-not $est.Cargado) { & $cargarLista }
+    })
+    $txtBuscar.Add_TextChanged({ if ($est.Cargado) { & $mostrarFiltrado } })
+    $win.FindName("BtnProgActualizar").Add_Click({ & $cargarLista })
+    $win.FindName("BtnProgCerrar").Add_Click({ $win.Close() })
+    $win.FindName("BtnProgDesinstalar").Add_Click({
+        $sel = $grid.SelectedItem
+        if (-not $sel) { Show-Aviso "Selecciona un programa de la lista." "Sin seleccion"; return }
+        Accion-DesinstalarPrograma -Item $sel
+        & $cargarLista
+    })
+    $win.FindName("BtnProgForzar").Add_Click({
+        $sel = $grid.SelectedItem
+        if (-not $sel) { Show-Aviso "Selecciona un programa de la lista." "Sin seleccion"; return }
+        Accion-DesinstalarPrograma -Item $sel -Forzar
+        & $cargarLista
+    })
+    $win.ShowDialog() | Out-Null
+}
+
 # --- Archivos ISO: Windows y Office, descarga DIRECTA (sin abrir el navegador) ---
 # Para Windows 11 y 10 se automatiza el mismo proceso oficial en 3 pasos que
 # usa la pagina de Microsoft (elegir edicion -> elegir idioma -> obtener el
@@ -9418,32 +9506,16 @@ function Buscar-DriverLaptop {
                             </StackPanel>
 
                             <!-- Panel: Desinstalar programas -->
-                            <DockPanel x:Name="PanelDesinstalarProgramas" Visibility="Collapsed">
-                                <Border DockPanel.Dock="Top" Style="{StaticResource TarjetaSeccion}">
+                            <StackPanel x:Name="PanelDesinstalarProgramas" MaxWidth="640" HorizontalAlignment="Left" Visibility="Collapsed">
+                                <Border Style="{StaticResource TarjetaSeccion}">
                                     <StackPanel>
-                                        <TextBlock Text="🗑️ Desinstalacion profunda" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
-                                        <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,10"
-                                                   Text="Ademas de desinstalar, se eliminan archivos y entradas residuales (carpetas en AppData/ProgramData, accesos directos y la clave del registro) para no dejar rastro. Si un programa no se puede desinstalar normalmente, usa 'Forzar desinstalacion'."/>
-                                        <DockPanel Margin="0,0,0,10" MaxWidth="500" HorizontalAlignment="Left">
-                                            <TextBlock Text="🔍" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="14"/>
-                                            <TextBox x:Name="TxtBuscarPrograma" Padding="8,6"/>
-                                        </DockPanel>
-                                        <WrapPanel>
-                                            <Button x:Name="BtnActualizarProgramas" Content="🔄 Actualizar lista" Width="160" Height="42" FontSize="12"/>
-                                            <Button x:Name="BtnDesinstalarPrograma" Content="🗑️ Desinstalar (sin dejar rastro)" Width="220" Height="42" FontSize="12" BorderBrush="#A85050"/>
-                                            <Button x:Name="BtnForzarDesinstalarPrograma" Content="💥 Forzar desinstalacion" Width="200" Height="42" FontSize="12" BorderBrush="#A85050"/>
-                                        </WrapPanel>
-                                        <TextBlock x:Name="TxtResumenProgramas" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" Margin="0,10,0,0"/>
+                                        <TextBlock Text="🗑️ Desinstalar programas" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
+                                        <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,14"
+                                                   Text="Abre la lista de programas instalados. Desde ahi puedes desinstalar sin dejar rastros (archivos, AppData, accesos directos y registro) o forzar la desinstalacion de un programa que no se deja quitar."/>
+                                        <Button x:Name="BtnVerProgramasInstalados" Content="📋 Ver programas instalados" Height="46" FontSize="14" FontWeight="Bold"/>
                                     </StackPanel>
                                 </Border>
-                                <DataGrid x:Name="GridProgramas" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
-                                    <DataGrid.Columns>
-                                        <DataGridTextColumn Header="Programa" Binding="{Binding Nombre}" Width="2.4*"/>
-                                        <DataGridTextColumn Header="Publicador" Binding="{Binding Publicador}" Width="1.5*"/>
-                                        <DataGridTextColumn Header="Version" Binding="{Binding Version}" Width="*"/>
-                                    </DataGrid.Columns>
-                                </DataGrid>
-                            </DockPanel>
+                            </StackPanel>
 
                             <!-- Panel: Archivos ISO -->
                             <StackPanel x:Name="PanelArchivosISO" MaxWidth="640" HorizontalAlignment="Left" Visibility="Collapsed">
@@ -10321,9 +10393,6 @@ function Mostrar-SeccionProgramas {
     $window.FindName("PanelDesinstalarProgramas").Visibility = if ($Seccion -eq 'Desinstalar') { 'Visible' } else { 'Collapsed' }
     $window.FindName("PanelArchivosISO").Visibility = if ($Seccion -eq 'ISO') { 'Visible' } else { 'Collapsed' }
     $window.FindName("PanelMicrosoftStore").Visibility = if ($Seccion -eq 'Store') { 'Visible' } else { 'Collapsed' }
-    if ($Seccion -eq 'Desinstalar' -and -not $Script:_programasInstaladosCargados) {
-        Cargar-ProgramasInstalados
-    }
 }
 $window.FindName("CmbSeccionProgramas").Add_SelectionChanged({
     $sel = $window.FindName("CmbSeccionProgramas").SelectedItem
@@ -10592,41 +10661,8 @@ $window.FindName("BtnInstalarSeleccionados").Add_Click({
     Accion-InstalarCatalogoSeleccionado -Items $seleccionados
 })
 
-# Desinstalar programas
-$Script:_todosLosProgramas = @()
-$Script:_programasInstaladosCargados = $false
-function Cargar-ProgramasInstalados {
-    $window.FindName("TxtResumenProgramas").Text = "Cargando lista de programas instalados..."
-    Wait-UI -Milisegundos 1
-    $Script:_todosLosProgramas = Get-ProgramasInstalados
-    $Script:_programasInstaladosCargados = $true
-    $window.FindName("GridProgramas").ItemsSource = $Script:_todosLosProgramas
-    $window.FindName("TxtResumenProgramas").Text = "Total: $($Script:_todosLosProgramas.Count) programa(s) instalado(s)."
-}
-$window.FindName("BtnActualizarProgramas").Add_Click({ Cargar-ProgramasInstalados })
-$window.FindName("TxtBuscarPrograma").Add_TextChanged({
-    $texto = $window.FindName("TxtBuscarPrograma").Text
-    $gridProg = $window.FindName("GridProgramas")
-    if ([string]::IsNullOrWhiteSpace($texto)) {
-        $gridProg.ItemsSource = $Script:_todosLosProgramas
-    } else {
-        $gridProg.ItemsSource = $Script:_todosLosProgramas | Where-Object {
-            $_.Nombre -match [regex]::Escape($texto) -or $_.Publicador -match [regex]::Escape($texto)
-        }
-    }
-})
-$window.FindName("BtnDesinstalarPrograma").Add_Click({
-    $sel = $window.FindName("GridProgramas").SelectedItem
-    if (-not $sel) { Show-Aviso "Selecciona un programa de la lista." "Sin seleccion"; return }
-    Accion-DesinstalarPrograma -Item $sel
-    Cargar-ProgramasInstalados
-})
-$window.FindName("BtnForzarDesinstalarPrograma").Add_Click({
-    $sel = $window.FindName("GridProgramas").SelectedItem
-    if (-not $sel) { Show-Aviso "Selecciona un programa de la lista." "Sin seleccion"; return }
-    Accion-DesinstalarPrograma -Item $sel -Forzar
-    Cargar-ProgramasInstalados
-})
+# Desinstalar programas: un unico boton que abre la ventana con la lista
+$window.FindName("BtnVerProgramasInstalados").Add_Click({ Show-VentanaProgramasInstalados })
 
 # --- Selector de categoria: Optimizar Windows ---
 function Mostrar-PanelOptimizar {
