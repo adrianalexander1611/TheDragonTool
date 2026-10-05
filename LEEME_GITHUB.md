@@ -7,6 +7,6 @@
 3. Abre `iniciar.ps1` en GitHub (lapiz de editar) y cambia las 2 veces que dice `TU_USUARIO` por tu usuario de GitHub.
 
 ## Usar en cualquier equipo (PowerShell)
-    irm https://raw.githubusercontent.com/TU_USUARIO/TheDragonTool/main/iniciar.ps1 | iex
+    irm https://raw.githubusercontent.com/adrianalexander1611/TheDragonTool/main/iniciar.ps1 | iex
 
 Descarga la ultima version, pide permiso de administrador (UAC) y abre la herramienta.
