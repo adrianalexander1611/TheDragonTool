@@ -1,8 +1,8 @@
 # The Dragon Tool - lanzador. Uso (PowerShell):
-#   irm https://raw.githubusercontent.com/TU_USUARIO/TheDragonTool/main/iniciar.ps1 | iex
+#   irm https://raw.githubusercontent.com/adrianalexander1611/TheDragonTool/main/iniciar.ps1 | iex
 # Descarga la herramienta a %LOCALAPPDATA%\TheDragonTool y la abre como administrador.
 $ErrorActionPreference = 'Stop'
-$base = 'https://raw.githubusercontent.com/TU_USUARIO/TheDragonTool/main'
+$base = 'https://raw.githubusercontent.com/adrianalexander1611/TheDragonTool/main'
 $dir  = Join-Path $env:LOCALAPPDATA 'TheDragonTool'
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
