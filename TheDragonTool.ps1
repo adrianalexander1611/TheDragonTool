@@ -22,6 +22,9 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName WindowsFormsIntegration
 Add-Type -AssemblyName System.Drawing
 
+# PowerShell 5.1 puede usar TLS antiguo por defecto y las descargas (NuGet, GitHub, Microsoft) fallan: se fuerza TLS 1.2
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+
 $Script:Autor = "Adrian Barrientos"
 $Script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $Script:ScriptDir) { $Script:ScriptDir = (Get-Location).Path }
@@ -88,9 +91,9 @@ $Global:RecursosNeonXaml = @'
         <TranslateTransform X="0" Y="0"/>
       </LinearGradientBrush.RelativeTransform>
       <GradientStop Color="#1F6BFF" Offset="0"/>
-      <GradientStop Color="#00C8FF" Offset="0.25"/>
-      <GradientStop Color="#00FF9C" Offset="0.5"/>
-      <GradientStop Color="#00C8FF" Offset="0.75"/>
+      <GradientStop Color="#4FA8FF" Offset="0.25"/>
+      <GradientStop Color="#FFFFFF" Offset="0.5"/>
+      <GradientStop Color="#4FA8FF" Offset="0.75"/>
       <GradientStop Color="#1F6BFF" Offset="1"/>
     </LinearGradientBrush>
     <Style TargetType="Button">
@@ -139,6 +142,22 @@ $Global:RecursosNeonXaml = @'
               <Trigger Property="IsPressed" Value="True">
                 <Setter TargetName="Bd" Property="Background" Value="#5500E5FF"/>
                 <Setter TargetName="Halo" Property="Opacity" Value="0.9"/>
+                <Trigger.EnterActions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="Esc" Storyboard.TargetProperty="ScaleX" To="0.95" Duration="0:0:0.07"/>
+                      <DoubleAnimation Storyboard.TargetName="Esc" Storyboard.TargetProperty="ScaleY" To="0.95" Duration="0:0:0.07"/>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="Esc" Storyboard.TargetProperty="ScaleX" To="1.035" Duration="0:0:0.12"/>
+                      <DoubleAnimation Storyboard.TargetName="Esc" Storyboard.TargetProperty="ScaleY" To="1.035" Duration="0:0:0.12"/>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </Trigger.ExitActions>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter TargetName="Bd" Property="Opacity" Value="0.45"/>
@@ -168,7 +187,7 @@ $Global:RecursosNeonXaml = @'
                   <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
                     <GradientStop Color="#00B7FF" Offset="0"/>
                     <GradientStop Color="#2F7CF6" Offset="0.55"/>
-                    <GradientStop Color="#00FF9C" Offset="1"/>
+                    <GradientStop Color="#CFE8FF" Offset="1"/>
                   </LinearGradientBrush>
                 </Border.Background>
                 <Grid>
@@ -220,7 +239,7 @@ $Global:RecursosNeonXaml = @'
                             <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
                           </Trigger>
                           <Trigger Property="IsDragging" Value="True">
-                            <Setter TargetName="Pulgar" Property="Background" Value="#FF00FF9C"/>
+                            <Setter TargetName="Pulgar" Property="Background" Value="#FFBFE3FF"/>
                           </Trigger>
                         </ControlTemplate.Triggers>
                       </ControlTemplate>
@@ -257,7 +276,7 @@ $Global:RecursosNeonXaml = @'
                                 <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
                               </Trigger>
                               <Trigger Property="IsDragging" Value="True">
-                                <Setter TargetName="Pulgar" Property="Background" Value="#FF00FF9C"/>
+                                <Setter TargetName="Pulgar" Property="Background" Value="#FFBFE3FF"/>
                               </Trigger>
                             </ControlTemplate.Triggers>
                           </ControlTemplate>
@@ -358,6 +377,137 @@ function Global:Animar-PincelNeon {
     } catch { return $false }
 }
 
+# Animaciones de entrada reutilizables ---------------------------------------------------
+
+# Hace aparecer una lista de elementos uno tras otro (fundido + deslizamiento), con un pequeño retraso entre cada uno.
+function Global:Animar-EntradaElementos {
+    param($Elementos, [double]$DesdeX = 0, [double]$DesdeY = 0, [int]$PasoMs = 40, [int]$DuracionMs = 340)
+    $i = 0
+    $suave = New-Object System.Windows.Media.Animation.CubicEase
+    $suave.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+    foreach ($el in @($Elementos)) {
+        if (-not ($el -is [System.Windows.UIElement])) { continue }
+        try {
+            $espera = [TimeSpan]::FromMilliseconds($i * $PasoMs)
+            if ($DesdeX -ne 0 -or $DesdeY -ne 0) {
+                $mov = $el.RenderTransform -as [System.Windows.Media.TranslateTransform]
+                if (-not $mov -and ($el.RenderTransform -eq $null -or $el.RenderTransform -eq [System.Windows.Media.Transform]::Identity)) {
+                    $mov = New-Object System.Windows.Media.TranslateTransform
+                    $el.RenderTransform = $mov
+                }
+                if ($mov) {
+                    if ($DesdeX -ne 0) {
+                        $ax = New-Object System.Windows.Media.Animation.DoubleAnimation
+                        $ax.From = $DesdeX; $ax.To = 0
+                        $ax.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($DuracionMs))
+                        $ax.BeginTime = $espera; $ax.EasingFunction = $suave
+                        $ax.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
+                        $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $ax)
+                    }
+                    if ($DesdeY -ne 0) {
+                        $ay = New-Object System.Windows.Media.Animation.DoubleAnimation
+                        $ay.From = $DesdeY; $ay.To = 0
+                        $ay.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($DuracionMs))
+                        $ay.BeginTime = $espera; $ay.EasingFunction = $suave
+                        $ay.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
+                        $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $ay)
+                    }
+                }
+            }
+            $el.Opacity = 0
+            $ao = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $ao.From = 0; $ao.To = 1
+            $ao.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($DuracionMs))
+            $ao.BeginTime = $espera
+            $el.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $ao)
+        } catch { }
+        $i++
+    }
+}
+
+# Al mostrarse un panel (cambio de seccion): el panel se desvanece hacia arriba y sus hijos entran en cascada.
+function Global:Animar-EntradaPanel {
+    param($Panel)
+    if (-not $Panel) { return }
+    try {
+        $mov = $Panel.RenderTransform -as [System.Windows.Media.TranslateTransform]
+        if (-not $mov) { $mov = New-Object System.Windows.Media.TranslateTransform; $Panel.RenderTransform = $mov }
+        $suave = New-Object System.Windows.Media.Animation.CubicEase
+        $suave.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $ay = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $ay.From = 22; $ay.To = 0
+        $ay.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(380))
+        $ay.EasingFunction = $suave
+        $ay.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
+        $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $ay)
+        $ao = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $ao.From = 0; $ao.To = 1
+        $ao.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(320))
+        $ao.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
+        $Panel.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $ao)
+        if ($Panel -is [System.Windows.Controls.Panel] -and $Panel.Children.Count -gt 1 -and $Panel.Children.Count -le 14) {
+            Animar-EntradaElementos -Elementos $Panel.Children -DesdeY 18 -PasoMs 45 -DuracionMs 360
+        }
+    } catch { }
+}
+
+# Engancha la animacion de entrada a todos los paneles de seccion (los llamados Panel*) de una ventana.
+function Global:Registrar-AnimacionesPaneles {
+    param($Raiz)
+    if (-not $Raiz) { return }
+    $pila = New-Object 'System.Collections.Generic.Stack[object]'
+    $pila.Push($Raiz)
+    $enganchados = 0
+    while ($pila.Count -gt 0) {
+        $nodo = $pila.Pop()
+        if ($nodo -is [System.Windows.Controls.Panel] -and $nodo.Name -and $nodo.Name -match '^Panel' -and $nodo.Name -notmatch 'Teclado|Checklist|Lateral') {
+            $nodo.Add_IsVisibleChanged({
+                param($remitente, $evento)
+                if ($evento.NewValue -eq $true) { Animar-EntradaPanel -Panel $remitente }
+            })
+            $enganchados++
+        }
+        if ($nodo -is [System.Windows.DependencyObject]) {
+            foreach ($hijo in [System.Windows.LogicalTreeHelper]::GetChildren($nodo)) {
+                if ($hijo -is [System.Windows.DependencyObject]) { $pila.Push($hijo) }
+            }
+        }
+    }
+    return $enganchados
+}
+
+# Cambio de pestaña: el contenido sube suavemente y el titulo de la seccion entra desde la izquierda.
+function Global:Animar-CambioPestana {
+    try {
+        $tc = $window.FindName("TabControlPrincipal")
+        $titulo = $window.FindName("TxtSeccionActual")
+        if ($tc) { Animar-EntradaPanel -Panel $tc }
+        if ($titulo) { Animar-EntradaElementos -Elementos @($titulo) -DesdeX -26 -PasoMs 0 -DuracionMs 360 }
+    } catch { }
+}
+
+# Latido suave continuo (por ejemplo el logo).
+function Global:Animar-Respiracion {
+    param($Elemento, [double]$Escala = 1.07, [double]$Segundos = 2.2)
+    if (-not $Elemento) { return }
+    try {
+        $esc = New-Object System.Windows.Media.ScaleTransform(1, 1)
+        $Elemento.RenderTransformOrigin = [System.Windows.Point]::new(0.5, 0.5)
+        $Elemento.RenderTransform = $esc
+        $suave = New-Object System.Windows.Media.Animation.SineEase
+        $suave.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseInOut
+        foreach ($eje in @([System.Windows.Media.ScaleTransform]::ScaleXProperty, [System.Windows.Media.ScaleTransform]::ScaleYProperty)) {
+            $latido = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $latido.From = 1; $latido.To = $Escala
+            $latido.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds($Segundos))
+            $latido.AutoReverse = $true
+            $latido.EasingFunction = $suave
+            $latido.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+            $esc.BeginAnimation($eje, $latido)
+        }
+    } catch { }
+}
+
 # Envuelve una ventana (todavia no mostrada) en un marco neon animado y translucido:
 # borde de color que gira, halo suave, "aurora" de luces que se mueven detras del contenido
 # y una barra de titulo propia (con minimizar/maximizar/cerrar en la ventana principal).
@@ -408,7 +558,7 @@ function Global:Aplicar-MarcoNeon {
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="Fondo" CornerRadius="9" Background="#22FFFFFF" BorderBrush="#4400FF9C" BorderThickness="1">
+            <Border x:Name="Fondo" CornerRadius="9" Background="#22FFFFFF" BorderBrush="#44FFFFFF" BorderThickness="1">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -427,7 +577,7 @@ function Global:Aplicar-MarcoNeon {
   </Grid.Resources>
   <Border x:Name="MnHalo3" Margin="1" CornerRadius="24" BorderThickness="3" BorderBrush="#1200B7FF" IsHitTestVisible="False"/>
   <Border x:Name="MnHalo2" Margin="4" CornerRadius="21" BorderThickness="3" BorderBrush="#2200B7FF" IsHitTestVisible="False"/>
-  <Border x:Name="MnHalo1" Margin="7" CornerRadius="19" BorderThickness="3" BorderBrush="#3A00E0A0" IsHitTestVisible="False"/>
+  <Border x:Name="MnHalo1" Margin="7" CornerRadius="19" BorderThickness="3" BorderBrush="#3A9CD0FF" IsHitTestVisible="False"/>
   <Border x:Name="MnMarco" Margin="10" CornerRadius="18" BorderThickness="2.5">
     <Border.Background>
       <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
@@ -450,8 +600,8 @@ function Global:Aplicar-MarcoNeon {
         <Ellipse x:Name="MnLuzB" Width="520" Height="520" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-160,-180">
           <Ellipse.Fill>
             <RadialGradientBrush>
-              <GradientStop Color="#3300FF9C" Offset="0"/>
-              <GradientStop Color="#0000FF9C" Offset="1"/>
+              <GradientStop Color="#33DDEEFF" Offset="0"/>
+              <GradientStop Color="#00DDEEFF" Offset="1"/>
             </RadialGradientBrush>
           </Ellipse.Fill>
           <Ellipse.RenderTransform><TranslateTransform x:Name="MnMoverB"/></Ellipse.RenderTransform>
@@ -472,11 +622,21 @@ function Global:Aplicar-MarcoNeon {
           <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
         <Border Grid.Row="0" Margin="10,0,10,0" BorderThickness="0,0,0,1" BorderBrush="#2200E5FF">
-          <Grid>
+          <Grid ClipToBounds="True">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
+            <Rectangle Grid.ColumnSpan="2" Height="2" Width="220" HorizontalAlignment="Left" VerticalAlignment="Bottom" IsHitTestVisible="False">
+              <Rectangle.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                  <GradientStop Color="#00FFFFFF" Offset="0"/>
+                  <GradientStop Color="#FFFFFFFF" Offset="0.5"/>
+                  <GradientStop Color="#00FFFFFF" Offset="1"/>
+                </LinearGradientBrush>
+              </Rectangle.Fill>
+              <Rectangle.RenderTransform><TranslateTransform x:Name="MnMoverBrillo" X="-240"/></Rectangle.RenderTransform>
+            </Rectangle>
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="4,0,0,0">
               <Ellipse x:Name="MnPunto" Width="9" Height="9" Margin="0,0,9,0" Fill="#FF00E5FF" Opacity="0.9"/>
               <TextBlock x:Name="MnTitulo" Text="$textoTitulo" FontSize="13" FontWeight="Bold" VerticalAlignment="Center"/>
@@ -507,11 +667,37 @@ function Global:Aplicar-MarcoNeon {
         $aurora = $marco.FindName("MnAurora")
         $punto  = $marco.FindName("MnPunto")
         $mA = $marco.FindName("MnMoverA"); $mB = $marco.FindName("MnMoverB"); $mC = $marco.FindName("MnMoverC")
+        $mBrillo = $marco.FindName("MnMoverBrillo")
         if (-not ($borde -and $zona -and $titulo -and $btnCerrar -and $aurora -and $mA -and $mB -and $mC)) { throw "Faltan elementos del marco" }
 
         # El borde y el titulo usan el pincel neon compartido (su giro lo anima Iniciar-EfectosNeon)
         $borde.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, "NeonBrush")
         $titulo.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, "NeonBrush")
+
+        # Particulas: puntitos de luz que suben lentamente por detras del contenido
+        $particulas = @()
+        try {
+            $lienzo = New-Object System.Windows.Controls.Canvas
+            $lienzo.IsHitTestVisible = $false
+            $conversor = New-Object System.Windows.Media.BrushConverter
+            $coloresPunto = @('#FFFFFFFF', '#FF9CD0FF', '#FFBFE3FF', '#FF4FA8FF')
+            for ($k = 0; $k -lt 18; $k++) {
+                $tamPunto = Get-Random -Minimum 2 -Maximum 6
+                $elipse = New-Object System.Windows.Shapes.Ellipse
+                $elipse.Width = $tamPunto
+                $elipse.Height = $tamPunto
+                $elipse.Fill = $conversor.ConvertFromString($coloresPunto[$k % 4])
+                $elipse.Opacity = 0
+                $elipse.IsHitTestVisible = $false
+                $mueve = New-Object System.Windows.Media.TranslateTransform
+                $elipse.RenderTransform = $mueve
+                [System.Windows.Controls.Canvas]::SetLeft($elipse, [double](Get-Random -Minimum 0 -Maximum 1100))
+                [System.Windows.Controls.Canvas]::SetTop($elipse, [double](Get-Random -Minimum 250 -Maximum 900))
+                [void]$lienzo.Children.Add($elipse)
+                $particulas += ,@{ Tr = $mueve; El = $elipse; Dur = (Get-Random -Minimum 6 -Maximum 13); Alt = (Get-Random -Minimum 160 -Maximum 380) }
+            }
+            [void]$aurora.Children.Add($lienzo)
+        } catch { $particulas = @() }
 
         # Aurora: tres luces suaves que flotan lentamente (animaciones independientes del hilo de la interfaz)
         $estadoFx = @{ Activo = $true }
@@ -546,6 +732,28 @@ function Global:Aplicar-MarcoNeon {
                 $latido.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
                 $punto.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $latido)
             }
+            # Brillo que recorre la barra de titulo
+            if ($mBrillo) {
+                $barrido = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $barrido.From = -240; $barrido.To = 1500
+                $barrido.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(3400))
+                $barrido.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+                $mBrillo.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $barrido)
+            }
+            # Particulas que suben y se desvanecen
+            foreach ($pt in $particulas) {
+                $sube = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $sube.From = 0; $sube.To = -$pt.Alt
+                $sube.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds($pt.Dur))
+                $sube.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+                $pt.Tr.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $sube)
+                $brilla = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $brilla.From = 0; $brilla.To = 0.85
+                $brilla.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds($pt.Dur / 2.0))
+                $brilla.AutoReverse = $true
+                $brilla.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+                $pt.El.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $brilla)
+            }
             # Respiracion del halo exterior
             foreach ($h in @($halo1, $halo2, $halo3)) {
                 if ($h) {
@@ -564,6 +772,12 @@ function Global:Aplicar-MarcoNeon {
                 $m.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null)
             }
             if ($punto) { $punto.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null) }
+            if ($mBrillo) { $mBrillo.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null) }
+            foreach ($pt in $particulas) {
+                $pt.Tr.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null)
+                $pt.El.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+                $pt.El.Opacity = 0
+            }
             foreach ($h in @($halo1, $halo2, $halo3)) { if ($h) { $h.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null) } }
         }.GetNewClosure()
         $tierBajo = $false
@@ -604,6 +818,32 @@ function Global:Aplicar-MarcoNeon {
         }
         if ($Ventana.MinHeight -gt 0) { $Ventana.MinHeight = $Ventana.MinHeight + 64 }
         if ($Ventana.MinWidth -gt 0)  { $Ventana.MinWidth  = $Ventana.MinWidth + 24 }
+
+        # Entrada animada: la ventana aparece con un fundido y un pequeño "rebote" de escala
+        try {
+            $escalaEntrada = New-Object System.Windows.Media.ScaleTransform(0.94, 0.94)
+            $borde.RenderTransformOrigin = [System.Windows.Point]::new(0.5, 0.5)
+            $borde.RenderTransform = $escalaEntrada
+            $marco.Opacity = 0
+            $Ventana.Add_Loaded({
+                try {
+                    $rebote = New-Object System.Windows.Media.Animation.BackEase
+                    $rebote.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                    $rebote.Amplitude = 0.45
+                    foreach ($eje in @([System.Windows.Media.ScaleTransform]::ScaleXProperty, [System.Windows.Media.ScaleTransform]::ScaleYProperty)) {
+                        $crece = New-Object System.Windows.Media.Animation.DoubleAnimation
+                        $crece.From = 0.94; $crece.To = 1
+                        $crece.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(520))
+                        $crece.EasingFunction = $rebote
+                        $escalaEntrada.BeginAnimation($eje, $crece)
+                    }
+                    $aparece = New-Object System.Windows.Media.Animation.DoubleAnimation
+                    $aparece.From = 0; $aparece.To = 1
+                    $aparece.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(380))
+                    $marco.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $aparece)
+                } catch { $marco.Opacity = 1 }
+            }.GetNewClosure())
+        } catch { $marco.Opacity = 1 }
 
         $btnCerrar.Add_Click({ try { $ventanaWpf.Close() } catch { } }.GetNewClosure())
         if ($btnMin) { $btnMin.Add_Click({ try { $ventanaWpf.WindowState = [System.Windows.WindowState]::Minimized } catch { } }.GetNewClosure()) }
@@ -4619,25 +4859,97 @@ function Ensure-AForgeAssemblies {
     }
 }
 
-function Show-PruebaCamara {
-    Write-DiagLog "=== CAMARA (vista previa en vivo propia) ==="
+# Carga los componentes de camara (AForge) y prepara el "receptor" de fotogramas.
+# CLAVE: AForge entrega cada fotograma en un hilo propio que NO es de PowerShell; un bloque
+# de PowerShell no puede ejecutarse alli ("no hay un Runspace disponible en este hilo"),
+# por eso antes el fotograma nunca llegaba a la pantalla. El receptor esta escrito en C#
+# (guarda el ultimo fotograma de forma segura) y un temporizador de la interfaz lo lee.
+$Script:ReceptorCamaraListo = $false
+function Initialize-ModuloCamara {
     if (-not $Script:AForgeDisponible) {
-        if (Ensure-AForgeAssemblies) {
-            try {
-                Add-Type -Path (Join-Path $Script:AForgeDir "AForge.dll")
-                Add-Type -Path (Join-Path $Script:AForgeDir "AForge.Video.dll")
-                Add-Type -Path (Join-Path $Script:AForgeDir "AForge.Video.DirectShow.dll")
-                $Script:AForgeDisponible = $true
-            } catch {
-                Write-DiagLog "No se pudieron cargar los componentes de camara: $($_.Exception.Message)"
-                return
-            }
-        } else {
-            Write-DiagLog "El modulo de camara no esta disponible (revisa el registro de actividad; se requiere conexion a internet la primera vez)."
-            return
+        if (-not (Ensure-AForgeAssemblies)) { return $false }
+        try {
+            Add-Type -Path (Join-Path $Script:AForgeDir "AForge.dll")
+            Add-Type -Path (Join-Path $Script:AForgeDir "AForge.Video.dll")
+            Add-Type -Path (Join-Path $Script:AForgeDir "AForge.Video.DirectShow.dll")
+            $Script:AForgeDisponible = $true
+        } catch {
+            Write-Log "No se pudieron cargar los componentes de camara: $($_.Exception.Message)" -Tipo ERROR
+            return $false
+        }
+    }
+    if (-not $Script:ReceptorCamaraListo) {
+        try {
+            $codigoReceptor = @"
+using System;
+using System.Drawing;
+using AForge.Video;
+public class DragonCamReceptor {
+    private readonly object cerrojo = new object();
+    private Bitmap ultimo;
+    private long total;
+    public string UltimoError;
+    public long TotalFotogramas { get { lock (cerrojo) { return total; } } }
+    public void Conectar(IVideoSource fuente) {
+        fuente.NewFrame += new NewFrameEventHandler(AlLlegarFotograma);
+        fuente.VideoSourceError += new VideoSourceErrorEventHandler(AlFallar);
+    }
+    private void AlLlegarFotograma(object remitente, NewFrameEventArgs e) {
+        Bitmap copia = null;
+        try { copia = (Bitmap)e.Frame.Clone(); } catch { return; }
+        lock (cerrojo) {
+            if (ultimo != null) { ultimo.Dispose(); }
+            ultimo = copia;
+            total++;
+        }
+    }
+    private void AlFallar(object remitente, VideoSourceErrorEventArgs e) { UltimoError = e.Description; }
+    public Bitmap Tomar() { lock (cerrojo) { Bitmap b = ultimo; ultimo = null; return b; } }
+    public void Liberar() { lock (cerrojo) { if (ultimo != null) { ultimo.Dispose(); ultimo = null; } } }
+}
+"@
+            Add-Type -TypeDefinition $codigoReceptor -ReferencedAssemblies @("System.Drawing", (Join-Path $Script:AForgeDir "AForge.Video.dll"), (Join-Path $Script:AForgeDir "AForge.dll")) -ErrorAction Stop
+            $Script:ReceptorCamaraListo = $true
+        } catch {
+            Write-Log "No se pudo preparar el receptor de la camara: $($_.Exception.Message)" -Tipo ERROR
+            return $false
         }
     }
     try { Ensure-TipoGdi } catch {}
+    return $true
+}
+
+# Devuelve $false si Windows tiene bloqueado el acceso a la camara para apps de escritorio
+# (Configuracion > Privacidad > Camara). Con eso bloqueado la camara "enciende" pero no llega imagen.
+function Test-PermisoCamaraWindows {
+    $claves = @(
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged',
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam'
+    )
+    foreach ($clave in $claves) {
+        try {
+            $valor = (Get-ItemProperty -Path $clave -Name Value -ErrorAction Stop).Value
+            if ("$valor" -eq 'Deny') { return $false }
+        } catch {}
+    }
+    return $true
+}
+
+$Script:MensajeSinImagenCamara = "No llega imagen de la camara. Revisa: 1) Configuracion de Windows > Privacidad y seguridad > Camara: activa 'Acceso a la camara' y 'Permitir que las aplicaciones de escritorio accedan a la camara'. 2) Que ninguna otra app (Teams, Zoom, navegador) este usando la camara. 3) Que la camara no tenga el obturador/tapa fisica cerrada o este desactivada con una tecla Fn."
+
+function Show-PruebaCamara {
+    Write-DiagLog "=== CAMARA (vista previa en vivo propia) ==="
+    if (-not (Initialize-ModuloCamara)) {
+        Write-DiagLog "El modulo de camara no esta disponible (se descarga la primera vez y requiere internet; revisa el registro de actividad)."
+        if (Show-Confirm "No se pudo preparar el modulo de camara propio (se descarga la primera vez y necesita internet).`n`n¿Quieres abrir la app Camara de Windows para probar la camara?" "Camara") {
+            try { Start-Process "microsoft.windows.camera:" } catch {}
+        }
+        return
+    }
+    if (-not (Test-PermisoCamaraWindows)) {
+        Write-DiagLog "AVISO: Windows tiene bloqueado el acceso a la camara para apps de escritorio (Configuracion > Privacidad > Camara)."
+    }
 
     try {
         $dispositivos = New-Object AForge.Video.DirectShow.FilterInfoCollection([AForge.Video.DirectShow.FilterCategory]::VideoInputDevice)
@@ -4659,8 +4971,12 @@ function Show-PruebaCamara {
     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
       <Button x:Name="BtnCerrarCamara" Content="Cerrar" Width="100"/>
     </StackPanel>
-    <Border BorderBrush="#232B3D" BorderThickness="1">
-      <Image x:Name="ImgCamara" Stretch="Uniform"/>
+    <Border BorderBrush="#232B3D" BorderThickness="1" Background="#070A10">
+      <Grid>
+        <Image x:Name="ImgCamara" Stretch="Uniform"/>
+        <TextBlock x:Name="TxtCamEstado" Text="Iniciando la camara..." Foreground="#66AEFF" TextWrapping="Wrap" TextAlignment="Center"
+                   HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="520" FontSize="14"/>
+      </Grid>
     </Border>
   </DockPanel>
 </Window>
@@ -4669,33 +4985,53 @@ function Show-PruebaCamara {
         $winCam = [Windows.Markup.XamlReader]::Load($readerCam)
         Iniciar-EfectosNeon -Ventana $winCam
         $imgCtrl = $winCam.FindName("ImgCamara")
+        $txtEstado = $winCam.FindName("TxtCamEstado")
 
+        $receptor = New-Object DragonCamReceptor
         $videoSource = New-Object AForge.Video.DirectShow.VideoCaptureDevice($dispositivos[0].MonikerString)
-        $videoSource.add_NewFrame({
-            param($sender, $eventArgs)
+        $receptor.Conectar($videoSource)
+        $mensajeSinImagen = $Script:MensajeSinImagenCamara
+        $est = @{ Inicio = (Get-Date); Frames = 0 }
+
+        # Temporizador de la interfaz (~30 por segundo): toma el ultimo fotograma guardado por el
+        # receptor y lo muestra. Todo esto corre en el hilo de la interfaz, donde PowerShell si funciona.
+        $temporizador = New-Object System.Windows.Threading.DispatcherTimer
+        $temporizador.Interval = [TimeSpan]::FromMilliseconds(33)
+        $temporizador.Add_Tick({
+            $bmp = $receptor.Tomar()
+            if (-not $bmp) {
+                if ($est.Frames -eq 0 -and ((Get-Date) - $est.Inicio).TotalSeconds -gt 6) {
+                    $detalleError = if ($receptor.UltimoError) { "`n`nError reportado: $($receptor.UltimoError)" } else { "" }
+                    $txtEstado.Text = $mensajeSinImagen + $detalleError
+                }
+                return
+            }
             try {
-                $bitmap = $eventArgs.Frame.Clone()
-                $hbitmap = $bitmap.GetHbitmap()
-                $winCam.Dispatcher.Invoke([action]{
-                    try {
-                        $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHBitmap($hbitmap, [IntPtr]::Zero, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
-                        $src.Freeze()
-                        $imgCtrl.Source = $src
-                    } catch {}
-                })
-                try { [DragonToolGdi]::DeleteObject($hbitmap) | Out-Null } catch {}
-                $bitmap.Dispose()
-            } catch {}
+                $hbitmap = $bmp.GetHbitmap()
+                try {
+                    $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHBitmap($hbitmap, [IntPtr]::Zero, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+                    $src.Freeze()
+                    $imgCtrl.Source = $src
+                } finally {
+                    try { [DragonToolGdi]::DeleteObject($hbitmap) | Out-Null } catch {}
+                }
+                $est.Frames++
+                if ($txtEstado.Visibility -ne 'Collapsed') { $txtEstado.Visibility = 'Collapsed' }
+            } catch {} finally { $bmp.Dispose() }
         }.GetNewClosure())
+
         $videoSource.Start()
+        $temporizador.Start()
 
         $winCam.Add_Closed({
+            try { $temporizador.Stop() } catch {}
             try { $videoSource.SignalToStop(); $videoSource.WaitForStop() } catch {}
+            try { $receptor.Liberar() } catch {}
         }.GetNewClosure())
         $winCam.FindName("BtnCerrarCamara").Add_Click({ $winCam.Close() })
 
         $winCam.ShowDialog() | Out-Null
-        Write-DiagLog "Prueba de camara finalizada."
+        Write-DiagLog "Prueba de camara finalizada ($($est.Frames) fotogramas mostrados)."
     } catch {
         Write-DiagLog "No se pudo iniciar la prueba de camara: $($_.Exception.Message)"
     }
@@ -4704,6 +5040,8 @@ function Show-PruebaCamara {
 # --- Pestaña Modificacion: opcion Camara (vista en vivo embebida, con rotar/voltear) ---
 
 $Script:ModCamVideoSource = $null
+$Script:ModCamTemporizador = $null
+$Global:DragonCamMod = $null
 $Script:ModCamActiva = $false
 $Script:ModCamRotacion = 0
 $Script:ModCamFlipH = $false
@@ -4719,21 +5057,9 @@ $Script:ModCamDetalleBase = ""
 function Global:Cargar-ListaCamarasModificacion {
     $cmb = $window.FindName("CmbModCamaraDispositivo")
     if (-not $cmb) { return }
-    if (-not $Script:AForgeDisponible) {
-        if (Ensure-AForgeAssemblies) {
-            try {
-                Add-Type -Path (Join-Path $Script:AForgeDir "AForge.dll")
-                Add-Type -Path (Join-Path $Script:AForgeDir "AForge.Video.dll")
-                Add-Type -Path (Join-Path $Script:AForgeDir "AForge.Video.DirectShow.dll")
-                $Script:AForgeDisponible = $true
-            } catch {
-                Write-Log "No se pudieron cargar los componentes de camara: $($_.Exception.Message)" -Tipo ERROR
-                return
-            }
-        } else {
-            Write-Log "El modulo de camara no esta disponible (revisa el registro de actividad; se requiere conexion a internet la primera vez)." -Tipo ERROR
-            return
-        }
+    if (-not (Initialize-ModuloCamara)) {
+        Write-Log "El modulo de camara no esta disponible (se descarga la primera vez y requiere internet; revisa el registro de actividad)." -Tipo ERROR
+        return
     }
     try {
         $Script:ModCamDispositivos = New-Object AForge.Video.DirectShow.FilterInfoCollection([AForge.Video.DirectShow.FilterCategory]::VideoInputDevice)
@@ -4809,8 +5135,53 @@ function Global:Aplicar-TransformCamara {
     if ($Script:ModCamFlipV) { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipY) }
 }
 
+# Se ejecuta ~30 veces por segundo en el hilo de la interfaz mientras la camara de Modificacion
+# esta encendida: toma el ultimo fotograma que dejo el receptor (C#), le aplica rotar/voltear y lo muestra.
+function Global:Actualizar-FotogramaCamaraModificacion {
+    $cam = $Global:DragonCamMod
+    if (-not $cam -or -not $cam.Receptor) { return }
+    $bmp = $cam.Receptor.Tomar()
+    if (-not $bmp) {
+        if ($cam.Frames -eq 0 -and -not $cam.Avisado -and ((Get-Date) - $cam.Inicio).TotalSeconds -gt 6) {
+            $cam.Avisado = $true
+            $txtSinSenal = $window.FindName("TxtModCamaraSinSenal")
+            if ($txtSinSenal) {
+                $detalleError = if ($cam.Receptor.UltimoError) { "`n`nError reportado: $($cam.Receptor.UltimoError)" } else { "" }
+                $txtSinSenal.Text = $Script:MensajeSinImagenCamara + $detalleError
+                $txtSinSenal.MaxWidth = 420
+                $txtSinSenal.Visibility = 'Visible'
+            }
+        }
+        return
+    }
+    try {
+        Aplicar-TransformCamara -Bitmap $bmp
+        $esPrimerFotograma = ($Script:ModCamUltimoAncho -eq 0)
+        $Script:ModCamUltimoAncho = $bmp.Width
+        $Script:ModCamUltimoAlto = $bmp.Height
+        $hbitmap = $bmp.GetHbitmap()
+        try {
+            $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHBitmap($hbitmap, [IntPtr]::Zero, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+            $src.Freeze()
+            $cam.Img.Source = $src
+        } finally {
+            try { [DragonToolGdi]::DeleteObject($hbitmap) | Out-Null } catch {}
+        }
+        $cam.Frames++
+        if ($esPrimerFotograma) {
+            $txtSinSenal = $window.FindName("TxtModCamaraSinSenal")
+            if ($txtSinSenal) { $txtSinSenal.Visibility = 'Collapsed' }
+            Refrescar-DetallesCamaraModificacion
+        }
+    } catch {} finally { $bmp.Dispose() }
+}
+
 function Global:Iniciar-CamaraModificacion {
     if ($Script:ModCamActiva) { return }
+    if (-not (Initialize-ModuloCamara)) {
+        Show-Aviso "No se pudo preparar el modulo de camara. Se descarga la primera vez y necesita conexion a internet (revisa el registro de actividad)." "Camara"
+        return
+    }
     if (-not $Script:ModCamDispositivos -or $Script:ModCamDispositivos.Count -eq 0) {
         Cargar-ListaCamarasModificacion
     }
@@ -4818,7 +5189,9 @@ function Global:Iniciar-CamaraModificacion {
         Show-Aviso "No se detecto ninguna camara conectada." "Sin camara"
         return
     }
-    try { Ensure-TipoGdi } catch {}
+    if (-not (Test-PermisoCamaraWindows)) {
+        Write-Log "Windows tiene bloqueado el acceso a la camara para apps de escritorio (Configuracion > Privacidad > Camara)." -Tipo AVISO
+    }
 
     $cmb = $window.FindName("CmbModCamaraDispositivo")
     $indice = if ($cmb -and $cmb.SelectedIndex -ge 0) { $cmb.SelectedIndex } else { 0 }
@@ -4832,49 +5205,26 @@ function Global:Iniciar-CamaraModificacion {
         $Script:ModCamDetalleBase = Obtener-DetallesCamara -Nombre $dispositivoSeleccionado.Name
         Refrescar-DetallesCamaraModificacion
 
+        $receptor = New-Object DragonCamReceptor
         $videoSource = New-Object AForge.Video.DirectShow.VideoCaptureDevice($dispositivoSeleccionado.MonikerString)
-        $videoSource.add_NewFrame({
-            param($sender, $eventArgs)
-            try {
-                # IMPORTANTE: este callback se ejecuta en el hilo de captura
-                # propio de AForge (no en el hilo de la interfaz), y el motor
-                # de PowerShell 5.1 no admite invocar funciones de PowerShell
-                # (como Aplicar-TransformCamara o Refrescar-DetallesCamaraModificacion)
-                # fuera de su propio hilo. Antes esas funciones se llamaban
-                # aqui mismo, en el hilo de captura, y la llamada fallaba
-                # silenciosamente en cada fotograma (quedaba atrapada por el
-                # try/catch vacio), asi que la imagen nunca se actualizaba
-                # aunque la camara si se hubiera iniciado correctamente. Por
-                # eso ahora SOLO se clona el fotograma aqui (una operacion
-                # .NET pura seguro entre hilos) y todo lo demas - transformar,
-                # convertir a imagen y mostrar - se mueve dentro del
-                # Dispatcher.Invoke, que ejecuta ese codigo en el hilo
-                # correcto de la interfaz.
-                $bitmap = $eventArgs.Frame.Clone()
-                $imgCtrl.Dispatcher.Invoke([action]{
-                    try {
-                        Aplicar-TransformCamara -Bitmap $bitmap
-                        $anchoNuevo = $bitmap.Width
-                        $altoNuevo = $bitmap.Height
-                        $esPrimerFotograma = ($Script:ModCamUltimoAncho -eq 0)
-                        $Script:ModCamUltimoAncho = $anchoNuevo
-                        $Script:ModCamUltimoAlto = $altoNuevo
-                        $hbitmap = $bitmap.GetHbitmap()
-                        $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHBitmap($hbitmap, [IntPtr]::Zero, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
-                        $src.Freeze()
-                        $imgCtrl.Source = $src
-                        if ($esPrimerFotograma) { Refrescar-DetallesCamaraModificacion }
-                        try { [DragonToolGdi]::DeleteObject($hbitmap) | Out-Null } catch {}
-                    } catch {}
-                })
-                $bitmap.Dispose()
-            } catch {}
-        }.GetNewClosure())
+        $receptor.Conectar($videoSource)
+
+        # Estado compartido (global: lo lee la funcion que dibuja cada fotograma)
+        $Global:DragonCamMod = @{ Receptor = $receptor; Img = $imgCtrl; Frames = 0; Inicio = (Get-Date); Avisado = $false }
+
+        $temporizador = New-Object System.Windows.Threading.DispatcherTimer
+        $temporizador.Interval = [TimeSpan]::FromMilliseconds(33)
+        $temporizador.Add_Tick({ Actualizar-FotogramaCamaraModificacion })
         $videoSource.Start()
+        $temporizador.Start()
 
         $Script:ModCamVideoSource = $videoSource
+        $Script:ModCamTemporizador = $temporizador
         $Script:ModCamActiva = $true
-        if ($txtSinSenal) { $txtSinSenal.Visibility = 'Collapsed' }
+        if ($txtSinSenal) {
+            $txtSinSenal.Text = "Iniciando la camara..."
+            $txtSinSenal.Visibility = 'Visible'
+        }
         Write-Log "Camara de modificacion iniciada: $($dispositivoSeleccionado.Name)" -Tipo OK
     } catch {
         Write-Log "No se pudo iniciar la camara: $($_.Exception.Message)" -Tipo ERROR
@@ -4883,10 +5233,18 @@ function Global:Iniciar-CamaraModificacion {
 }
 
 function Global:Detener-CamaraModificacion {
+    if ($Script:ModCamTemporizador) {
+        try { $Script:ModCamTemporizador.Stop() } catch {}
+        $Script:ModCamTemporizador = $null
+    }
     if ($Script:ModCamVideoSource) {
         try { $Script:ModCamVideoSource.SignalToStop(); $Script:ModCamVideoSource.WaitForStop() } catch {}
         $Script:ModCamVideoSource = $null
     }
+    if ($Global:DragonCamMod -and $Global:DragonCamMod.Receptor) {
+        try { $Global:DragonCamMod.Receptor.Liberar() } catch {}
+    }
+    $Global:DragonCamMod = $null
     $Script:ModCamActiva = $false
     $Script:ModCamUltimoAncho = 0
     $Script:ModCamUltimoAlto = 0
@@ -4895,7 +5253,11 @@ function Global:Detener-CamaraModificacion {
     $txtSinSenal = $window.FindName("TxtModCamaraSinSenal")
     $txtDetalles = $window.FindName("TxtModCamaraDetalles")
     if ($imgCtrl) { $imgCtrl.Source = $null }
-    if ($txtSinSenal) { $txtSinSenal.Visibility = 'Visible' }
+    if ($txtSinSenal) {
+        $txtSinSenal.Text = "Camara detenida. Pulsa 'Iniciar camara'."
+        $txtSinSenal.MaxWidth = 260
+        $txtSinSenal.Visibility = 'Visible'
+    }
     if ($txtDetalles) { $txtDetalles.Text = "Selecciona 'Iniciar camara' para ver aqui sus detalles (nombre, controlador, resolucion, orientacion actual)." }
     Write-Log "Camara de modificacion detenida." -Tipo INFO
 }
@@ -7893,9 +8255,9 @@ function Show-VentanaNavegador {
         <TranslateTransform X="0" Y="0"/>
       </LinearGradientBrush.RelativeTransform>
       <GradientStop Color="#1F6BFF" Offset="0"/>
-      <GradientStop Color="#00C8FF" Offset="0.25"/>
-      <GradientStop Color="#00FF9C" Offset="0.5"/>
-      <GradientStop Color="#00C8FF" Offset="0.75"/>
+      <GradientStop Color="#4FA8FF" Offset="0.25"/>
+      <GradientStop Color="#FFFFFF" Offset="0.5"/>
+      <GradientStop Color="#4FA8FF" Offset="0.75"/>
       <GradientStop Color="#1F6BFF" Offset="1"/>
     </LinearGradientBrush>
     <Style TargetType="Button">
@@ -8439,6 +8801,279 @@ $($Global:RecursosGridXaml)
     $win.ShowDialog() | Out-Null
 }
 
+# ---------------------------------------------------------------------------
+#  QUITAR APPS DE WINDOWS (apps de la tienda: AppX/MSIX), incluida Microsoft Store
+# ---------------------------------------------------------------------------
+# Tabla de apps conocidas: patron del nombre interno -> nombre amigable, nivel y nota.
+# Niveles: Recomendada (publicidad/relleno), Opcional (utiles segun el gusto),
+#          Precaucion (algo puede dejar de funcionar), Importante (Windows o este programa la usan).
+$Script:CatalogoAppsWindows = @(
+    @{ P='^Microsoft\.WindowsStore$';                 N='Microsoft Store';                     V='Precaucion'; T='Sin la Store no podras instalar ni actualizar apps de la tienda. Se puede reinstalar con: wsreset -i' },
+    @{ P='^Microsoft\.StorePurchaseApp$';             N='Compras de Microsoft Store';          V='Precaucion'; T='Componente de pagos de la Store.' },
+    @{ P='^Microsoft\.DesktopAppInstaller$';          N='Instalador de aplicaciones (winget)'; V='Importante'; T='Este programa usa winget para instalar apps: quitarlo rompe esa funcion.' },
+    @{ P='^Microsoft\.SecHealthUI$';                  N='Seguridad de Windows';                V='Importante'; T='Interfaz de Windows Defender.' },
+    @{ P='^Microsoft\.Windows\.(ShellExperienceHost|StartMenuExperienceHost|Search|CloudExperienceHost)$|^MicrosoftWindows\.Client\.'; N='Componente del sistema'; V='Importante'; T='Parte de la interfaz de Windows.' },
+    @{ P='^Microsoft\.(WindowsTerminal|WindowsTerminalPreview)$'; N='Terminal de Windows';  V='Precaucion'; T='Terminal moderna de Windows 11.' },
+    @{ P='^Microsoft\.(HEIFImageExtension|HEVCVideoExtension|VP9VideoExtensions|WebpImageExtension|WebMediaExtensions|RawImageExtension|AV1VideoExtension|MPEG2VideoExtension)'; N='Extension de codec de imagen/video'; V='Precaucion'; T='Sin ella algunos formatos de foto o video no se abren.' },
+    @{ P='^Microsoft\.(Xbox\.TCUI|XboxIdentityProvider|XboxGameCallableUI)$'; N='Servicios de Xbox'; V='Precaucion'; T='Necesarios para iniciar sesion en juegos de Xbox / Game Pass.' },
+    @{ P='^Microsoft\.(GamingApp|XboxApp)$';          N='Xbox';                                V='Opcional';   T='App de Xbox / Game Pass.' },
+    @{ P='^Microsoft\.XboxGamingOverlay$|^Microsoft\.XboxGameOverlay$|^Microsoft\.XboxSpeechToTextOverlay$'; N='Barra de juegos de Xbox'; V='Opcional'; T='Superposicion de juegos (Win+G).' },
+    @{ P='^Microsoft\.549981C3F5F10$';                N='Cortana';                             V='Recomendada'; T='Asistente en desuso.' },
+    @{ P='^Microsoft\.BingNews$';                     N='Noticias (MSN)';                      V='Recomendada'; T='' },
+    @{ P='^Microsoft\.BingWeather$';                  N='El Tiempo (MSN)';                     V='Recomendada'; T='' },
+    @{ P='^Microsoft\.Bing(Finance|Sports|Search|Translator|Travel|Food|Health)';  N='Aplicacion de Bing'; V='Recomendada'; T='' },
+    @{ P='^Microsoft\.GetHelp$';                      N='Obtener ayuda';                       V='Recomendada'; T='' },
+    @{ P='^Microsoft\.Getstarted$';                   N='Sugerencias / Tips';                  V='Recomendada'; T='' },
+    @{ P='^Microsoft\.Microsoft3DViewer$';            N='Visor 3D';                            V='Recomendada'; T='' },
+    @{ P='^Microsoft\.MixedReality\.Portal$';         N='Portal de realidad mixta';            V='Recomendada'; T='' },
+    @{ P='^Microsoft\.MicrosoftOfficeHub$';           N='Microsoft 365 (Office)';              V='Recomendada'; T='Acceso directo/publicidad de Office.' },
+    @{ P='^Microsoft\.MicrosoftSolitaireCollection$'; N='Solitario';                           V='Recomendada'; T='' },
+    @{ P='^Microsoft\.Office\.OneNote$';              N='OneNote';                             V='Opcional';   T='' },
+    @{ P='^Microsoft\.People$';                       N='Contactos';                           V='Recomendada'; T='' },
+    @{ P='^Microsoft\.SkypeApp$';                     N='Skype';                               V='Recomendada'; T='' },
+    @{ P='^Microsoft\.Wallet$';                       N='Microsoft Pay / Cartera';             V='Recomendada'; T='' },
+    @{ P='^Microsoft\.WindowsFeedbackHub$';           N='Centro de opiniones';                 V='Recomendada'; T='' },
+    @{ P='^Microsoft\.WindowsMaps$';                  N='Mapas';                               V='Opcional';   T='' },
+    @{ P='^Microsoft\.ZuneMusic$';                    N='Reproductor multimedia / Groove';     V='Opcional';   T='' },
+    @{ P='^Microsoft\.ZuneVideo$';                    N='Peliculas y TV';                      V='Opcional';   T='' },
+    @{ P='^Microsoft\.YourPhone$|^MicrosoftWindows\.CrossDevice$'; N='Vincular con el movil';  V='Recomendada'; T='' },
+    @{ P='^microsoft\.windowscommunicationsapps$';    N='Correo y Calendario';                 V='Opcional';   T='' },
+    @{ P='^Microsoft\.Todos$';                        N='Microsoft To Do';                     V='Recomendada'; T='' },
+    @{ P='^Microsoft\.PowerAutomateDesktop$';         N='Power Automate';                      V='Recomendada'; T='' },
+    @{ P='^Microsoft\.OutlookForWindows$';            N='Outlook (nuevo)';                     V='Opcional';   T='' },
+    @{ P='^Microsoft\.MicrosoftStickyNotes$';         N='Notas rapidas';                       V='Opcional';   T='' },
+    @{ P='^Microsoft\.MSPaint$';                      N='Paint 3D';                            V='Recomendada'; T='' },
+    @{ P='^Microsoft\.Paint$';                        N='Paint';                               V='Opcional';   T='' },
+    @{ P='^Microsoft\.Windows\.Photos$';              N='Fotos';                               V='Opcional';   T='Visor de imagenes por defecto.' },
+    @{ P='^Microsoft\.WindowsCalculator$';            N='Calculadora';                         V='Opcional';   T='' },
+    @{ P='^Microsoft\.WindowsAlarms$';                N='Alarmas y reloj';                     V='Opcional';   T='' },
+    @{ P='^Microsoft\.WindowsCamera$';                N='Camara';                              V='Opcional';   T='' },
+    @{ P='^Microsoft\.WindowsSoundRecorder$';         N='Grabadora de sonidos';                V='Opcional';   T='' },
+    @{ P='^Microsoft\.ScreenSketch$';                 N='Recortes (Snipping Tool)';            V='Opcional';   T='' },
+    @{ P='^Microsoft\.WindowsNotepad$';               N='Bloc de notas';                       V='Opcional';   T='' },
+    @{ P='^Microsoft\.Windows\.DevHome$';             N='Dev Home';                            V='Recomendada'; T='' },
+    @{ P='^MicrosoftCorporationII\.QuickAssist$';     N='Asistencia rapida';                   V='Opcional';   T='' },
+    @{ P='^MicrosoftCorporationII\.MicrosoftFamily$'; N='Microsoft Family';                    V='Recomendada'; T='' },
+    @{ P='^MicrosoftTeams$|^MSTeams$';                N='Microsoft Teams (personal)';          V='Recomendada'; T='' },
+    @{ P='^Clipchamp\.Clipchamp$';                    N='Clipchamp (editor de video)';         V='Recomendada'; T='' },
+    @{ P='^Microsoft\.MicrosoftEdge';                 N='Microsoft Edge (componente)';         V='Precaucion'; T='' },
+    @{ P='^Microsoft\.Copilot$|^Microsoft\.Windows\.Ai\.Copilot';  N='Copilot';                V='Recomendada'; T='' },
+    @{ P='^Microsoft\.LinkedIn$|LinkedIn';            N='LinkedIn';                            V='Recomendada'; T='' }
+)
+
+# Apps de terceros que suelen venir con drivers de la marca (audio, graficos...): mejor no quitarlas a ciegas.
+$Script:PatronAppsDeMarca = 'Realtek|NVIDIA|Intel|AMD|Dolby|Waves|Nahimic|DTS|Dell|HP|Lenovo|ASUS|Acer|MSI|Alienware|Razer|Logitech|Samsung|Toshiba|Huawei|Honor|Xiaomi|Qualcomm|MediaTek|Broadcom|Synaptics|Elan|Goodix|Sonic|Bang'
+
+function Get-ClasificacionAppWindows {
+    param([string]$Nombre, [string]$Editor)
+    foreach ($regla in $Script:CatalogoAppsWindows) {
+        if ($Nombre -match $regla.P) { return @{ Nombre = $regla.N; Nivel = $regla.V; Nota = $regla.T } }
+    }
+    $amigable = ($Nombre -replace '^(Microsoft|MicrosoftCorporationII|MicrosoftWindows|Windows)\.', '' -replace '^[A-F0-9]{8,}\.', '')
+    if ($Nombre -match '^(Microsoft|MicrosoftCorporationII|MicrosoftWindows|Windows)\.|^microsoft\.') {
+        return @{ Nombre = $amigable; Nivel = 'Opcional'; Nota = 'App de Microsoft.' }
+    }
+    if ($Nombre -match $Script:PatronAppsDeMarca -or $Editor -match $Script:PatronAppsDeMarca) {
+        return @{ Nombre = $amigable; Nivel = 'Precaucion'; Nota = 'App de la marca del equipo (puede controlar audio, pantalla o drivers).' }
+    }
+    return @{ Nombre = $amigable; Nivel = 'Recomendada'; Nota = 'App de terceros preinstalada o descargada de la tienda.' }
+}
+
+# Lista las apps de Windows que SI se pueden quitar (sin componentes del sistema ni librerias).
+function Get-AppsWindows {
+    $paquetes = @()
+    try { $paquetes = @(Get-AppxPackage -AllUsers -ErrorAction Stop) }
+    catch { try { $paquetes = @(Get-AppxPackage -ErrorAction Stop) } catch { $paquetes = @() } }
+
+    $utiles = @($paquetes | Where-Object {
+        -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.NonRemovable -ne $true -and "$($_.SignatureKind)" -ne 'System'
+    })
+    $resultado = New-Object System.Collections.Generic.List[object]
+    foreach ($grupo in ($utiles | Group-Object Name)) {
+        $primero = $grupo.Group | Select-Object -First 1
+        $editor = "$($primero.Publisher)" -replace '^CN=([^,]+).*$', '$1'
+        $clas = Get-ClasificacionAppWindows -Nombre $grupo.Name -Editor $editor
+        $iconoNivel = switch ($clas.Nivel) { 'Recomendada' { '🟢 Recomendada' } 'Opcional' { '🟡 Opcional' } 'Precaucion' { '🟠 Precaucion' } default { '🔴 Importante' } }
+        $resultado.Add([PSCustomObject]@{
+            Nombre      = $clas.Nombre
+            Nivel       = $iconoNivel
+            NivelClave  = $clas.Nivel
+            Nota        = $clas.Nota
+            Version     = "$($primero.Version)"
+            Editor      = $editor
+            NombreAppx  = $grupo.Name
+            Paquetes    = @($grupo.Group | ForEach-Object { $_.PackageFullName })
+        })
+    }
+    return @($resultado | Sort-Object @{ Expression = { switch ($_.NivelClave) { 'Recomendada' { 0 } 'Opcional' { 1 } 'Precaucion' { 2 } default { 3 } } } }, Nombre)
+}
+
+# Quita las apps elegidas (con barra de progreso). Devuelve las quitadas y las que fallaron.
+function Remove-AppsWindowsSeleccionadas {
+    param($Items, [bool]$QuitarPrecargadas = $true)
+    $quitadas = New-Object System.Collections.Generic.List[object]
+    $fallidas = New-Object System.Collections.Generic.List[string]
+    $prog = New-VentanaProgreso -Titulo "Quitando apps de Windows" -PermitirDetener
+    $total = @($Items).Count
+    $i = 0
+    foreach ($item in $Items) {
+        $i++
+        if ($prog.Tag -eq $true) { Write-Log "Quitar apps de Windows: detenido por el usuario." -Tipo AVISO; break }
+        $pct = [math]::Round((($i - 1) / [math]::Max($total, 1)) * 100)
+        Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -Estado "Quitando $($item.Nombre) ($i de $total)..." -LogLinea "Quitando $($item.Nombre) [$($item.NombreAppx)]..."
+        $huboError = $false
+        foreach ($completo in $item.Paquetes) {
+            try {
+                Remove-AppxPackage -Package $completo -AllUsers -ErrorAction Stop
+            } catch {
+                try { Remove-AppxPackage -Package $completo -ErrorAction Stop }
+                catch {
+                    $huboError = $true
+                    Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "  No se pudo quitar $completo : $($_.Exception.Message)"
+                }
+            }
+        }
+        if ($QuitarPrecargadas -and -not $huboError) {
+            try {
+                Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { $_.DisplayName -eq $item.NombreAppx } |
+                    ForEach-Object { Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction SilentlyContinue | Out-Null }
+            } catch {}
+        }
+        if ($huboError) { $fallidas.Add($item.Nombre) | Out-Null }
+        else {
+            $quitadas.Add($item) | Out-Null
+            Update-VentanaProgreso -Ventana $prog -Porcentaje ([math]::Round(($i / [math]::Max($total, 1)) * 100)) -LogLinea "  $($item.Nombre) quitada."
+        }
+    }
+    Close-VentanaProgreso -Ventana $prog -MensajeFinal "$($quitadas.Count) de $total app(s) quitada(s)."
+    # Registro de lo quitado, por si quieres volver a instalar alguna
+    $rutaRegistro = $null
+    if ($quitadas.Count -gt 0) {
+        try {
+            $carpeta = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'DragonTool_AppsQuitadas'
+            if (-not (Test-Path $carpeta)) { New-Item -ItemType Directory -Path $carpeta -Force | Out-Null }
+            $rutaRegistro = Join-Path $carpeta ("AppsQuitadas_{0}.txt" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+            $lineas = @("Apps de Windows quitadas con The Dragon Tool - $(Get-Date)", "Para reinstalar una: Microsoft Store (buscala por nombre) o: winget install `"<nombre>`"", "")
+            foreach ($q in $quitadas) { $lineas += "$($q.Nombre)  [$($q.NombreAppx)]  v$($q.Version)" }
+            $lineas | Set-Content -Path $rutaRegistro -Encoding UTF8
+        } catch { $rutaRegistro = $null }
+    }
+    return @{ Quitadas = $quitadas; Fallidas = $fallidas; Registro = $rutaRegistro }
+}
+
+function Show-VentanaAppsWindows {
+    if (-not (Requiere-Admin)) { return }
+    [xml]$xamlApps = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Quitar apps de Windows - The Dragon Tool" Height="680" Width="1080"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)
+$($Global:RecursosGridXaml)
+  </Window.Resources>
+  <DockPanel Margin="14">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+    <TextBlock DockPanel.Dock="Top" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,6"
+               Text="Marca las apps que quieras quitar (Ctrl o Mayus + clic para elegir varias). 🟢 Recomendada = relleno o publicidad · 🟡 Opcional = util segun tu gusto · 🟠 Precaucion = algo puede dejar de funcionar (incluye Microsoft Store) · 🔴 Importante = Windows o este programa la usan."/>
+    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+      <TextBlock Text="🔍" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="14"/>
+      <TextBox x:Name="TxtAppsBuscar" MaxWidth="460" HorizontalAlignment="Left"/>
+    </DockPanel>
+    <TextBlock x:Name="TxtAppsResumen" DockPanel.Dock="Top" Foreground="#66AEFF" FontWeight="Bold" Margin="0,0,0,8" Text="Cargando apps instaladas (puede tardar unos segundos)..."/>
+    <CheckBox x:Name="ChkAppsPrecargadas" DockPanel.Dock="Bottom" Foreground="White" Margin="0,8,0,0" IsChecked="True"
+              Content="Quitar tambien del perfil base de Windows (para que no vuelvan en usuarios nuevos ni tras actualizar)"/>
+    <WrapPanel DockPanel.Dock="Bottom" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="BtnAppsRecomendadas" Content="Seleccionar recomendadas" Width="210" Margin="0,0,8,0"/>
+      <Button x:Name="BtnAppsTodo" Content="Seleccionar todo" Width="150" Margin="0,0,8,0"/>
+      <Button x:Name="BtnAppsNinguno" Content="Quitar seleccion" Width="150" Margin="0,0,8,0"/>
+      <Button x:Name="BtnAppsQuitar" Content="🗑️ Quitar seleccionadas" Width="220" Margin="0,0,8,0" FontWeight="Bold"/>
+      <Button x:Name="BtnAppsCerrar" Content="Cerrar" Width="100"/>
+    </WrapPanel>
+    <DataGrid x:Name="GridApps" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Extended" SelectionUnit="FullRow"
+              Background="#151B27" RowBackground="#151B27" AlternatingRowBackground="#1C2635" Foreground="White"
+              BorderBrush="#232B3D" HorizontalGridLinesBrush="#232B3D" VerticalGridLinesBrush="#232B3D" RowHeaderWidth="0"
+              CanUserAddRows="False" HeadersVisibility="Column">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="Aplicacion" Binding="{Binding Nombre}" Width="2*"/>
+        <DataGridTextColumn Header="Nivel" Binding="{Binding Nivel}" Width="140"/>
+        <DataGridTextColumn Header="Nota" Binding="{Binding Nota}" Width="3*"/>
+        <DataGridTextColumn Header="Version" Binding="{Binding Version}" Width="120"/>
+        <DataGridTextColumn Header="Editor" Binding="{Binding Editor}" Width="1.3*"/>
+      </DataGrid.Columns>
+    </DataGrid>
+  </DockPanel>
+</Window>
+"@
+    $readerApps = New-Object System.Xml.XmlNodeReader $xamlApps
+    $win = [Windows.Markup.XamlReader]::Load($readerApps)
+    Iniciar-EfectosNeon -Ventana $win
+    $grid = $win.FindName("GridApps")
+    $txtResumen = $win.FindName("TxtAppsResumen")
+    $txtBuscar = $win.FindName("TxtAppsBuscar")
+    $chkPre = $win.FindName("ChkAppsPrecargadas")
+    $est = @{ Todas = @(); Cargado = $false }
+
+    $mostrar = {
+        $texto = $txtBuscar.Text
+        $vista = @($est.Todas)
+        if (-not [string]::IsNullOrWhiteSpace($texto)) {
+            $patron = [regex]::Escape($texto.Trim())
+            $vista = @($vista | Where-Object { $_.Nombre -match $patron -or $_.NombreAppx -match $patron -or $_.Editor -match $patron })
+        }
+        $grid.ItemsSource = $vista
+        $rec = @($est.Todas | Where-Object { $_.NivelClave -eq 'Recomendada' }).Count
+        $txtResumen.Text = "Apps encontradas: $(@($est.Todas).Count)   |   Recomendadas para quitar: $rec   |   Mostrando: $($vista.Count)"
+    }
+    $cargar = {
+        $txtResumen.Text = "Cargando apps instaladas (puede tardar unos segundos)..."
+        Wait-UI -Milisegundos 1
+        $est.Todas = @(Get-AppsWindows)
+        $est.Cargado = $true
+        & $mostrar
+    }
+    $win.Add_ContentRendered({ if (-not $est.Cargado) { & $cargar } })
+    $txtBuscar.Add_TextChanged({ if ($est.Cargado) { & $mostrar } })
+    $win.FindName("BtnAppsTodo").Add_Click({ $grid.SelectAll() })
+    $win.FindName("BtnAppsNinguno").Add_Click({ $grid.UnselectAll() })
+    $win.FindName("BtnAppsRecomendadas").Add_Click({
+        $grid.UnselectAll()
+        foreach ($elemento in @($grid.ItemsSource)) {
+            if ($elemento.NivelClave -eq 'Recomendada') { [void]$grid.SelectedItems.Add($elemento) }
+        }
+    })
+    $win.FindName("BtnAppsCerrar").Add_Click({ $win.Close() })
+    $win.FindName("BtnAppsQuitar").Add_Click({
+        $seleccion = @($grid.SelectedItems)
+        if ($seleccion.Count -eq 0) {
+            Show-Aviso "Selecciona primero una o mas apps de la lista (Ctrl o Mayus + clic para elegir varias)." "Sin seleccion"
+            return
+        }
+        $mensaje = "Se van a quitar $($seleccion.Count) app(s):`n - " + (($seleccion | Select-Object -First 15 | ForEach-Object { $_.Nombre }) -join "`n - ")
+        if ($seleccion.Count -gt 15) { $mensaje += "`n - ... y $($seleccion.Count - 15) mas" }
+        $tieneStore = @($seleccion | Where-Object { $_.NombreAppx -match '^Microsoft\.(WindowsStore|StorePurchaseApp)$' }).Count -gt 0
+        $tieneImportante = @($seleccion | Where-Object { $_.NivelClave -eq 'Importante' }).Count -gt 0
+        $tienePrecaucion = @($seleccion | Where-Object { $_.NivelClave -eq 'Precaucion' }).Count -gt 0
+        if ($tieneStore) { $mensaje += "`n`nIncluye Microsoft Store: sin ella no podras instalar ni actualizar apps de la tienda. Para recuperarla: wsreset -i (o reinstalar desde Configuracion > Aplicaciones)." }
+        if ($tieneImportante) { $mensaje += "`n`nATENCION: hay apps marcadas como IMPORTANTE (Windows o este programa las usan). Quitarlas puede romper funciones del sistema." }
+        elseif ($tienePrecaucion) { $mensaje += "`n`nHay apps marcadas con PRECAUCION: algo podria dejar de funcionar si las necesitas." }
+        $mensaje += "`n`nSe guardara un registro de lo quitado en Documentos. ¿Continuar?"
+        if (-not (Show-Confirm $mensaje "Quitar apps de Windows")) { return }
+        if ($tieneImportante) {
+            if (-not (Show-Confirm "Hay apps IMPORTANTES en la seleccion. ¿Seguro que quieres quitarlas tambien?" "Confirmar de nuevo")) { return }
+        }
+        $resultado = Remove-AppsWindowsSeleccionadas -Items $seleccion -QuitarPrecargadas ([bool]$chkPre.IsChecked)
+        $nombresQuitados = @($resultado.Quitadas | ForEach-Object { $_.NombreAppx })
+        $est.Todas = @($est.Todas | Where-Object { $nombresQuitados -notcontains $_.NombreAppx })
+        & $mostrar
+        Write-Log "Apps de Windows quitadas: $($resultado.Quitadas.Count) de $($seleccion.Count)." -Tipo OK
+        $texto = "Apps quitadas: $($resultado.Quitadas.Count) de $($seleccion.Count)."
+        if ($resultado.Registro) { $texto += "`n`nRegistro guardado en:`n$($resultado.Registro)" }
+        if ($resultado.Fallidas.Count -gt 0) { $texto += "`n`nNo se pudieron quitar:`n - " + ($resultado.Fallidas -join "`n - ") }
+        Show-Aviso $texto "Resultado"
+    })
+    $win.ShowDialog() | Out-Null
+}
+
 # --- Archivos ISO: Windows y Office, descarga DIRECTA (sin abrir el navegador) ---
 # Para Windows 11 y 10 se automatiza el mismo proceso oficial en 3 pasos que
 # usa la pagina de Microsoft (elegir edicion -> elegir idioma -> obtener el
@@ -8751,9 +9386,9 @@ function Buscar-DriverLaptop {
                 <TranslateTransform X="0" Y="0"/>
             </LinearGradientBrush.RelativeTransform>
             <GradientStop Color="#1F6BFF" Offset="0"/>
-            <GradientStop Color="#00C8FF" Offset="0.25"/>
-            <GradientStop Color="#00FF9C" Offset="0.5"/>
-            <GradientStop Color="#00C8FF" Offset="0.75"/>
+            <GradientStop Color="#4FA8FF" Offset="0.25"/>
+            <GradientStop Color="#FFFFFF" Offset="0.5"/>
+            <GradientStop Color="#4FA8FF" Offset="0.75"/>
             <GradientStop Color="#1F6BFF" Offset="1"/>
         </LinearGradientBrush>
 
@@ -8808,6 +9443,22 @@ function Buscar-DriverLaptop {
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="#5500E5FF"/>
                                 <Setter TargetName="Halo" Property="Opacity" Value="0.9"/>
+                                <Trigger.EnterActions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="Esc" Storyboard.TargetProperty="ScaleX" To="0.95" Duration="0:0:0.07"/>
+                      <DoubleAnimation Storyboard.TargetName="Esc" Storyboard.TargetProperty="ScaleY" To="0.95" Duration="0:0:0.07"/>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="Esc" Storyboard.TargetProperty="ScaleX" To="1.035" Duration="0:0:0.12"/>
+                      <DoubleAnimation Storyboard.TargetName="Esc" Storyboard.TargetProperty="ScaleY" To="1.035" Duration="0:0:0.12"/>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </Trigger.ExitActions>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter TargetName="Bd" Property="Opacity" Value="0.45"/>
@@ -8899,7 +9550,7 @@ function Buscar-DriverLaptop {
                             <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
                           </Trigger>
                           <Trigger Property="IsDragging" Value="True">
-                            <Setter TargetName="Pulgar" Property="Background" Value="#FF00FF9C"/>
+                            <Setter TargetName="Pulgar" Property="Background" Value="#FFBFE3FF"/>
                           </Trigger>
                         </ControlTemplate.Triggers>
                       </ControlTemplate>
@@ -8936,7 +9587,7 @@ function Buscar-DriverLaptop {
                                 <Setter TargetName="Pulgar" Property="Background" Value="#CC00E5FF"/>
                               </Trigger>
                               <Trigger Property="IsDragging" Value="True">
-                                <Setter TargetName="Pulgar" Property="Background" Value="#FF00FF9C"/>
+                                <Setter TargetName="Pulgar" Property="Background" Value="#FFBFE3FF"/>
                               </Trigger>
                             </ControlTemplate.Triggers>
                           </ControlTemplate>
@@ -9014,7 +9665,7 @@ function Buscar-DriverLaptop {
                                                Content="{TemplateBinding SelectionBoxItem}"
                                                ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
                                                Margin="12,0,30,0" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                            <Popup x:Name="Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                            <Popup x:Name="Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
                                 <Border Background="{StaticResource PopupFondo}" BorderBrush="{StaticResource Acento}" BorderThickness="1" CornerRadius="8"
                                         MinWidth="{Binding ActualWidth, ElementName=ToggleBtn}" MaxHeight="280" Margin="0,4,0,0">
                                     <Border.Effect>
@@ -9052,6 +9703,11 @@ function Buscar-DriverLaptop {
             <Setter Property="CornerRadius" Value="14"/>
             <Setter Property="Padding" Value="16"/>
             <Setter Property="Margin" Value="0,0,0,14"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#CC14204A"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <!-- DataGrid: tema oscuro consistente con el resto de la app -->
@@ -9126,6 +9782,7 @@ function Buscar-DriverLaptop {
                 <Setter.Value>
                     <ControlTemplate TargetType="RadioButton">
                         <Grid>
+                            <Grid.RenderTransform><TranslateTransform x:Name="Desl" X="0"/></Grid.RenderTransform>
                             <Border x:Name="Halo" Margin="3" CornerRadius="14" Background="#00B7FF" Opacity="0.22">
                                 <Border.Effect>
                                     <BlurEffect Radius="12"/>
@@ -9140,6 +9797,20 @@ function Buscar-DriverLaptop {
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Neon" Property="Background" Value="#552F7CF6"/>
                                 <Setter TargetName="Halo" Property="Opacity" Value="0.65"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="Desl" Storyboard.TargetProperty="X" To="9" Duration="0:0:0.14"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="Desl" Storyboard.TargetProperty="X" To="0" Duration="0:0:0.18"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
                             </Trigger>
                             <Trigger Property="IsChecked" Value="True">
                                 <Setter TargetName="Neon" Property="Background" Value="#5500E5FF"/>
@@ -9293,6 +9964,12 @@ function Buscar-DriverLaptop {
                                     <StackPanel>
                                         <TextBlock Text="↩️ Restaurar configuracion predeterminada" FontWeight="Bold" TextWrapping="Wrap"/>
                                         <TextBlock Text="Revierte los cambios aplicados por cualquiera de los perfiles anteriores." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
+                                    </StackPanel>
+                                </Button>
+                                <Button x:Name="BtnQuitarAppsWindows" Width="300" Height="90" BorderBrush="#2F7CF6">
+                                    <StackPanel>
+                                        <TextBlock Text="🗑️ Quitar apps de Windows" FontWeight="Bold" TextWrapping="Wrap"/>
+                                        <TextBlock Text="Lista las apps de la tienda instaladas (Xbox, Noticias, Clima, Teams...) incluida Microsoft Store, y quita las que elijas." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
                                     </StackPanel>
                                 </Button>
                                 <Button x:Name="BtnModoManual" Width="300" Height="90" BorderBrush="#2F7CF6">
@@ -10155,7 +10832,7 @@ function Buscar-DriverLaptop {
                         <Border Style="{StaticResource TarjetaSeccion}">
                             <StackPanel>
                                 <TextBlock Text="✨ Novedades de esta version" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
-                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🎨 Nueva interfaz neon: borde de ventana animado con degradado azul-verde que fluye, fondo translucido con luces suaves en movimiento y barra de titulo propia (minimizar, maximizar, cerrar).&#10;✨ Boton de la barra de titulo para apagar o encender los efectos animados (modo rendimiento).&#10;☰ Panel lateral de navegacion: oculto al abrir; pulsa MENU para elegir una pestaña y se esconde solo (Esc tambien lo cierra).&#10;🔘 Todos los botones, campos de texto, tablas y barras de desplazamiento con estilo neon redondeado y translucido.&#10;📊 Barras de progreso animadas, con brillo que las recorre, aura y porcentaje en vivo.&#10;⬅ Boton 'Volver' en todas las ventanas que se abren.&#10;🧩 Controladores: el explorador ahora abre ventanas con listas rapidas (todos, que necesitan atencion, faltantes) y se agrego la busqueda de controladores obsoletos o no compatibles para seleccionarlos y borrarlos con copia de seguridad.&#10;🗑️ Programas: 'Desinstalar programas' abre una ventana con la lista de programas instalados, con buscador y los botones 'Desinstalar sin dejar rastros' y 'Forzar desinstalacion'.&#10;🛠️ Pestaña Modificacion: camara (rotar/voltear), pantalla (frecuencia de actualizacion), teclado, parlante y almacenamiento.&#10;🩺 Diagnostico ampliado: camara, teclado, microfono, altavoces, pantalla, RAM, almacenamiento, ventiladores, GPU, mouse, bateria, red, temperatura, arranque, Bluetooth, USB y diagnostico completo automatico.&#10;🚀 Ejecucion desde GitHub con un solo comando en cualquier equipo (ver abajo)."/>
+                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🎨 Nueva interfaz neon: borde de ventana animado con degradado azul con blanco que fluye, fondo translucido con luces suaves en movimiento y barra de titulo propia (minimizar, maximizar, cerrar).&#10;✨ Boton de la barra de titulo para apagar o encender los efectos animados (modo rendimiento).&#10;☰ Panel lateral de navegacion: oculto al abrir; pulsa MENU para elegir una pestaña y se esconde solo (Esc tambien lo cierra).&#10;🔘 Todos los botones, campos de texto, tablas y barras de desplazamiento con estilo neon redondeado y translucido.&#10;📊 Barras de progreso animadas, con brillo que las recorre, aura y porcentaje en vivo.&#10;⬅ Boton 'Volver' en todas las ventanas que se abren.&#10;🧩 Controladores: el explorador ahora abre ventanas con listas rapidas (todos, que necesitan atencion, faltantes) y se agrego la busqueda de controladores obsoletos o no compatibles para seleccionarlos y borrarlos con copia de seguridad.&#10;🗑️ Programas: 'Desinstalar programas' abre una ventana con la lista de programas instalados, con buscador y los botones 'Desinstalar sin dejar rastros' y 'Forzar desinstalacion'.&#10;🛠️ Pestaña Modificacion: camara (rotar/voltear), pantalla (frecuencia de actualizacion), teclado, parlante y almacenamiento.&#10;🩺 Diagnostico ampliado: camara, teclado, microfono, altavoces, pantalla, RAM, almacenamiento, ventiladores, GPU, mouse, bateria, red, temperatura, arranque, Bluetooth, USB y diagnostico completo automatico.&#10;🚀 Ejecucion desde GitHub con un solo comando en cualquier equipo (ver abajo).&#10;📷 Camara corregida: la vista previa ahora se muestra en la pestaña Camara y en Diagnostico (descarga el componente la primera vez; requiere permiso de camara en Windows).&#10;🗑️ Quitar apps de Windows (Perfiles de optimizacion): lista las apps incluidas, incluida Microsoft Store, y las desinstala.&#10;🎞️ Mas animaciones: entrada escalonada de paneles, transicion entre pestañas, botones con zoom y efecto de respiracion."/>
                             </StackPanel>
                         </Border>
 
@@ -10259,6 +10936,7 @@ $window.FindName("BtnPerfilModerno").Add_Click({ Perfil-EquipoModerno })
 $window.FindName("BtnPerfilGamer").Add_Click({ Perfil-Gamer })
 $window.FindName("BtnPerfilRestaurar").Add_Click({ Perfil-Restaurar })
 $window.FindName("BtnModoManual").Add_Click({ Show-VentanaManual })
+$window.FindName("BtnQuitarAppsWindows").Add_Click({ Show-VentanaAppsWindows })
 
 # --- Pestaña Registro de Windows ---
 function Mostrar-SeccionRegistro {
@@ -11018,6 +11696,7 @@ $window.Add_Closed({
 $Script:PanelNavAbierto = $false   # arranca oculto; solo se despliega con el boton MENU
 
 function Mostrar-PanelLateral {
+    try { Animar-EntradaElementos -Elementos $window.FindName("ContenedorNav").Children -DesdeX -38 -PasoMs 38 -DuracionMs 320 } catch {}
     $panel = $window.FindName("PanelLateral")
     $velo = $window.FindName("VeloNav")
     $desplaza = $window.FindName("DesplazaPanel")
@@ -11112,10 +11791,23 @@ try {
     })
     # Mantiene el titulo de la barra y el boton marcado en sincronia con la pestaña activa
     # (SelectionChanged tambien llega burbujeando desde ComboBox internos; es inocuo).
-    $tcNav.Add_SelectionChanged({ Sincronizar-NavLateral })
+    $tcNav.Add_SelectionChanged({
+        param($remitenteTab, $eventoTab)
+        # SelectionChanged tambien llega burbujeando desde los ComboBox internos: solo animar si cambia la pestaña
+        if ($eventoTab.OriginalSource -eq $remitenteTab) { Animar-CambioPestana }
+        Sincronizar-NavLateral
+    })
     Sincronizar-NavLateral
 } catch {
     Write-Log "No se pudo construir el panel lateral de navegacion: $($_.Exception.Message)" -Tipo ERROR
+}
+
+# Animaciones de entrada de las secciones (paneles) y latido del logo
+try {
+    $nPaneles = Registrar-AnimacionesPaneles -Raiz $window
+    Animar-Respiracion -Elemento $window.FindName("ImgLogo") -Escala 1.08 -Segundos 2.4
+} catch {
+    Write-Log "No se pudieron preparar las animaciones de las secciones: $($_.Exception.Message)" -Tipo AVISO
 }
 
 # Animacion del borde neon: un unico giro continuo del pincel compartido mueve
