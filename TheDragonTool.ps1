@@ -355,6 +355,18 @@ $Global:RecursosGridXaml = @'
 # Hace "correr" el degradado del pincel neon: el patron de colores se repite y se desplaza
 # sin parar, asi los colores fluyen alrededor de todos los bordes (una sola animacion mueve
 # todos los bordes a la vez). -Detener la congela. Devuelve $false si no se pudo animar.
+# Devuelve el pincel neon de un elemento en una version NO congelada (WPF congela los pinceles de los recursos y
+# un pincel congelado no se puede animar); si esta congelado se clona y se reemplaza en el elemento.
+function Global:Obtener-PincelNeon {
+    param($Elemento, [string]$Clave = "NeonBrush")
+    $p = $Elemento.FindResource($Clave)
+    if ($p -and $p.IsFrozen) {
+        $p = $p.Clone()
+        $Elemento.Resources[$Clave] = $p
+    }
+    return $p
+}
+
 function Global:Animar-PincelNeon {
     param($Pincel, [switch]$Detener)
     if (-not $Pincel) { return $false }
@@ -858,7 +870,7 @@ function Global:Aplicar-MarcoNeon {
         if ($btnEfectos) {
             $btnEfectos.Add_Click({
                 try {
-                    $pincelNeon = $ventanaWpf.Resources["NeonBrush"]
+                    $pincelNeon = Obtener-PincelNeon -Elemento $ventanaWpf
                     if ($estadoFx.Activo) {
                         $estadoFx.Activo = $false
                         & $detenerFx
@@ -925,7 +937,7 @@ function Global:Iniciar-EfectosNeon {
     } catch { }
     try {
         if ($Ventana.Resources.Contains("NeonBrush")) {
-            $pincel = $Ventana.Resources["NeonBrush"]
+            $pincel = Obtener-PincelNeon -Elemento $Ventana
             [void](Animar-PincelNeon -Pincel $pincel)
         }
     } catch { }
@@ -1042,6 +1054,7 @@ function Global:Update-VentanaProgreso {
     }
     if ($txtEstado -and $Estado) { $txtEstado.Text = $Estado }
     if ($LogLinea -and $txtLog) { $txtLog.AppendText("$LogLinea`r`n"); $txtLog.ScrollToEnd() }
+    if ($LogLinea -and $Script:PasosPerfil) { $Script:PasosPerfil.Add($LogLinea) }
 
     if ($txtTiempo -and $Ventana.Resources.Contains("HoraInicio")) {
         $transcurrido = (Get-Date) - $Ventana.Resources["HoraInicio"]
@@ -1073,6 +1086,8 @@ $Script:RegistroErrores = New-Object System.Collections.Generic.List[object]
 # instalacion/desinstalacion de programas, el registro de Windows, etc.
 function Global:Get-CategoriaOrigenError {
     param([string]$Origen)
+    if ($Origen -match '^(Iniciar-Escaneo|Revisar-Escaneo|Procesar-ResultadosHardware|Iniciar-Monitoreo)') { return 'Hardware' }
+    if ($Origen -match 'Camara') { return 'Camara' }
     if ($Origen -match '^(Show-Prueba|Accion-Probar|Accion-DiagnosticoCompleto|Accion-VerDetallesPantalla)') { return 'Prueba de diagnostico' }
     if ($Origen -match '^(Accion-DescargarISO|Get-EnlaceDescarga|Descargar-ArchivoConProgreso|Accion-DescargarInstalarControladorFaltante|Accion-InstalarControladorDesdeArchivo)') { return 'Descarga de archivos' }
     if ($Origen -match '^(Accion-Instalar|Accion-Desinstalar|Show-VentanaProgramasInstalados|Limpiar-RastrosPrograma)') { return 'Instalar/Desinstalar programas' }
@@ -1080,6 +1095,220 @@ function Global:Get-CategoriaOrigenError {
     if ($Origen -match 'Driver|Controlador') { return 'Controladores' }
     if ($Origen -match '^Perfil-|^Accion-Acelerar|^Accion-LiberarRAM') { return 'Perfiles de optimizacion' }
     return 'Programa general'
+}
+
+# ---------------------------------------------------------------------------
+#  MONITOREO DE ERRORES (programa + hardware)
+# ---------------------------------------------------------------------------
+
+function Global:Get-SolucionSugeridaError {
+    param([string]$Categoria, [string]$Mensaje, [string]$Origen)
+    switch -Regex ($Mensaje) {
+        '(?i)acceso denegado|access.*denied|administrador|requiere.*admin' { return 'Cierra el programa y vuelvelo a abrir como administrador (clic derecho > Ejecutar como administrador).' }
+        '(?i)descarg|webexception|remoto|internet|conexion|timed out|tiempo de espera|dns|proxy' { return 'Revisa tu conexion a internet, el firewall/antivirus o el proxy e intenta de nuevo.' }
+        '(?i)camara' { return 'Revisa Configuracion > Privacidad y seguridad > Camara, cierra otras apps que usen la camara y prueba otra resolucion en la ventana de camara.' }
+        '(?i)winget' { return 'Actualiza "Instalador de aplicaciones" desde Microsoft Store para tener winget funcionando.' }
+        '(?i)registro de windows|regedit|clave del registro' { return 'Crea un punto de restauracion antes de tocar el Registro y ejecuta el programa como administrador.' }
+        '(?i)controlador|driver' { return 'Actualiza o reinstala el controlador desde la pestaña Controladores o desde el sitio del fabricante.' }
+        '(?i)espacio|disk full|disco lleno' { return 'Libera espacio en disco (Liberar espacio / Limpiar temporales) y vuelve a intentarlo.' }
+        '(?i)portapapeles' { return 'Otro programa esta usando el portapapeles. Intenta de nuevo en unos segundos.' }
+    }
+    switch ($Categoria) {
+        'Hardware' { return 'Revisa el componente indicado (cables, temperaturas, controladores) y vuelve a ejecutar el escaneo de hardware.' }
+        'Prueba de diagnostico' { return 'Repite la prueba; si vuelve a fallar, el componente podria estar defectuoso o sin controlador.' }
+        'Programa (excepcion)' { return 'Se evito el cierre del programa. Si se repite, copia este registro y reportalo para corregirlo.' }
+        default { return 'Repite la accion como administrador. Si persiste, exporta este registro para analizarlo.' }
+    }
+}
+
+# Agrega una entrada al registro de errores (con deduplicacion de repeticiones recientes).
+function Global:Add-RegistroError {
+    param(
+        [string]$Tipo = 'ERROR', [string]$Categoria = 'Programa general', [string]$Origen = 'Desconocido',
+        [string]$Mensaje, [string]$Solucion = '', [string]$Detalle = '', $Momento = $null
+    )
+    try {
+        $ahora = if ($Momento) { [datetime]$Momento } else { Get-Date }
+        $total = $Script:RegistroErrores.Count
+        if (-not $Momento) {
+            for ($i = $total - 1; $i -ge [math]::Max(0, $total - 40); $i--) {
+                $e = $Script:RegistroErrores[$i]
+                if ($e.Mensaje -eq $Mensaje -and $e.Origen -eq $Origen -and ($ahora - $e.Momento).TotalSeconds -lt 90) {
+                    $e.Veces = [int]$e.Veces + 1; $e.Momento = $ahora
+                    $e.Hora = $ahora.ToString('HH:mm:ss')
+                    return
+                }
+            }
+        }
+        $hora = if ($ahora.Date -eq (Get-Date).Date) { $ahora.ToString('HH:mm:ss') } else { $ahora.ToString('dd/MM HH:mm') }
+        $Script:RegistroErrores.Add([PSCustomObject]@{
+            Hora = $hora; Fecha = $ahora.ToString('yyyy-MM-dd HH:mm:ss'); Momento = $ahora
+            Tipo = $Tipo; Categoria = $Categoria; Origen = $Origen; Mensaje = $Mensaje
+            Solucion = $(if ($Solucion) { $Solucion } else { Get-SolucionSugeridaError -Categoria $Categoria -Mensaje $Mensaje -Origen $Origen })
+            Detalle = $Detalle; Veces = 1
+        }) | Out-Null
+    } catch {}
+}
+
+# Bloque autonomo (se ejecuta en un hilo aparte para no congelar la ventana).
+# Busca en el visor de sucesos errores de hardware y revisa el estado de discos, memoria, temperatura, bateria y dispositivos.
+$Script:ScanHardwareSB = {
+    param([datetime]$Desde, [bool]$IncluirEstado)
+    $res = New-Object System.Collections.Generic.List[object]
+    function Nuevo($Momento, $Tipo, $Origen, $Mensaje, $Solucion, $Clave) {
+        $res.Add([PSCustomObject]@{ Momento = $Momento; Tipo = $Tipo; Origen = $Origen; Mensaje = $Mensaje; Solucion = $Solucion; Clave = $Clave })
+    }
+    $def = @(
+        @{ P='Microsoft-Windows-WHEA-Logger'; Id=$null; C='CPU / memoria / PCIe (WHEA)'; S='El procesador o la placa detectaron un error de hardware. Quita overclock/XMP, revisa temperaturas y fuente de poder, y prueba la RAM (Diagnostico de memoria).' },
+        @{ P='disk'; Id=@(7,11,15,51,52,153); C='Disco duro/SSD'; S='El disco reporto errores de lectura/escritura. Haz copia de seguridad, revisa SMART (CrystalDiskInfo), cambia el cable SATA y ejecuta chkdsk /f /r.' },
+        @{ P='Ntfs'; Id=@(55,98,137,140); C='Sistema de archivos NTFS'; S='Hay errores en el sistema de archivos. Ejecuta chkdsk /f /r en la unidad afectada y revisa el estado del disco.' },
+        @{ P='stornvme'; Id=$null; C='SSD NVMe'; S='El SSD NVMe reporto problemas. Actualiza el firmware y el driver NVMe, y revisa la temperatura y el estado SMART.' },
+        @{ P='storahci'; Id=$null; C='Controlador SATA (AHCI)'; S='El controlador SATA reporto problemas. Revisa cables/puertos del disco y actualiza el driver de chipset/almacenamiento.' },
+        @{ P='volmgr'; Id=$null; C='Administrador de volumenes'; S='Windows tuvo problemas con un volumen (volcado o disco). Revisa el disco y la configuracion del archivo de paginacion.' },
+        @{ P='Microsoft-Windows-Kernel-Power'; Id=@(41); C='Apagado inesperado'; S='El equipo se reinicio sin apagarse correctamente: corte de energia, fuente de poder fallando, sobrecalentamiento o pantalla azul. Revisa temperaturas, fuente y la pestaña BSOD.' },
+        @{ P='Display'; Id=@(4101); C='Controlador de video'; S='El driver de video dejo de responder y se recupero. Reinstala el driver de video, quita overclock y revisa la temperatura de la GPU.' },
+        @{ P='nvlddmkm'; Id=$null; C='GPU NVIDIA'; S='El driver de NVIDIA reporto errores. Reinstala el driver de forma limpia y revisa temperaturas/alimentacion.' },
+        @{ P='Microsoft-Windows-Kernel-PnP'; Id=@(219); C='Dispositivo / controlador'; S='Windows no pudo cargar un controlador. Actualiza o reinstala el driver del dispositivo indicado.' },
+        @{ P='BTHUSB'; Id=$null; C='Bluetooth'; S='El adaptador Bluetooth reporto problemas. Actualiza su driver o prueba otro puerto USB.' }
+    )
+    foreach ($d in $def) {
+        try {
+            $f = @{ LogName = 'System'; ProviderName = $d.P; StartTime = $Desde; Level = @(1,2,3) }
+            if ($d.Id) { $f.Id = $d.Id }
+            $ev = Get-WinEvent -FilterHashtable $f -MaxEvents 20 -ErrorAction Stop
+            foreach ($e in $ev) {
+                $msg = (("$($e.Message)" -split "`r?`n")[0]).Trim()
+                if ($msg.Length -gt 230) { $msg = $msg.Substring(0, 230) + '...' }
+                $tipo = if ($e.Level -le 2) { 'ERROR' } else { 'AVISO' }
+                Nuevo $e.TimeCreated $tipo ("$($d.C) (Id $($e.Id))") $msg $d.S ("ev|$($e.ProviderName)|$($e.RecordId)")
+            }
+        } catch {}
+    }
+    if ($IncluirEstado) {
+        $ahora = Get-Date
+        try {
+            foreach ($pd in @(Get-PhysicalDisk -ErrorAction Stop)) {
+                $nom = "$($pd.FriendlyName)"
+                if ("$($pd.HealthStatus)" -ne 'Healthy') {
+                    Nuevo $ahora 'ERROR' "Disco: $nom" "Estado de salud del disco: $($pd.HealthStatus) ($($pd.OperationalStatus))." 'Haz copia de seguridad YA. El disco puede estar fallando: revisa SMART y planea reemplazarlo.' "disco|$nom|$($pd.HealthStatus)"
+                }
+                try {
+                    $rc = $pd | Get-StorageReliabilityCounter -ErrorAction Stop
+                    if ($rc.Temperature -gt 60) { Nuevo $ahora 'AVISO' "Disco: $nom" "Temperatura alta del disco: $($rc.Temperature) C." 'Mejora la ventilacion; temperaturas altas acortan la vida del disco.' "discotemp|$nom|$([int]($rc.Temperature/5))" }
+                    if ($rc.Wear -gt 85) { Nuevo $ahora 'AVISO' "Disco: $nom" "Desgaste del SSD: $($rc.Wear)% usado." 'El SSD esta cerca del fin de su vida util: haz copias de seguridad y planea cambiarlo.' "discowear|$nom|$($rc.Wear)" }
+                    $errs = [int]$rc.ReadErrorsUncorrected + [int]$rc.WriteErrorsUncorrected
+                    if ($errs -gt 0) { Nuevo $ahora 'ERROR' "Disco: $nom" "El disco acumula $errs error(es) de lectura/escritura sin corregir." 'Haz copia de seguridad y reemplaza el disco si los errores aumentan.' "discoerr|$nom|$errs" }
+                } catch {}
+            }
+        } catch {}
+        try {
+            foreach ($ld in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop)) {
+                if ($ld.Size -gt 0) {
+                    $pct = [math]::Round(($ld.FreeSpace / $ld.Size) * 100, 1)
+                    if ($pct -lt 10) {
+                        $t = if ($pct -lt 5) { 'ERROR' } else { 'AVISO' }
+                        Nuevo $ahora $t "Almacenamiento $($ld.DeviceID)" "Poco espacio libre en $($ld.DeviceID): $pct% ($([math]::Round($ld.FreeSpace/1GB,1)) GB)." 'Libera espacio: Limpiar temporales, desinstalar programas, mover archivos grandes.' "espacio|$($ld.DeviceID)|$([int]($pct/2))"
+                    }
+                }
+            }
+        } catch {}
+        try {
+            $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $uso = [math]::Round((1 - ($os.FreePhysicalMemory / $os.TotalVisibleMemorySize)) * 100, 0)
+            if ($uso -gt 92) { Nuevo $ahora 'AVISO' 'Memoria RAM' "Uso de RAM muy alto: $uso%." 'Cierra programas, usa Liberar RAM o considera ampliar la memoria.' "ram|alta|$([int]($uso/3))" }
+        } catch {}
+        try {
+            foreach ($z in @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop)) {
+                $c = [math]::Round(($z.CurrentTemperature / 10) - 273.15, 0)
+                if ($c -ge 80 -and $c -lt 150) {
+                    $t = if ($c -ge 90) { 'ERROR' } else { 'AVISO' }
+                    Nuevo $ahora $t 'Temperatura del sistema' "Temperatura elevada: $c C." 'Limpia el polvo, revisa ventiladores y pasta termica, y evita bloquear las rejillas del equipo.' "temp|$([int]($c/5))"
+                }
+            }
+        } catch {}
+        try {
+            $full = Get-CimInstance -Namespace root/wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1
+            $dis = Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1
+            if ($full -and $dis -and $dis.DesignedCapacity -gt 0) {
+                $des = [math]::Round(100 - ($full.FullChargedCapacity / $dis.DesignedCapacity) * 100, 0)
+                if ($des -gt 40) { Nuevo $ahora 'AVISO' 'Bateria' "La bateria perdio $des% de su capacidad original." 'La bateria esta desgastada; considera reemplazarla.' "bateria|$([int]($des/10))" }
+            }
+        } catch {}
+        try {
+            $nombresCodigo = @{ 10='no puede iniciar'; 28='sin controlador instalado'; 31='no funciona correctamente'; 39='controlador danado o ausente'; 41='Windows detecto el hardware pero no pudo cargarlo'; 43='Windows detuvo el dispositivo (reporto problemas)'; 52='controlador sin firma digital' }
+            foreach ($pn in @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object { $_.ConfigManagerErrorCode -gt 0 -and $_.ConfigManagerErrorCode -ne 22 })) {
+                $cod = [int]$pn.ConfigManagerErrorCode
+                $txt = if ($nombresCodigo.ContainsKey($cod)) { $nombresCodigo[$cod] } else { 'con problema' }
+                Nuevo $ahora 'AVISO' "Dispositivo: $($pn.Name)" "El dispositivo '$($pn.Name)' esta $txt (codigo $cod)." 'Actualiza o reinstala el controlador (pestaña Controladores) o revisa el dispositivo en el Administrador de dispositivos.' "pnp|$($pn.DeviceID)|$cod"
+            }
+        } catch {}
+    }
+    $res
+}
+
+$Script:HwVistos = @{}
+$Script:HwScan = $null
+$Script:HwUltimoEscaneo = $null
+$Script:HwTimerPoll = $null
+$Script:HwTimerVivo = $null
+
+function Global:Procesar-ResultadosHardware {
+    param($Lista)
+    $nuevos = 0
+    foreach ($r in @($Lista)) {
+        if (-not $r -or -not $r.Clave) { continue }
+        if ($Script:HwVistos.ContainsKey("$($r.Clave)")) { continue }
+        $Script:HwVistos["$($r.Clave)"] = $true
+        $mom = try { [datetime]$r.Momento } catch { Get-Date }
+        Add-RegistroError -Tipo "$($r.Tipo)" -Categoria 'Hardware' -Origen "$($r.Origen)" -Mensaje "$($r.Mensaje)" -Solucion "$($r.Solucion)" -Momento $mom
+        $nuevos++
+    }
+    $Script:HwUltimoEscaneo = Get-Date
+    return $nuevos
+}
+
+function Global:Revisar-EscaneoHardware {
+    $s = $Script:HwScan
+    if (-not $s) { if ($Script:HwTimerPoll) { $Script:HwTimerPoll.Stop() }; return }
+    if (-not $s.H.IsCompleted) {
+        if (((Get-Date) - $s.Inicio).TotalSeconds -gt 120) {
+            try { $s.PS.Stop(); $s.PS.Dispose() } catch {}
+            $Script:HwScan = $null; $Script:HwTimerPoll.Stop()
+            Write-Log "El escaneo de hardware tardo demasiado y se cancelo." -Tipo AVISO
+            try { Cargar-RegistroErrores } catch {}
+        }
+        return
+    }
+    $res = $null
+    try { $res = $s.PS.EndInvoke($s.H) } catch { Write-Log "El escaneo de hardware fallo: $($_.Exception.Message)" -Tipo AVISO }
+    finally { try { $s.PS.Dispose() } catch {}; $Script:HwScan = $null; $Script:HwTimerPoll.Stop() }
+    $n = Procesar-ResultadosHardware -Lista $res
+    if ($s.Manual) { Write-Log "Escaneo de hardware completado: $n hallazgo(s) nuevo(s)." -Tipo $(if ($n -gt 0) { 'AVISO' } else { 'OK' }) }
+    try { Cargar-RegistroErrores } catch {}
+    if ($s.Manual) {
+        if ($n -eq 0) { Show-Aviso "No se encontraron problemas de hardware nuevos.`n`nSe revisaron eventos de las ultimas horas, el estado de los discos (SMART), espacio libre, memoria, temperatura, bateria y dispositivos con errores." "Escaneo de hardware" }
+        else { Show-Aviso "Se encontraron $n hallazgo(s) de hardware. Revisa la lista (categoria Hardware) y selecciona cada uno para ver que hacer." "Escaneo de hardware" }
+    }
+}
+
+function Global:Iniciar-EscaneoHardware {
+    param([int]$Horas = 72, [bool]$Manual = $false, [bool]$IncluirEstado = $true)
+    if ($Script:HwScan) { if ($Manual) { Show-Aviso "Ya hay un escaneo de hardware en curso. Espera a que termine." "Escaneo en curso" }; return }
+    try {
+        $ps = [powershell]::Create()
+        $null = $ps.AddScript($Script:ScanHardwareSB.ToString()).AddArgument((Get-Date).AddHours(-$Horas)).AddArgument($IncluirEstado)
+        $Script:HwScan = @{ PS = $ps; H = $ps.BeginInvoke(); Manual = $Manual; Inicio = (Get-Date) }
+        if ($Manual) { Write-Log "Escaneando hardware (eventos de las ultimas $Horas h y estado de discos, RAM, temperatura, bateria y dispositivos)..." }
+        if (-not $Script:HwTimerPoll) {
+            $Script:HwTimerPoll = New-Object System.Windows.Threading.DispatcherTimer
+            $Script:HwTimerPoll.Interval = [TimeSpan]::FromMilliseconds(400)
+            $Script:HwTimerPoll.Add_Tick({ Revisar-EscaneoHardware })
+        }
+        $Script:HwTimerPoll.Start()
+    } catch {
+        $Script:HwScan = $null
+        Write-Log "No se pudo iniciar el escaneo de hardware: $($_.Exception.Message)" -Tipo ERROR
+    }
 }
 
 function Global:Write-Log {
@@ -1094,13 +1323,7 @@ function Global:Write-Log {
             $callStack = Get-PSCallStack
             $origen = if ($callStack.Count -gt 1 -and $callStack[1].FunctionName) { $callStack[1].FunctionName } else { "Desconocido" }
             if ($origen -eq '<ScriptBlock>') { $origen = "Interfaz (evento de la ventana)" }
-            $Script:RegistroErrores.Add([PSCustomObject]@{
-                Hora      = $hora
-                Tipo      = $Tipo
-                Categoria = (Get-CategoriaOrigenError -Origen $origen)
-                Origen    = $origen
-                Mensaje   = $Mensaje
-            }) | Out-Null
+            Add-RegistroError -Tipo $Tipo -Categoria (Get-CategoriaOrigenError -Origen $origen) -Origen $origen -Mensaje $Mensaje
         } catch {}
     }
 
@@ -2797,7 +3020,7 @@ function Accion-AbrirRestaurarSistema {
     Write-Log "Herramienta de Restaurar sistema abierta." -Tipo OK
 }
 
-function Accion-VerificarArchivosSistema {
+function Global:Accion-VerificarArchivosSistema {
     if (-not (Requiere-Admin)) { return }
     if (-not (Show-Confirm "Esto ejecuta SFC (System File Checker) para revisar y reparar archivos de sistema danados. Puede tardar varios minutos. ¿Continuar?")) { return }
     try {
@@ -3098,7 +3321,85 @@ $Script:TablaBugCheck = @{
     '0x0000012b' = @{ Nombre='FAULTY_HARDWARE_CORRUPTED_PAGE'; Recomendacion='Fuerte indicio de hardware defectuoso (RAM o CPU). Ejecuta Diagnostico de memoria de Windows y revisa temperaturas / overclock.' }
 }
 
-function Get-InfoBugCheck {
+# Detalle ampliado por codigo: causa, pasos y gravedad (alimenta la ventana 'Explicar error').
+$Script:DetalleBugCheck = @{
+    '0x0000000a' = @{ Gravedad='Media'; Causa='Un controlador o el sistema intento acceder a memoria con un nivel de prioridad (IRQL) no permitido. Casi siempre es un driver defectuoso o incompatible; menos veces RAM con fallas.'; Pasos=@('Actualiza los controladores de red, almacenamiento y chipset desde la web del fabricante.', 'Si empezo tras instalar algo, desinstala ese programa/driver o usa Restaurar sistema.', 'Ejecuta el Diagnostico de memoria de Windows (boton de esta pestaña).', 'Ejecuta Verificar archivos de sistema (SFC) y revisa que Windows este actualizado.') }
+    '0x0000001a' = @{ Gravedad='Alta'; Causa='El administrador de memoria de Windows detecto datos corruptos. Suele indicar RAM defectuosa, mal asentada o con sobreconfiguracion (XMP/overclock).'; Pasos=@('Ejecuta el Diagnostico de memoria de Windows y deja completar las pasadas.', 'Desactiva XMP/overclock en la BIOS y prueba otra vez.', 'Con el equipo apagado, saca y vuelve a colocar los modulos de RAM; prueba uno por uno.', 'Si hay errores confirmados, cambia el modulo de RAM.') }
+    '0x0000001e' = @{ Gravedad='Media'; Causa='Un controlador del modo nucleo genero una excepcion que nadie controlo. Normalmente un driver nuevo, viejo o incompatible.'; Pasos=@('Revisa que driver o programa se instalo justo antes de la falla (boton Controladores recientes).', 'Actualiza o revierte ese controlador desde el Administrador de dispositivos.', 'Desinstala antivirus/utilidades de terceros recientes que carguen drivers.', 'Ejecuta SFC y DISM para reparar archivos del sistema.') }
+    '0x0000003b' = @{ Gravedad='Media'; Causa='Una llamada de servicio del sistema fallo dentro de un driver; el culpable mas comun es el controlador de video.'; Pasos=@('Reinstala el driver de la tarjeta grafica (descarga limpia desde NVIDIA/AMD/Intel).', 'Actualiza Windows y el resto de controladores.', 'Desactiva overclock de GPU/CPU si lo tienes.', 'Ejecuta SFC y revisa temperaturas.') }
+    '0x00000050' = @{ Gravedad='Alta'; Causa='Se pidio memoria que no existe o no es valida. Puede ser RAM defectuosa, disco con errores, driver o antivirus con problemas.'; Pasos=@('Ejecuta el Diagnostico de memoria de Windows.', 'Ejecuta chkdsk /f en el disco del sistema (boton Comprobar disco).', 'Actualiza o desinstala drivers/antivirus recientes.', 'Revisa el estado SMART del disco con la herramienta del fabricante.') }
+    '0x0000007b' = @{ Gravedad='Alta'; Causa='Windows no pudo leer el disco de arranque. Suele ocurrir tras cambiar el modo SATA (AHCI/RAID/IDE) en la BIOS, cambiar de disco o por un controlador de almacenamiento ausente/danado.'; Pasos=@('Entra a la BIOS y devuelve el modo SATA al valor anterior (AHCI normalmente).', 'Revisa cables/conexion del disco y que la BIOS lo detecte.', 'Si clonaste o cambiaste de equipo, inyecta el driver de almacenamiento o repara el arranque desde el medio de instalacion.', 'Ejecuta chkdsk desde el entorno de recuperacion de Windows.') }
+    '0x0000007e' = @{ Gravedad='Media'; Causa='Un hilo del sistema genero una excepcion no controlada, casi siempre por un driver de video, red o WiFi.'; Pasos=@('Actualiza controladores de video y red/WiFi.', 'Revierte drivers instalados recientemente.', 'Ejecuta SFC y DISM.', 'Prueba la RAM con el Diagnostico de memoria.') }
+    '0x0000009f' = @{ Gravedad='Media'; Causa='Un driver no respondio correctamente al entrar o salir de suspension, hibernacion o apagado.'; Pasos=@('Actualiza controladores de red, chipset, USB y video.', 'En Opciones de energia desactiva el Inicio rapido y la suspension selectiva USB.', 'Actualiza la BIOS del equipo.', 'Desconecta perifericos USB para descartar alguno.') }
+    '0x000000c2' = @{ Gravedad='Media'; Causa='Un controlador solicito o libero memoria de forma incorrecta (pool).'; Pasos=@('Revisa drivers y programas instalados antes de la falla.', 'Desinstala antivirus/firewall de terceros y prueba con el de Windows.', 'Actualiza todos los controladores.', 'Prueba la RAM.') }
+    '0x000000d1' = @{ Gravedad='Media'; Causa='Un driver intento acceder a memoria con un nivel de prioridad incorrecto; muy comun con adaptadores de red/WiFi.'; Pasos=@('Actualiza (o reinstala) el driver del adaptador de red y WiFi.', 'Actualiza el driver de chipset y almacenamiento.', 'Si el .sys culpable aparece en el volcado, actualiza ese programa.', 'Ejecuta SFC y Diagnostico de memoria.') }
+    '0x000000ef' = @{ Gravedad='Alta'; Causa='Un proceso critico de Windows (como csrss o wininit) termino de forma inesperada: archivos del sistema danados, disco con errores o malware.'; Pasos=@('Ejecuta SFC /scannow y luego DISM /RestoreHealth.', 'Ejecuta chkdsk /f.', 'Analiza el equipo con Windows Defender (analisis completo).', 'Si persiste, restaura el sistema a un punto anterior o repara Windows.') }
+    '0x000000f4' = @{ Gravedad='Alta'; Causa='Un proceso o hilo critico termino porque el disco no respondio. Fuerte indicio de disco/SSD defectuoso, cable flojo o controlador de almacenamiento.'; Pasos=@('Haz copia de seguridad de inmediato.', 'Revisa el estado SMART del disco (CrystalDiskInfo o la herramienta del fabricante).', 'Ejecuta chkdsk /f y cambia el cable SATA o prueba otro puerto.', 'Si el disco muestra sectores danados, reemplazalo.') }
+    '0x00000116' = @{ Gravedad='Media'; Causa='La tarjeta de video dejo de responder y Windows no pudo recuperarla (TDR).'; Pasos=@('Reinstala el driver de video de forma limpia (DDU).', 'Quita overclock de GPU y revisa temperaturas.', 'Limpia el polvo y revisa que la GPU este bien asentada y con alimentacion.', 'Prueba con otra fuente de poder o tarjeta si persiste.') }
+    '0x00000124' = @{ Gravedad='Alta'; Causa='El procesador detecto un error de hardware (CPU, cache, RAM, placa o fuente). El hardware esta fallando o trabaja fuera de especificaciones.'; Pasos=@('Quita todo overclock/undervolt y restablece la BIOS a valores por defecto.', 'Revisa temperaturas de CPU y limpia el disipador; cambia pasta termica si es vieja.', 'Prueba la RAM (Diagnostico de memoria o MemTest86).', 'Revisa la fuente de poder; actualiza BIOS y microcodigo.') }
+    '0x00000133' = @{ Gravedad='Media'; Causa='Un driver tardo demasiado en completar una tarea (DPC). Muy ligado a firmware o drivers de SSD/NVMe y chipset.'; Pasos=@('Actualiza el firmware del SSD y los drivers de almacenamiento/chipset.', 'Cambia el controlador de almacenamiento a "Controlador AHCI estandar de Microsoft" si usas drivers de terceros.', 'Desactiva el Inicio rapido.', 'Actualiza BIOS y revisa cables SATA.') }
+    '0x0000012b' = @{ Gravedad='Alta'; Causa='Una pagina de memoria se corrompio: indicio fuerte de RAM o CPU con fallas.'; Pasos=@('Ejecuta Diagnostico de memoria y MemTest86 varias pasadas.', 'Quita overclock/XMP.', 'Revisa temperaturas.', 'Si fallan, sustituye RAM y si no, revisa CPU/placa.') }
+    '0x00000019' = @{ Gravedad='Alta'; Causa='Un controlador o la memoria dañaron una estructura interna de Windows.'; Pasos=@('Actualiza todos los controladores, sobre todo los recientes.', 'Ejecuta el Diagnostico de memoria.', 'Ejecuta chkdsk /f y SFC.', 'Desinstala antivirus de terceros para probar.') }
+    '0x00000024' = @{ Gravedad='Alta'; Causa='El sistema de archivos NTFS encontro datos inconsistentes, casi siempre por errores de disco, cortes de energia o fallas del cable/controlador.'; Pasos=@('Haz copia de seguridad de tus datos.', 'Ejecuta chkdsk /f /r en la unidad del sistema.', 'Revisa el estado SMART del disco.', 'Cambia el cable SATA/puerto o reemplaza el disco si hay sectores danados.') }
+    '0x0000002e' = @{ Gravedad='Alta'; Causa='Se detecto un error de paridad en la memoria del sistema o en el bus, lo que apunta a hardware defectuoso.'; Pasos=@('Ejecuta Diagnostico de memoria y MemTest86.', 'Reasienta la RAM y prueba cada modulo por separado.', 'Quita overclock.', 'Si persiste, la placa base o la RAM necesitan reemplazo.') }
+    '0x00000051' = @{ Gravedad='Alta'; Causa='Windows no pudo leer o escribir una parte del Registro: archivos del sistema danados o problema de disco.'; Pasos=@('Ejecuta chkdsk /f y SFC /scannow.', 'Ejecuta DISM /RestoreHealth.', 'Restaura el sistema a un punto anterior.', 'Revisa el estado del disco.') }
+    '0x00000077' = @{ Gravedad='Alta'; Causa='Windows no pudo cargar datos del archivo de paginacion por problemas de disco, cable o controlador.'; Pasos=@('Revisa cables/puertos del disco.', 'Ejecuta chkdsk /f /r.', 'Revisa SMART del disco.', 'Prueba la RAM.') }
+    '0x0000007a' = @{ Gravedad='Alta'; Causa='Problemas de disco o de memoria impidieron cargar datos que Windows necesitaba.'; Pasos=@('Ejecuta chkdsk /f /r.', 'Cambia el cable SATA o puerto.', 'Revisa SMART y reemplaza el disco si falla.', 'Prueba la RAM.') }
+    '0x0000007f' = @{ Gravedad='Alta'; Causa='El procesador reporto una condicion inesperada; las causas habituales son RAM defectuosa, sobrecalentamiento o overclock.'; Pasos=@('Quita overclock y restablece la BIOS.', 'Revisa temperaturas y limpia el equipo.', 'Ejecuta Diagnostico de memoria.', 'Actualiza BIOS y drivers.') }
+    '0x0000008e' = @{ Gravedad='Media'; Causa='Un componente del nucleo (driver) genero una excepcion sin controlar.'; Pasos=@('Actualiza o revierte drivers recientes.', 'Ejecuta Diagnostico de memoria.', 'Ejecuta SFC y DISM.', 'Desinstala software de seguridad de terceros para probar.') }
+    '0x000000be' = @{ Gravedad='Media'; Causa='Un controlador defectuoso escribio donde no debia.'; Pasos=@('Actualiza o desinstala el ultimo driver/programa instalado.', 'Actualiza la BIOS.', 'Ejecuta SFC y Diagnostico de memoria.', 'Revisa programas de virtualizacion o seguridad.') }
+    '0x000000c4' = @{ Gravedad='Media'; Causa='El Verificador de controladores de Windows esta activo y encontro un driver que se porta mal.'; Pasos=@('Abre cmd como administrador y ejecuta: verifier /reset para desactivarlo.', 'Actualiza el driver senalado en el volcado.', 'Reinicia y comprueba si el problema desaparece.', 'Si no habilitaste el verificador, actualiza todos los drivers.') }
+    '0x000000c5' = @{ Gravedad='Media'; Causa='Un controlador accedio a memoria con una prioridad incorrecta y dañó estructuras compartidas.'; Pasos=@('Actualiza drivers (en especial de reciente instalacion).', 'Desinstala software de terceros reciente.', 'Ejecuta Diagnostico de memoria.', 'Ejecuta SFC y DISM.') }
+    '0x000000d5' = @{ Gravedad='Media'; Causa='Un controlador intento usar memoria que ya habia sido devuelta al sistema.'; Pasos=@('Actualiza el driver senalado en el volcado.', 'Desactiva el Verificador de controladores (verifier /reset).', 'Actualiza el resto de drivers.', 'Prueba la RAM.') }
+    '0x000000ea' = @{ Gravedad='Media'; Causa='La tarjeta grafica o su driver se quedo atascado en un bucle.'; Pasos=@('Reinstala el driver de video con una instalacion limpia.', 'Revisa temperaturas y quita overclock.', 'Actualiza BIOS y chipset.', 'Prueba con otra tarjeta si es posible.') }
+    '0x000000fc' = @{ Gravedad='Media'; Causa='Un driver defectuoso, malware o RAM danada intentaron ejecutar datos como si fueran codigo.'; Pasos=@('Analiza el equipo con Windows Defender.', 'Actualiza drivers.', 'Prueba la RAM.', 'Actualiza BIOS.') }
+    '0x00000101' = @{ Gravedad='Alta'; Causa='Un nucleo del procesador dejo de responder: overclock, BIOS desactualizada o CPU con problemas.'; Pasos=@('Quita overclock/undervolt y restablece la BIOS.', 'Actualiza la BIOS.', 'Revisa temperaturas.', 'Si persiste, la CPU o fuente pueden fallar.') }
+    '0x0000010e' = @{ Gravedad='Media'; Causa='El gestor de memoria de video detecto una condicion invalida, casi siempre driver de video.'; Pasos=@('Reinstala el driver de video (instalacion limpia).', 'Revisa temperaturas y quita overclock.', 'Prueba la GPU en otro equipo.', 'Actualiza Windows.') }
+    '0x00000117' = @{ Gravedad='Media'; Causa='El controlador de video no respondio dentro del tiempo permitido y no se pudo recuperar.'; Pasos=@('Reinstala el driver de video.', 'Quita overclock de GPU.', 'Limpia el polvo y revisa la ventilacion.', 'Revisa la fuente de poder.') }
+    '0x00000119' = @{ Gravedad='Media'; Causa='Error interno del gestor de video, generalmente por driver de video.'; Pasos=@('Reinstala el driver de video.', 'Quita overclock.', 'Actualiza Windows y BIOS.', 'Prueba otra GPU si es posible.') }
+    '0x00000139' = @{ Gravedad='Alta'; Causa='Se detecto corrupcion en una estructura del nucleo; por drivers incompatibles, RAM danada o archivos del sistema corruptos.'; Pasos=@('Actualiza todos los controladores.', 'Ejecuta SFC y DISM.', 'Ejecuta Diagnostico de memoria.', 'Desinstala software de terceros reciente.') }
+    '0x0000013a' = @{ Gravedad='Media'; Causa='Un driver corrompio la memoria dinamica del nucleo.'; Pasos=@('Actualiza drivers y software de seguridad.', 'Desactiva el Verificador de controladores si esta activo.', 'Ejecuta Diagnostico de memoria.', 'Ejecuta SFC.') }
+    '0x0000009c' = @{ Gravedad='Alta'; Causa='El procesador detecto un error de hardware fatal (CPU, cache, bus o RAM).'; Pasos=@('Quita overclock y restablece la BIOS.', 'Revisa temperaturas.', 'Prueba la RAM.', 'Revisa la fuente de poder y actualiza la BIOS.') }
+    '0x000000a0' = @{ Gravedad='Media'; Causa='Fallo en la administracion de energia de Windows o un driver.'; Pasos=@('Actualiza drivers de chipset, video y red.', 'Restablece el plan de energia.', 'Desactiva el Inicio rapido.', 'Actualiza la BIOS.') }
+    '0x000000a5' = @{ Gravedad='Media'; Causa='La BIOS entrego informacion ACPI incorrecta a Windows.'; Pasos=@('Actualiza la BIOS del equipo.', 'Restablece la BIOS a valores por defecto.', 'Actualiza el driver de chipset.', 'Si es una laptop, instala las utilidades del fabricante.') }
+    '0x00000154' = @{ Gravedad='Media'; Causa='Problemas con el disco/SSD, su driver o el antivirus.'; Pasos=@('Actualiza drivers de almacenamiento y firmware del SSD.', 'Ejecuta chkdsk /f.', 'Desinstala antivirus de terceros para probar.', 'Desactiva el Inicio rapido.') }
+    '0x000000f7' = @{ Gravedad='Media'; Causa='Un controlador escribio mas datos de los que cabian en su pila (error de programacion o malware).'; Pasos=@('Actualiza el driver senalado.', 'Analiza con Windows Defender.', 'Ejecuta SFC.', 'Actualiza Windows.') }
+    '0x00000141' = @{ Gravedad='Media'; Causa='El motor de la GPU dejo de responder y no se recupero.'; Pasos=@('Reinstala el driver de video.', 'Revisa temperaturas y quita overclock.', 'Limpia el equipo.', 'Revisa la fuente de poder.') }
+    '0x0000018b' = @{ Gravedad='Media'; Causa='La seguridad basada en virtualizacion encontro una condicion invalida.'; Pasos=@('Actualiza Windows y todos los drivers.', 'Actualiza la BIOS.', 'Desactiva temporalmente la Integridad de memoria para probar.', 'Ejecuta SFC y DISM.') }
+    '0xc000021a' = @{ Gravedad='Alta'; Causa='Archivos del sistema danados o actualizaciones incompletas.'; Pasos=@('Arranca desde el medio de instalacion y usa Reparar el equipo.', 'Ejecuta SFC /scannow offline y DISM.', 'Restaura el sistema a un punto anterior.', 'Si persiste, reinstala Windows conservando archivos.') }
+    '0xc0000221' = @{ Gravedad='Alta'; Causa='Un archivo del sistema o driver no coincide con su suma de comprobacion: disco o RAM con errores.'; Pasos=@('Ejecuta SFC /scannow y DISM /RestoreHealth.', 'Ejecuta chkdsk /f /r.', 'Prueba la RAM.', 'Repara el arranque desde el medio de instalacion.') }
+}
+$Script:TablaBugCheck['0x00000019'] = @{ Nombre='BAD_POOL_HEADER'; Recomendacion='La cabecera de un bloque de memoria del sistema esta danada. Normalmente un driver defectuoso, RAM o disco con errores.' }
+$Script:TablaBugCheck['0x00000024'] = @{ Nombre='NTFS_FILE_SYSTEM'; Recomendacion='Problema en el sistema de archivos NTFS: disco con errores o danado.' }
+$Script:TablaBugCheck['0x0000002e'] = @{ Nombre='DATA_BUS_ERROR'; Recomendacion='Error de paridad de memoria: RAM o placa base defectuosa.' }
+$Script:TablaBugCheck['0x00000051'] = @{ Nombre='REGISTRY_ERROR'; Recomendacion='Fallo grave al leer el Registro de Windows.' }
+$Script:TablaBugCheck['0x00000077'] = @{ Nombre='KERNEL_STACK_INPAGE_ERROR'; Recomendacion='No se pudo leer una pagina de la pila del nucleo desde el disco.' }
+$Script:TablaBugCheck['0x0000007a'] = @{ Nombre='KERNEL_DATA_INPAGE_ERROR'; Recomendacion='No se pudo leer datos del nucleo desde el disco al archivo de paginacion.' }
+$Script:TablaBugCheck['0x0000007f'] = @{ Nombre='UNEXPECTED_KERNEL_MODE_TRAP'; Recomendacion='El procesador genero una excepcion que el nucleo no pudo controlar: normalmente hardware defectuoso, sobrecalentamiento u overclock.' }
+$Script:TablaBugCheck['0x0000008e'] = @{ Nombre='KERNEL_MODE_EXCEPTION_NOT_HANDLED'; Recomendacion='Una excepcion del modo nucleo no fue controlada (driver o RAM).' }
+$Script:TablaBugCheck['0x000000be'] = @{ Nombre='ATTEMPTED_WRITE_TO_READONLY_MEMORY'; Recomendacion='Un driver intento escribir en memoria de solo lectura.' }
+$Script:TablaBugCheck['0x000000c4'] = @{ Nombre='DRIVER_VERIFIER_DETECTED_VIOLATION'; Recomendacion='El Verificador de controladores detecto una violacion.' }
+$Script:TablaBugCheck['0x000000c5'] = @{ Nombre='DRIVER_CORRUPTED_EXPOOL'; Recomendacion='Un driver corrompio el pool de memoria del sistema.' }
+$Script:TablaBugCheck['0x000000d5'] = @{ Nombre='DRIVER_PAGE_FAULT_IN_FREED_SPECIAL_POOL'; Recomendacion='Un driver uso memoria ya liberada.' }
+$Script:TablaBugCheck['0x000000ea'] = @{ Nombre='THREAD_STUCK_IN_DEVICE_DRIVER'; Recomendacion='Un driver (casi siempre de video) se quedo bloqueado.' }
+$Script:TablaBugCheck['0x000000fc'] = @{ Nombre='ATTEMPTED_EXECUTE_OF_NOEXECUTE_MEMORY'; Recomendacion='Se intento ejecutar codigo desde memoria no ejecutable.' }
+$Script:TablaBugCheck['0x00000101'] = @{ Nombre='CLOCK_WATCHDOG_TIMEOUT'; Recomendacion='Un nucleo del procesador no respondio a tiempo.' }
+$Script:TablaBugCheck['0x0000010e'] = @{ Nombre='VIDEO_MEMORY_MANAGEMENT_INTERNAL'; Recomendacion='Error interno en la memoria de video.' }
+$Script:TablaBugCheck['0x00000117'] = @{ Nombre='VIDEO_TDR_TIMEOUT_DETECTED'; Recomendacion='La GPU tardo demasiado en responder.' }
+$Script:TablaBugCheck['0x00000119'] = @{ Nombre='VIDEO_SCHEDULER_INTERNAL_ERROR'; Recomendacion='El planificador de video detecto una violacion.' }
+$Script:TablaBugCheck['0x00000139'] = @{ Nombre='KERNEL_SECURITY_CHECK_FAILURE'; Recomendacion='Una comprobacion de seguridad del nucleo fallo (corrupcion de datos).' }
+$Script:TablaBugCheck['0x0000013a'] = @{ Nombre='KERNEL_MODE_HEAP_CORRUPTION'; Recomendacion='Corrupcion del heap del modo nucleo.' }
+$Script:TablaBugCheck['0x0000009c'] = @{ Nombre='MACHINE_CHECK_EXCEPTION'; Recomendacion='Error de hardware reportado por la CPU.' }
+$Script:TablaBugCheck['0x000000a0'] = @{ Nombre='INTERNAL_POWER_ERROR'; Recomendacion='Error interno del subsistema de energia.' }
+$Script:TablaBugCheck['0x000000a5'] = @{ Nombre='ACPI_BIOS_ERROR'; Recomendacion='La BIOS no es compatible con la especificacion ACPI.' }
+$Script:TablaBugCheck['0x00000154'] = @{ Nombre='UNEXPECTED_STORE_EXCEPTION'; Recomendacion='El componente de almacenamiento de Windows genero una excepcion.' }
+$Script:TablaBugCheck['0x000000f7'] = @{ Nombre='DRIVER_OVERRAN_STACK_BUFFER'; Recomendacion='Un driver sobrepaso un buffer de pila.' }
+$Script:TablaBugCheck['0x00000141'] = @{ Nombre='VIDEO_ENGINE_TIMEOUT_DETECTED'; Recomendacion='El motor de video no respondio.' }
+$Script:TablaBugCheck['0x0000018b'] = @{ Nombre='SECURE_KERNEL_ERROR'; Recomendacion='Error en el nucleo seguro (VBS/HVCI).' }
+$Script:TablaBugCheck['0xc000021a'] = @{ Nombre='STATUS_SYSTEM_PROCESS_TERMINATED'; Recomendacion='Un proceso critico del modo usuario (winlogon/csrss) termino.' }
+$Script:TablaBugCheck['0xc0000221'] = @{ Nombre='STATUS_IMAGE_CHECKSUM_MISMATCH'; Recomendacion='Un archivo critico del sistema esta danado.' }
+
+function Global:Get-InfoBugCheck {
     param([string]$Codigo)
     if ($Codigo) {
         $clave = $Codigo.ToLower()
@@ -3131,7 +3432,119 @@ function Get-HistorialBSOD {
     return $resultado
 }
 
-function Accion-DiagnosticoMemoriaWindows {
+# Devuelve toda la informacion de un codigo (nombre, causa, pasos, gravedad) combinando las tablas.
+function Global:Get-DetalleBugCheck {
+    param([string]$Codigo)
+    $info = Get-InfoBugCheck -Codigo $Codigo
+    $clave = if ($Codigo) { $Codigo.ToLower() } else { '' }
+    $det = if ($clave -and $Script:DetalleBugCheck.ContainsKey($clave)) { $Script:DetalleBugCheck[$clave] } else { $null }
+    $causa = if ($det) { $det.Causa } else { 'Este codigo no esta en el catalogo del programa. Las pantallas azules suelen deberse a controladores defectuosos, memoria RAM o disco con errores, sobrecalentamiento, archivos de sistema danados o software de seguridad/terceros en conflicto.' }
+    $pasos = if ($det) { $det.Pasos } else { @(
+        'Busca el codigo en internet (boton Buscar en internet) para ver su significado exacto.',
+        'Actualiza Windows y todos los controladores, empezando por video, red y almacenamiento.',
+        'Ejecuta Verificar archivos de sistema (SFC) y reparacion DISM.',
+        'Ejecuta el Diagnostico de memoria de Windows y comprueba el disco (chkdsk).',
+        'Revisa que programa o driver instalaste justo antes de la primera pantalla azul y desinstalalo.') }
+    $grav = if ($det) { $det.Gravedad } else { 'Media' }
+    [PSCustomObject]@{
+        Codigo = $Codigo; Nombre = $info.Nombre; Recomendacion = $info.Recomendacion
+        Causa = $causa; Pasos = $pasos; Gravedad = $grav
+    }
+}
+
+# Ventana que explica el motivo de la pantalla azul y como solucionarla paso a paso.
+function Global:Show-VentanaExplicarBSOD {
+    param([string]$Codigo, [string]$Fecha = '')
+    $d = Get-DetalleBugCheck -Codigo $Codigo
+    $colorGrav = if ($d.Gravedad -eq 'Alta') { '#FF6B6B' } else { '#FFC857' }
+    $textoGrav = if ($d.Gravedad -eq 'Alta') { 'Gravedad ALTA: puede indicar hardware o disco fallando' } else { 'Gravedad MEDIA: normalmente software o controladores' }
+    $codigoMostrar = if ($Codigo) { $Codigo } else { 'Desconocido' }
+    $fechaTxt = if ($Fecha) { "Ocurrio: $Fecha" } else { 'Consulta del catalogo de errores' }
+
+    [xml]$x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Explicacion del error - The Dragon Tool" Height="700" Width="820" MinHeight="520" MinWidth="640"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="16">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+    <WrapPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+      <Button x:Name="BtnExpSFC" Content="🔍 Verificar archivos (SFC)" Width="205" Height="40" FontSize="12"/>
+      <Button x:Name="BtnExpMem" Content="🧠 Diagnostico de memoria" Width="205" Height="40" FontSize="12"/>
+      <Button x:Name="BtnExpDisco" Content="💽 Comprobar disco (chkdsk)" Width="205" Height="40" FontSize="12"/>
+      <Button x:Name="BtnExpDrivers" Content="🕒 Controladores recientes" Width="205" Height="40" FontSize="12"/>
+      <Button x:Name="BtnExpWeb" Content="🌐 Buscar en internet" Width="205" Height="40" FontSize="12"/>
+      <Button x:Name="BtnExpCopiar" Content="📋 Copiar explicacion" Width="205" Height="40" FontSize="12"/>
+    </WrapPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel>
+        <Border Background="#0A0D14" BorderBrush="#232B3D" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,12">
+          <StackPanel>
+            <TextBlock x:Name="TxtExpNombre" FontSize="20" FontWeight="Bold" Foreground="White" TextWrapping="Wrap"/>
+            <TextBlock x:Name="TxtExpCodigo" FontFamily="Consolas" FontSize="13" Foreground="#66AEFF" Margin="0,4,0,0"/>
+            <TextBlock x:Name="TxtExpFecha" FontSize="12" Foreground="#7C93BD" Margin="0,2,0,8"/>
+            <Border x:Name="BrdExpGravedad" CornerRadius="12" Padding="10,3" HorizontalAlignment="Left" Background="#1A1F2B">
+              <TextBlock x:Name="TxtExpGravedad" FontSize="12" FontWeight="Bold"/>
+            </Border>
+          </StackPanel>
+        </Border>
+        <Border Background="#0A0D14" BorderBrush="#232B3D" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,12">
+          <StackPanel>
+            <TextBlock Text="❓ ¿Por que ocurre?" FontSize="15" FontWeight="Bold" Foreground="#66AEFF" Margin="0,0,0,6"/>
+            <TextBlock x:Name="TxtExpCausa" Foreground="White" TextWrapping="Wrap" FontSize="13" LineHeight="21"/>
+          </StackPanel>
+        </Border>
+        <Border Background="#0A0D14" BorderBrush="#232B3D" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,12">
+          <StackPanel>
+            <TextBlock Text="🛠️ ¿Como solucionarlo? (en este orden)" FontSize="15" FontWeight="Bold" Foreground="#66AEFF" Margin="0,0,0,6"/>
+            <TextBlock x:Name="TxtExpPasos" Foreground="White" TextWrapping="Wrap" FontSize="13" LineHeight="23"/>
+          </StackPanel>
+        </Border>
+        <Border Background="#0A0D14" BorderBrush="#232B3D" BorderThickness="1" CornerRadius="8" Padding="16">
+          <StackPanel>
+            <TextBlock Text="⚡ Resumen rapido" FontSize="15" FontWeight="Bold" Foreground="#66AEFF" Margin="0,0,0,6"/>
+            <TextBlock x:Name="TxtExpResumen" Foreground="White" TextWrapping="Wrap" FontSize="13" LineHeight="21"/>
+          </StackPanel>
+        </Border>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>
+"@
+    $w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
+    try { if ($window -and $window.IsVisible) { $w.Owner = $window } } catch {}
+    Iniciar-EfectosNeon -Ventana $w
+
+    $w.FindName("TxtExpNombre").Text = $d.Nombre
+    $w.FindName("TxtExpCodigo").Text = "Codigo STOP: $codigoMostrar"
+    $w.FindName("TxtExpFecha").Text = $fechaTxt
+    $g = $w.FindName("TxtExpGravedad")
+    $g.Text = $textoGrav
+    $g.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($colorGrav)
+    $w.FindName("TxtExpCausa").Text = $d.Causa
+    $n = 0
+    $w.FindName("TxtExpPasos").Text = (($d.Pasos | ForEach-Object { $n++; "$n.  $_" }) -join "`r`n")
+    $w.FindName("TxtExpResumen").Text = $d.Recomendacion
+
+    $nombre = $d.Nombre
+    $textoCopia = "$($d.Nombre) ($codigoMostrar)`r`n`r`nPor que ocurre:`r`n$($d.Causa)`r`n`r`nComo solucionarlo:`r`n" + (($d.Pasos | ForEach-Object -Begin { $k = 0 } -Process { $k++; "$k. $_" }) -join "`r`n")
+    $w.FindName("BtnExpSFC").Add_Click({ Accion-VerificarArchivosSistema })
+    $w.FindName("BtnExpMem").Add_Click({ Accion-DiagnosticoMemoriaWindows })
+    $w.FindName("BtnExpDisco").Add_Click({
+        try { Start-Process cmd.exe -ArgumentList '/k', 'chkdsk %SystemDrive% & echo. & echo Para reparar errores ejecuta: chkdsk %SystemDrive% /f /r (pedira reiniciar)' -Verb RunAs } catch { Write-Log "No se pudo abrir chkdsk: $($_.Exception.Message)" -Tipo AVISO }
+    })
+    $w.FindName("BtnExpDrivers").Add_Click({ Accion-VerControladoresRecientes })
+    $w.FindName("BtnExpWeb").Add_Click({
+        try { Start-Process ("https://www.bing.com/search?q=" + [uri]::EscapeDataString("pantalla azul $codigoMostrar $nombre solucion")) } catch {}
+    }.GetNewClosure())
+    $w.FindName("BtnExpCopiar").Add_Click({
+        try { Set-Clipboard -Value $textoCopia; Write-Log "Explicacion del error copiada al portapapeles." -Tipo OK } catch { Write-Log "No se pudo copiar: $($_.Exception.Message)" -Tipo AVISO }
+    }.GetNewClosure())
+    $w.Show()
+}
+
+function Global:Accion-DiagnosticoMemoriaWindows {
     if (Show-Confirm "Se abrira el Diagnostico de memoria de Windows. El equipo se reiniciara para ejecutar la prueba. ¿Continuar?") {
         Write-Log "Iniciando Diagnostico de memoria de Windows (requiere reinicio)." -Tipo OK
         Start-Process "mdsched.exe"
@@ -3192,7 +3605,7 @@ function Accion-ExportarHistorialBSOD {
     }
 }
 
-function Accion-VerControladoresRecientes {
+function Global:Accion-VerControladoresRecientes {
     Write-Log "Buscando controladores instalados/actualizados recientemente (para correlacionar con las BSOD)..."
     $todos = Get-TodosLosControladores
     $recientes = $todos | Where-Object { $_.Fecha -ne "Desconocida" } | Sort-Object Fecha -Descending | Select-Object -First 10
@@ -3225,7 +3638,7 @@ function Cargar-DatosBSODTab {
 # ---------------------------------------------------------------------------
 
 $Script:DiagLogIniciado = $false
-function Write-DiagLog {
+function Global:Write-DiagLog {
     param([string]$Mensaje)
     Write-Log $Mensaje -Tipo INFO
     $caja = $window.FindName("TxtDiagResultados")
@@ -3245,13 +3658,7 @@ function Write-DiagLog {
         try {
             $callStack = Get-PSCallStack
             $origen = if ($callStack.Count -gt 1 -and $callStack[1].FunctionName) { $callStack[1].FunctionName } else { "Prueba de diagnostico" }
-            $Script:RegistroErrores.Add([PSCustomObject]@{
-                Hora      = (Get-Date).ToString('HH:mm:ss')
-                Tipo      = 'AVISO'
-                Categoria = 'Prueba de diagnostico'
-                Origen    = $origen
-                Mensaje   = $Mensaje
-            }) | Out-Null
+            Add-RegistroError -Tipo 'AVISO' -Categoria 'Prueba de diagnostico' -Origen $origen -Mensaje $Mensaje
         } catch {}
     }
 }
@@ -4537,89 +4944,198 @@ function Show-SeleccionPruebaRAM {
     $winSelRam.ShowDialog() | Out-Null
 }
 
+# ---------------------------------------------------------------------------
+#  PRUEBAS DE DIAGNOSTICO (hardware / sistema) - versiones reforzadas
+# ---------------------------------------------------------------------------
+
+$Script:DiagAdvertencias = 0
+function Global:Diag-Ok { param([string]$m) Write-DiagLog "   ✔ $m" }
+function Global:Diag-Aviso {
+    param([string]$m)
+    $Script:DiagAdvertencias++
+    Write-DiagLog "   ⚠ ATENCION: $m"
+}
+
 function Accion-ProbarAlmacenamiento {
-    Write-DiagLog "=== ALMACENAMIENTO ==="
+    Write-DiagLog "=== ALMACENAMIENTO (salud, S.M.A.R.T. y espacio) ==="
+    $hallado = $false
     try {
-        $discos = Get-PhysicalDisk -ErrorAction Stop
-        foreach ($d in $discos) {
-            Write-DiagLog " - $($d.FriendlyName) | Salud: $($d.HealthStatus) | Estado: $($d.OperationalStatus)"
+        foreach ($d in @(Get-PhysicalDisk -ErrorAction Stop)) {
+            $hallado = $true
+            $tam = [math]::Round($d.Size / 1GB, 0)
+            Write-DiagLog " - $($d.FriendlyName) | $($d.MediaType) | $($d.BusType) | $tam GB"
+            if ("$($d.HealthStatus)" -eq 'Healthy') { Diag-Ok "Salud del disco: Healthy (OK)" }
+            else { Diag-Aviso "Salud del disco: $($d.HealthStatus) ($($d.OperationalStatus)). Haz copia de seguridad y revisa el disco." }
+            try {
+                $rc = $d | Get-StorageReliabilityCounter -ErrorAction Stop
+                $partes = @()
+                if ($null -ne $rc.Temperature) { $partes += "Temperatura: $($rc.Temperature) °C" }
+                if ($null -ne $rc.Wear) { $partes += "Desgaste: $($rc.Wear)%" }
+                if ($null -ne $rc.PowerOnHours) { $partes += "Horas encendido: $($rc.PowerOnHours) h" }
+                if ($partes.Count) { Write-DiagLog "     $($partes -join ' | ')" }
+                if ($rc.Temperature -gt 60) { Diag-Aviso "Temperatura alta del disco ($($rc.Temperature) °C). Mejora la ventilacion." }
+                if ($rc.Wear -gt 85) { Diag-Aviso "El SSD tiene mas del 85% de desgaste. Planea reemplazarlo." }
+                $sinCorregir = [int]$rc.ReadErrorsUncorrected + [int]$rc.WriteErrorsUncorrected
+                if ($sinCorregir -gt 0) { Diag-Aviso "El disco acumula $sinCorregir operacion(es) de lectura/escritura sin corregir." }
+            } catch {}
         }
-    } catch {
-        Write-DiagLog "No se pudo usar Get-PhysicalDisk en este equipo."
-    }
+    } catch { Write-DiagLog "Get-PhysicalDisk no esta disponible en este equipo." }
     try {
-        $smart = Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction Stop
-        foreach ($s in $smart) {
-            $estado = if ($s.PredictFailure) { "FALLO INMINENTE DETECTADO (S.M.A.R.T.)" } else { "Sin fallos detectados (S.M.A.R.T. OK)" }
-            Write-DiagLog " - $($s.InstanceName): $estado"
+        foreach ($s in @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction Stop)) {
+            $hallado = $true
+            if ($s.PredictFailure) { Diag-Aviso "S.M.A.R.T. predice un fallo inminente en: $($s.InstanceName). Haz copia de seguridad YA." }
+            else { Diag-Ok "S.M.A.R.T.: sin fallos predichos ($($s.InstanceName))" }
         }
-    } catch {
-        Write-DiagLog "No se pudo leer el estado S.M.A.R.T. detallado en este equipo."
-    }
+    } catch { Write-DiagLog "   (El estado S.M.A.R.T. detallado no esta disponible en este equipo/controlador.)" }
+    try {
+        foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop)) {
+            if ($v.Size -le 0) { continue }
+            $libre = [math]::Round($v.FreeSpace / 1GB, 1); $total = [math]::Round($v.Size / 1GB, 0)
+            $pct = [math]::Round(($v.FreeSpace / $v.Size) * 100, 0)
+            Write-DiagLog " - Unidad $($v.DeviceID) ($($v.VolumeName)) | $libre GB libres de $total GB ($pct% libre)"
+            if ($pct -lt 10) { Diag-Aviso "Poco espacio libre en $($v.DeviceID). Libera espacio para evitar lentitud." }
+        }
+    } catch {}
+    if (-not $hallado) { Write-DiagLog "No se pudo obtener informacion de los discos." }
 }
 
 function Accion-ProbarVelocidadDisco {
-    Write-DiagLog "=== VELOCIDAD DE DISCO (lectura/escritura, C:) ==="
+    Write-DiagLog "=== VELOCIDAD DE DISCO (lectura/escritura secuencial en $($env:SystemDrive)) ==="
+    $archivoPrueba = $null
     try {
+        $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
+        $tamanoMB = 256
+        if ($ld -and ($ld.FreeSpace / 1MB) -lt ($tamanoMB * 3)) { $tamanoMB = 64 }
         $carpetaPrueba = Join-Path $env:TEMP "DragonToolDiskTest"
         if (-not (Test-Path $carpetaPrueba)) { New-Item -Path $carpetaPrueba -ItemType Directory -Force | Out-Null }
         $archivoPrueba = Join-Path $carpetaPrueba "prueba.tmp"
-        $tamanoMB = 200
-        $datos = New-Object byte[] ($tamanoMB * 1MB)
-        (New-Object Random).NextBytes($datos)
+        $bloque = New-Object byte[] (4MB)
+        (New-Object Random).NextBytes($bloque)
+        $bloques = [int]($tamanoMB / 4)
 
-        $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
-        [System.IO.File]::WriteAllBytes($archivoPrueba, $datos)
-        $cronometro.Stop()
-        $velocidadEscritura = [math]::Round($tamanoMB / $cronometro.Elapsed.TotalSeconds, 1)
+        Write-DiagLog "Escribiendo $tamanoMB MB (con escritura directa a disco)..."
+        $fs = New-Object System.IO.FileStream($archivoPrueba, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 4MB, [System.IO.FileOptions]::WriteThrough)
+        $cron = [System.Diagnostics.Stopwatch]::StartNew()
+        for ($i = 0; $i -lt $bloques; $i++) { $fs.Write($bloque, 0, $bloque.Length); if ($i % 8 -eq 0) { Wait-UI -Milisegundos 1 } }
+        $fs.Flush($true); $cron.Stop(); $fs.Close()
+        $vEsc = [math]::Round($tamanoMB / [math]::Max(0.001, $cron.Elapsed.TotalSeconds), 1)
 
-        $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
-        [System.IO.File]::ReadAllBytes($archivoPrueba) | Out-Null
-        $cronometro.Stop()
-        $velocidadLectura = [math]::Round($tamanoMB / $cronometro.Elapsed.TotalSeconds, 1)
+        Write-DiagLog "Leyendo $tamanoMB MB..."
+        $fs = New-Object System.IO.FileStream($archivoPrueba, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, 4MB, [System.IO.FileOptions]::SequentialScan)
+        $buf = New-Object byte[] (4MB)
+        $cron = [System.Diagnostics.Stopwatch]::StartNew()
+        $i = 0
+        while ($fs.Read($buf, 0, $buf.Length) -gt 0) { $i++; if ($i % 8 -eq 0) { Wait-UI -Milisegundos 1 } }
+        $cron.Stop(); $fs.Close()
+        $vLec = [math]::Round($tamanoMB / [math]::Max(0.001, $cron.Elapsed.TotalSeconds), 1)
 
-        Remove-Item $archivoPrueba -Force -ErrorAction SilentlyContinue
-        $datos = $null
-        Write-DiagLog "Escritura: $velocidadEscritura MB/s | Lectura: $velocidadLectura MB/s (prueba de $tamanoMB MB en $carpetaPrueba)"
+        Write-DiagLog " - Escritura: $vEsc MB/s | Lectura: $vLec MB/s (la lectura puede verse inflada por la cache de Windows)"
+        $clase = if ($vEsc -lt 60) { "muy lento (tipico de disco mecanico viejo o USB 2.0)" } elseif ($vEsc -lt 150) { "disco mecanico (HDD) o unidad externa" } elseif ($vEsc -lt 400) { "SSD SATA" } else { "SSD rapido (NVMe)" }
+        Write-DiagLog " - Clasificacion por velocidad de escritura: $clase"
+        if ($vEsc -lt 60) { Diag-Aviso "Velocidad de escritura muy baja. Un SSD mejoraria enormemente la fluidez del equipo." } else { Diag-Ok "Velocidad de disco aceptable." }
     } catch {
         Write-DiagLog "No se pudo medir la velocidad de disco: $($_.Exception.Message)"
+    } finally {
+        if ($archivoPrueba) { Remove-Item $archivoPrueba -Force -ErrorAction SilentlyContinue }
     }
 }
 
 function Accion-ProbarVentiladores {
-    Write-DiagLog "=== VENTILADORES ==="
-    try {
-        $fans = Get-CimInstance Win32_Fan -ErrorAction Stop
-        if ($fans -and $fans.Count -gt 0) {
-            foreach ($f in $fans) { Write-DiagLog " - $($f.Name) | Estado: $($f.Status)" }
-        } else {
-            Write-DiagLog "Windows no expone datos de ventiladores en este equipo. Es una limitacion muy comun: la mayoria de fabricantes solo la muestran en su propia app (MSI Center, Armoury Crate, HWiNFO, etc.), no es un error de este programa."
-        }
-    } catch {
-        Write-DiagLog "Windows no expone datos de ventiladores en este equipo (limitacion comun de hardware/BIOS)."
+    Write-DiagLog "=== VENTILADORES Y ESTADO TERMICO ==="
+    $fans = @()
+    try { $fans = @(Get-CimInstance Win32_Fan -ErrorAction Stop) } catch {}
+    if ($fans.Count -gt 0) {
+        foreach ($f in $fans) { Write-DiagLog " - $($f.Name) | Estado: $($f.Status)" }
+    } else {
+        Write-DiagLog "Windows no expone la velocidad de los ventiladores en este equipo (limitacion comun: solo la muestran las apps del fabricante o HWiNFO)."
     }
+    # Pista indirecta: si la CPU esta lenta frente a su maximo y hay calor, los ventiladores/disipador pueden no estar cumpliendo.
+    try {
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        Write-DiagLog " - CPU: $($cpu.CurrentClockSpeed) MHz actuales (maximo $($cpu.MaxClockSpeed) MHz) | Carga: $($cpu.LoadPercentage)%"
+    } catch {}
+    $temp = Get-TemperaturaCPUC
+    if ($null -ne $temp) {
+        Write-DiagLog " - Temperatura del sistema: $temp °C"
+        if ($temp -ge 90) { Diag-Aviso "Temperatura critica. Apaga el equipo, limpia el polvo y revisa ventiladores y pasta termica." }
+        elseif ($temp -ge 80) { Diag-Aviso "Temperatura alta. Revisa la ventilacion y limpia el equipo." }
+        else { Diag-Ok "Temperatura normal; la refrigeracion parece funcionar." }
+    } else {
+        Write-DiagLog "   (No hay sensor de temperatura accesible; escucha si los ventiladores giran al encender y al exigir al equipo.)"
+    }
+}
+
+# Devuelve la temperatura (C) del sistema usando varias fuentes de Windows, o $null si no hay ninguna.
+function Global:Get-TemperaturaCPUC {
+    try {
+        $z = @(Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction Stop)
+        $vals = @($z | ForEach-Object { [double]$_.Temperature - 273.15 } | Where-Object { $_ -gt 0 -and $_ -lt 150 })
+        if ($vals.Count) { return [math]::Round(($vals | Measure-Object -Maximum).Maximum, 1) }
+    } catch {}
+    try {
+        $z = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop)
+        $vals = @($z | ForEach-Object { ($_.CurrentTemperature / 10) - 273.15 } | Where-Object { $_ -gt 0 -and $_ -lt 150 })
+        if ($vals.Count) { return [math]::Round(($vals | Measure-Object -Maximum).Maximum, 1) }
+    } catch {}
+    return $null
+}
+
+function Accion-ProbarTemperaturaCPU {
+    Write-DiagLog "=== TEMPERATURA DEL PROCESADOR ==="
+    $t = Get-TemperaturaCPUC
+    if ($null -ne $t) {
+        Write-DiagLog " - Zona termica mas caliente: $t °C"
+        if ($t -ge 90) { Diag-Aviso "Temperatura critica ($t °C). Riesgo de apagados y desgaste. Limpia el equipo y cambia la pasta termica." }
+        elseif ($t -ge 80) { Diag-Aviso "Temperatura alta ($t °C). Revisa la ventilacion." }
+        elseif ($t -ge 70) { Write-DiagLog "   Temperatura elevada pero aceptable bajo carga." }
+        else { Diag-Ok "Temperatura normal." }
+    } else {
+        Write-DiagLog "Windows no expone la temperatura en este equipo (limitacion comun de hardware/BIOS: usa HWiNFO o la app del fabricante)."
+    }
+    try {
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        Write-DiagLog " - $($cpu.Name.Trim()) | $($cpu.NumberOfCores) nucleos / $($cpu.NumberOfLogicalProcessors) hilos | $($cpu.CurrentClockSpeed) de $($cpu.MaxClockSpeed) MHz"
+    } catch {}
 }
 
 function Accion-ProbarGraficaDiag {
     Write-DiagLog "=== TARJETA GRAFICA ==="
-    $gpus = Get-InfoGPU
-    if ($gpus -and $gpus.Count -gt 0) {
-        foreach ($g in $gpus) { Write-DiagLog " - $($g.Nombre) [$($g.Fabricante)] | Driver: $($g.DriverVersion)" }
-    } else {
-        Write-DiagLog "No se detecto ninguna tarjeta de video."
-    }
+    try {
+        $vcs = @(Get-CimInstance Win32_VideoController -ErrorAction Stop)
+        if ($vcs.Count -eq 0) { Write-DiagLog "No se detecto ninguna tarjeta de video."; return }
+        foreach ($g in $vcs) {
+            Write-DiagLog " - $($g.Name) | Driver: $($g.DriverVersion) | Fecha del driver: $(try { $g.DriverDate.ToString('yyyy-MM-dd') } catch { 'desconocida' })"
+            $vram = $null
+            try {
+                $claves = Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue
+                foreach ($k in $claves) {
+                    $p = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+                    if ($p.DriverDesc -eq $g.Name -and $p.'HardwareInformation.qwMemorySize') { $vram = [math]::Round([double]$p.'HardwareInformation.qwMemorySize' / 1GB, 1); break }
+                }
+            } catch {}
+            if (-not $vram -and $g.AdapterRAM) { $vram = [math]::Round($g.AdapterRAM / 1GB, 1) }
+            if ($vram) { Write-DiagLog "     Memoria de video: $vram GB" }
+            if ($g.CurrentHorizontalResolution) { Write-DiagLog "     Salida: $($g.CurrentHorizontalResolution) x $($g.CurrentVerticalResolution) @ $($g.CurrentRefreshRate) Hz" }
+            if ("$($g.Status)" -eq 'OK' -and [int]$g.ConfigManagerErrorCode -eq 0) { Diag-Ok "La tarjeta funciona correctamente segun Windows." }
+            else { Diag-Aviso "Windows reporta problemas con esta tarjeta (estado: $($g.Status), codigo $($g.ConfigManagerErrorCode)). Reinstala el controlador de video." }
+            if ($g.Name -match 'Microsoft Basic Display') { Diag-Aviso "Se esta usando el controlador basico de Microsoft: instala el driver real de la tarjeta." }
+            try {
+                if ($g.DriverDate -and ((Get-Date) - $g.DriverDate).TotalDays -gt 730) { Write-DiagLog "     Driver con mas de 2 años: conviene actualizarlo." }
+            } catch {}
+        }
+    } catch { Write-DiagLog "No se pudo consultar la tarjeta grafica." }
 }
 
 function Accion-ProbarBateria {
     Write-DiagLog "=== BATERIA ==="
     try {
-        $bateria = Get-CimInstance Win32_Battery -ErrorAction Stop
-        if (-not $bateria) {
-            Write-DiagLog "No se detecto ninguna bateria (equipo de escritorio, o bateria no reconocida)."
-            return
-        }
+        $bateria = @(Get-CimInstance Win32_Battery -ErrorAction Stop)
+        if ($bateria.Count -eq 0) { Write-DiagLog "No se detecto ninguna bateria (equipo de escritorio, o bateria no reconocida)."; return }
+        $estados = @{ 1 = 'Descargando'; 2 = 'Conectada a la corriente'; 3 = 'Carga completa'; 4 = 'Baja'; 5 = 'Critica'; 6 = 'Cargando'; 7 = 'Cargando (alta)'; 8 = 'Cargando (baja)'; 9 = 'Cargando (critica)'; 11 = 'Parcialmente cargada' }
         foreach ($b in $bateria) {
-            Write-DiagLog " - $($b.Name) | Estado: $($b.Status) | Carga estimada: $($b.EstimatedChargeRemaining)%"
+            $est = if ($estados.ContainsKey([int]$b.BatteryStatus)) { $estados[[int]$b.BatteryStatus] } else { "$($b.BatteryStatus)" }
+            Write-DiagLog " - $($b.Name) | $est | Carga: $($b.EstimatedChargeRemaining)%"
+            if ($b.EstimatedRunTime -and $b.EstimatedRunTime -lt 71582788) { Write-DiagLog "     Autonomia estimada: $($b.EstimatedRunTime) min" }
         }
         try {
             $carpetaTemp = Join-Path $env:TEMP "DragonToolBattery"
@@ -4628,116 +5144,402 @@ function Accion-ProbarBateria {
             powercfg /batteryreport /xml /output $archivoXml *> $null
             if (Test-Path $archivoXml) {
                 $contenido = Get-Content $archivoXml -Raw
-                $disenoMatch = [regex]::Match($contenido, 'DesignCapacity="(\d+)"')
-                $actualMatch = [regex]::Match($contenido, 'FullChargeCapacity="(\d+)"')
-                if ($disenoMatch.Success -and $actualMatch.Success) {
-                    $diseno = [double]$disenoMatch.Groups[1].Value
-                    $actual = [double]$actualMatch.Groups[1].Value
+                $dis = [regex]::Match($contenido, '<DesignCapacity>(\d+)</DesignCapacity>')
+                $act = [regex]::Match($contenido, '<FullChargeCapacity>(\d+)</FullChargeCapacity>')
+                if (-not $dis.Success) { $dis = [regex]::Match($contenido, 'DesignCapacity="(\d+)"'); $act = [regex]::Match($contenido, 'FullChargeCapacity="(\d+)"') }
+                $cic = [regex]::Match($contenido, '<CycleCount>(\d+)</CycleCount>')
+                if ($dis.Success -and $act.Success) {
+                    $diseno = [double]$dis.Groups[1].Value; $actual = [double]$act.Groups[1].Value
                     if ($diseno -gt 0) {
                         $desgaste = [math]::Round((1 - ($actual / $diseno)) * 100, 1)
-                        Write-DiagLog "Capacidad de diseño: $diseno mWh | Capacidad maxima actual: $actual mWh | Desgaste: $desgaste%"
+                        Write-DiagLog "     Capacidad de diseño: $diseno mWh | Capacidad maxima actual: $actual mWh | Desgaste: $desgaste%"
+                        if ($cic.Success -and [int]$cic.Groups[1].Value -gt 0) { Write-DiagLog "     Ciclos de carga: $($cic.Groups[1].Value)" }
+                        if ($desgaste -gt 50) { Diag-Aviso "La bateria perdio mas del 50% de su capacidad. Conviene reemplazarla." }
+                        elseif ($desgaste -gt 30) { Diag-Aviso "La bateria esta bastante desgastada ($desgaste%)." }
+                        else { Diag-Ok "Salud de la bateria buena (desgaste $desgaste%)." }
                     }
                 }
                 Remove-Item $archivoXml -Force -ErrorAction SilentlyContinue
             }
-        } catch {
-            Write-DiagLog "No se pudo generar el reporte detallado de desgaste de bateria (no critico)."
-        }
-    } catch {
-        Write-DiagLog "No se detecto ninguna bateria (equipo de escritorio, o bateria no reconocida)."
-    }
+        } catch { Write-DiagLog "   (No se pudo generar el reporte detallado de desgaste; no es critico.)" }
+    } catch { Write-DiagLog "No se detecto ninguna bateria (equipo de escritorio, o bateria no reconocida)." }
 }
 
 function Accion-ProbarRed {
     Write-DiagLog "=== RED / CONECTIVIDAD ==="
+    try {
+        foreach ($a in @(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' })) {
+            Write-DiagLog " - Adaptador activo: $($a.Name) ($($a.InterfaceDescription)) | $($a.LinkSpeed)"
+        }
+    } catch {}
+    try {
+        $cfg = Get-NetIPConfiguration -ErrorAction Stop | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1
+        if ($cfg) {
+            Write-DiagLog " - IP: $($cfg.IPv4Address.IPAddress) | Puerta de enlace: $($cfg.IPv4DefaultGateway.NextHop) | DNS: $(($cfg.DNSServer.ServerAddresses | Select-Object -First 2) -join ', ')"
+            try {
+                $gw = Test-Connection -ComputerName $cfg.IPv4DefaultGateway.NextHop -Count 3 -ErrorAction Stop
+                $ms = [math]::Round(($gw | Measure-Object ResponseTime -Average).Average, 0)
+                Write-DiagLog " - Router: responde en $ms ms"
+                if ($ms -gt 30) { Diag-Aviso "El router responde lento ($ms ms): mala senal WiFi o red local congestionada." } else { Diag-Ok "Red local (router) en buen estado." }
+            } catch { Diag-Aviso "El router no responde a ping (puede estar bloqueado o haber un problema de red local)." }
+        } else { Diag-Aviso "No hay puerta de enlace configurada: el equipo no esta conectado a una red." }
+    } catch {}
     try {
         $resultado = Test-Connection -ComputerName "8.8.8.8" -Count 4 -ErrorAction Stop
         $latencias = $resultado | ForEach-Object { $_.ResponseTime }
         $promedio = [math]::Round(($latencias | Measure-Object -Average).Average, 0)
         $minimo = ($latencias | Measure-Object -Minimum).Minimum
         $maximo = ($latencias | Measure-Object -Maximum).Maximum
-        Write-DiagLog "Conectividad a Internet: OK | Latencia promedio: $promedio ms (min $minimo ms, max $maximo ms)"
+        Write-DiagLog " - Internet: OK | Latencia promedio: $promedio ms (min $minimo ms, max $maximo ms)"
+        if ($promedio -gt 100) { Diag-Aviso "Latencia alta hacia Internet ($promedio ms)." }
+        $perdidos = 4 - @($resultado).Count
+        if ($perdidos -gt 0) { Diag-Aviso "Se perdieron $perdidos de 4 paquetes: conexion inestable." }
     } catch {
-        Write-DiagLog "Sin conexion a Internet detectada (no respondio 8.8.8.8)."
+        Diag-Aviso "Sin conexion a Internet detectada (no respondio 8.8.8.8)."
         return
     }
     try {
-        $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+        $cron = [System.Diagnostics.Stopwatch]::StartNew()
         Resolve-DnsName -Name "www.google.com" -ErrorAction Stop | Out-Null
-        $cronometro.Stop()
-        Write-DiagLog "Resolucion DNS: OK ($($cronometro.ElapsedMilliseconds) ms)"
-    } catch {
-        Write-DiagLog "No se pudo resolver DNS (posible problema con el servidor DNS configurado)."
-    }
+        $cron.Stop()
+        Write-DiagLog " - Resolucion DNS: OK ($($cron.ElapsedMilliseconds) ms)"
+    } catch { Diag-Aviso "No se pudo resolver DNS (posible problema con el servidor DNS configurado)." }
     try {
-        $conexionHttps = Test-NetConnection -ComputerName "www.google.com" -Port 443 -WarningAction SilentlyContinue -ErrorAction Stop
-        if ($conexionHttps.TcpTestSucceeded) { Write-DiagLog "Conexion HTTPS (puerto 443) de salida: OK" }
-        else { Write-DiagLog "No se pudo establecer conexion HTTPS de salida (revisa el firewall)." }
-    } catch {
-        Write-DiagLog "No se pudo probar la conexion HTTPS de salida."
-    }
+        $https = Test-NetConnection -ComputerName "www.google.com" -Port 443 -WarningAction SilentlyContinue -ErrorAction Stop
+        if ($https.TcpTestSucceeded) { Write-DiagLog " - Conexion HTTPS (puerto 443): OK" }
+        else { Diag-Aviso "No se pudo establecer conexion HTTPS de salida (revisa el firewall)." }
+    } catch { Write-DiagLog "   (No se pudo probar la conexion HTTPS.)" }
 }
 
-function Accion-ProbarTemperaturaCPU {
-    Write-DiagLog "=== TEMPERATURA DEL PROCESADOR ==="
+function Accion-ProbarWifi {
+    Write-DiagLog "=== WI-FI (senal y velocidad) ==="
     try {
-        $temp = Get-CimInstance -Namespace "root/wmi" -ClassName "MSAcpi_ThermalZoneTemperature" -ErrorAction Stop
-        if ($temp) {
-            foreach ($t in $temp) {
-                $celsius = [math]::Round(($t.CurrentTemperature / 10) - 273.15, 1)
-                Write-DiagLog " - Zona termica: $celsius °C"
-            }
-        } else {
-            Write-DiagLog "Windows no expone la temperatura en este equipo. Es una limitacion comun: muchos fabricantes solo la muestran en su propia app (HWiNFO, software de la placa madre, etc.), no es un error de este programa."
+        $salida = @(netsh wlan show interfaces 2>$null)
+        if ($salida.Count -eq 0 -or ($salida -join ' ') -match 'no hay ninguna interfaz|There is no wireless interface|not running') {
+            Write-DiagLog "No se detecto ninguna interfaz Wi-Fi activa (equipo de escritorio con cable o adaptador apagado)."
+            return
         }
+        $lineas = $salida | Where-Object { $_ -match '^\s*(Nombre|Name|SSID|BSSID|Estado|State|Tipo de radio|Radio type|Banda|Band|Canal|Channel|Velocidad|Receive rate|Transmit rate|Se.al|Signal)' }
+        foreach ($l in $lineas) { Write-DiagLog "   $($l.Trim())" }
+        $sen = $salida | Where-Object { $_ -match '^\s*(Se.al|Signal)\s*:\s*(\d+)\s*%' } | Select-Object -First 1
+        if ($sen -match '(\d+)\s*%') {
+            $pct = [int]$Matches[1]
+            if ($pct -ge 70) { Diag-Ok "Senal Wi-Fi buena ($pct%)." }
+            elseif ($pct -ge 40) { Write-DiagLog "   Senal Wi-Fi regular ($pct%): acercate al router para mejor velocidad." }
+            else { Diag-Aviso "Senal Wi-Fi debil ($pct%). Acercate al router o usa un repetidor/cable." }
+        }
+    } catch { Write-DiagLog "No se pudo consultar el Wi-Fi." }
+}
+
+function Accion-ProbarVelocidadInternet {
+    Write-DiagLog "=== VELOCIDAD DE INTERNET (descarga) ==="
+    $wc = $null
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $wc = New-Object System.Net.WebClient
+        $tam = 25000000
+        Write-DiagLog "Descargando 25 MB de prueba (puede tardar unos segundos)..."
+        $cron = [System.Diagnostics.Stopwatch]::StartNew()
+        $tarea = $wc.DownloadDataTaskAsync("https://speed.cloudflare.com/__down?bytes=$tam")
+        while (-not $tarea.IsCompleted -and $cron.Elapsed.TotalSeconds -lt 40) { Wait-UI -Milisegundos 100 }
+        $cron.Stop()
+        if (-not $tarea.IsCompleted) { $wc.CancelAsync(); Diag-Aviso "La descarga de prueba tardo mas de 40 s: conexion muy lenta o inestable."; return }
+        if ($tarea.IsFaulted) { throw $tarea.Exception.GetBaseException() }
+        $bytes = $tarea.Result.Length
+        $mbps = [math]::Round(($bytes * 8 / 1MB) / [math]::Max(0.001, $cron.Elapsed.TotalSeconds), 1)
+        Write-DiagLog " - Velocidad de descarga: $mbps Mbps ($([math]::Round($bytes/1MB,1)) MB en $([math]::Round($cron.Elapsed.TotalSeconds,1)) s)"
+        if ($mbps -lt 10) { Diag-Aviso "Velocidad baja ($mbps Mbps). Revisa el Wi-Fi o contacta a tu proveedor." }
+        elseif ($mbps -lt 50) { Write-DiagLog "   Velocidad suficiente para uso general y video HD." }
+        else { Diag-Ok "Buena velocidad de descarga." }
     } catch {
-        Write-DiagLog "Windows no expone la temperatura del procesador en este equipo (limitacion comun de hardware/BIOS, no es un error de este programa)."
-    }
+        Write-DiagLog "No se pudo medir la velocidad de Internet (¿sin conexion o bloqueada?): $($_.Exception.Message)"
+    } finally { if ($wc) { $wc.Dispose() } }
 }
 
 function Accion-ProbarTiempoArranque {
     Write-DiagLog "=== TIEMPO DE ARRANQUE ==="
     try {
-        $evento = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 1 -ErrorAction Stop
-        $xmlEvento = [xml]$evento.ToXml()
-        $tiempoMs = ($xmlEvento.Event.EventData.Data | Where-Object { $_.Name -eq 'BootTime' }).'#text'
-        if ($tiempoMs) {
-            $segundos = [math]::Round([double]$tiempoMs / 1000, 1)
-            Write-DiagLog "El ultimo arranque de Windows tardo: $segundos segundos (registrado: $($evento.TimeCreated))"
-        } else {
-            Write-DiagLog "No se pudo leer la duracion del ultimo arranque."
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $up = (Get-Date) - $os.LastBootUpTime
+        Write-DiagLog " - Encendido desde: $($os.LastBootUpTime.ToString('yyyy-MM-dd HH:mm')) (hace $([int]$up.TotalHours) h $($up.Minutes) min)"
+        if ($up.TotalDays -gt 14) { Diag-Aviso "El equipo lleva mas de 14 dias sin reiniciarse. Reiniciar aplica actualizaciones y libera memoria." }
+    } catch {}
+    try {
+        $eventos = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Diagnostics-Performance/Operational'; Id = 100 } -MaxEvents 5 -ErrorAction Stop)
+        $tiempos = @()
+        foreach ($ev in $eventos) {
+            $xmlEvento = [xml]$ev.ToXml()
+            $ms = ($xmlEvento.Event.EventData.Data | Where-Object { $_.Name -eq 'BootTime' }).'#text'
+            if ($ms) { $tiempos += [math]::Round([double]$ms / 1000, 1); Write-DiagLog " - Arranque del $($ev.TimeCreated.ToString('yyyy-MM-dd HH:mm')): $([math]::Round([double]$ms/1000,1)) s" }
         }
-    } catch {
-        Write-DiagLog "No se pudo obtener el tiempo de arranque (el registro de eventos puede no tener esta informacion disponible en este equipo)."
-    }
+        if ($tiempos.Count) {
+            $prom = [math]::Round(($tiempos | Measure-Object -Average).Average, 1)
+            if ($prom -gt 90) { Diag-Aviso "Arranque lento (promedio $prom s). Desactiva programas de inicio y considera un SSD." }
+            elseif ($prom -gt 45) { Write-DiagLog "   Promedio $prom s: aceptable, se puede mejorar quitando programas de inicio." }
+            else { Diag-Ok "Arranque rapido (promedio $prom s)." }
+        } else { Write-DiagLog "No se pudo leer la duracion de los arranques." }
+    } catch { Write-DiagLog "El registro de eventos no tiene datos de arranque en este equipo." }
 }
 
 function Accion-ProbarBluetooth {
     Write-DiagLog "=== BLUETOOTH ==="
     try {
-        $bt = Get-PnpDevice -Class Bluetooth -PresentOnly -ErrorAction Stop
-        if ($bt) {
-            foreach ($b in $bt) { Write-DiagLog " - $($b.FriendlyName) | Estado: $($b.Status)" }
-        } else {
-            Write-DiagLog "No se detecto ningun adaptador Bluetooth en este equipo."
-        }
-    } catch {
-        Write-DiagLog "No se detecto ningun adaptador Bluetooth en este equipo."
-    }
+        $bt = @(Get-PnpDevice -Class Bluetooth -PresentOnly -ErrorAction Stop)
+        if ($bt.Count -eq 0) { Write-DiagLog "No se detecto ningun adaptador Bluetooth en este equipo."; return }
+        foreach ($b in $bt) { Write-DiagLog " - $($b.FriendlyName) | Estado: $($b.Status)" }
+        $malos = @($bt | Where-Object { "$($_.Status)" -ne 'OK' -and $_.FriendlyName -notmatch 'Enumerator|Enumerador' })
+        if ($malos.Count) { Diag-Aviso "Hay $($malos.Count) dispositivo(s) Bluetooth con problemas. Actualiza el driver del adaptador." } else { Diag-Ok "El adaptador Bluetooth funciona correctamente." }
+        $svc = Get-Service bthserv -ErrorAction SilentlyContinue
+        if ($svc) { Write-DiagLog " - Servicio Bluetooth: $($svc.Status) ($($svc.StartType))" }
+    } catch { Write-DiagLog "No se detecto ningun adaptador Bluetooth en este equipo." }
 }
 
 function Accion-ProbarPuertosUSB {
     Write-DiagLog "=== DISPOSITIVOS USB CONECTADOS ==="
     try {
-        $dispositivosUsb = Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object { $_.InstanceId -like 'USB\*' }
-        if ($dispositivosUsb) {
-            foreach ($d in $dispositivosUsb) { Write-DiagLog " - $($d.FriendlyName) | Estado: $($d.Status)" }
-        } else {
-            Write-DiagLog "No se detectaron dispositivos USB conectados actualmente."
+        $usb = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object { $_.InstanceId -like 'USB\*' })
+        if ($usb.Count -eq 0) { Write-DiagLog "No se detectaron dispositivos USB conectados actualmente."; return }
+        foreach ($d in $usb) { Write-DiagLog " - $($d.FriendlyName) | Estado: $($d.Status)" }
+        $malos = @($usb | Where-Object { "$($_.Status)" -ne 'OK' })
+        if ($malos.Count) { Diag-Aviso "$($malos.Count) dispositivo(s) USB con problemas (desconocidos o sin driver): $(($malos | ForEach-Object { $_.FriendlyName }) -join ', ')" }
+        else { Diag-Ok "Todos los dispositivos USB funcionan correctamente ($($usb.Count))." }
+        try {
+            $hub = @(Get-CimInstance Win32_USBHub -ErrorAction Stop)
+            Write-DiagLog " - Concentradores/controladores USB detectados: $($hub.Count)"
+        } catch {}
+    } catch { Write-DiagLog "No se pudo obtener la lista de dispositivos USB." }
+}
+
+# --- Pruebas nuevas ---
+
+$Script:TipoCpuBenchListo = $false
+function Ensure-TipoCpuBench {
+    if ($Script:TipoCpuBenchListo) { return }
+    $codigo = @"
+using System;
+using System.Threading;
+public static class DragonCpuBench {
+    static volatile bool detener;
+    static long total;
+    static Thread[] hilos;
+    static void Trabajo() {
+        long n = 0; double x = 1.0001;
+        while (!detener) {
+            for (int i = 1; i < 20000; i++) { x = x * 1.0000001 + Math.Sqrt(i); if (x > 1e9) x = 1.0; }
+            n += 20000;
         }
-    } catch {
-        Write-DiagLog "No se pudo obtener la lista de dispositivos USB."
+        Interlocked.Add(ref total, n);
     }
+    public static void Iniciar(int cantidad) {
+        detener = false; total = 0; hilos = new Thread[cantidad];
+        for (int i = 0; i < cantidad; i++) { hilos[i] = new Thread(Trabajo); hilos[i].IsBackground = true; hilos[i].Start(); }
+    }
+    public static long Detener() { detener = true; foreach (Thread t in hilos) t.Join(); return total; }
+}
+"@
+    Add-Type -TypeDefinition $codigo -ErrorAction Stop
+    $Script:TipoCpuBenchListo = $true
+}
+
+function Accion-ProbarCPUBenchmark {
+    Write-DiagLog "=== RENDIMIENTO DEL PROCESADOR (prueba de 10 segundos) ==="
+    try {
+        Ensure-TipoCpuBench
+        $hilos = [Environment]::ProcessorCount
+        $t0 = Get-TemperaturaCPUC
+        Write-DiagLog "Prueba con 1 hilo (4 s)..."
+        [DragonCpuBench]::Iniciar(1)
+        $cron = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($cron.Elapsed.TotalSeconds -lt 4) { Wait-UI -Milisegundos 100 }
+        $n1 = [DragonCpuBench]::Detener(); $s1 = $cron.Elapsed.TotalSeconds
+        $v1 = [math]::Round($n1 / $s1 / 1e6, 1)
+
+        Write-DiagLog "Prueba con los $hilos hilos del procesador (5 s)..."
+        [DragonCpuBench]::Iniciar($hilos)
+        $cron = [System.Diagnostics.Stopwatch]::StartNew()
+        $tMax = $t0
+        while ($cron.Elapsed.TotalSeconds -lt 5) { Wait-UI -Milisegundos 100 }
+        $tFin = Get-TemperaturaCPUC
+        $nN = [DragonCpuBench]::Detener(); $sN = $cron.Elapsed.TotalSeconds
+        $vN = [math]::Round($nN / $sN / 1e6, 1)
+        $escala = [math]::Round($vN / [math]::Max(0.001, $v1), 1)
+
+        Write-DiagLog " - 1 hilo: $v1 millones de operaciones/s"
+        Write-DiagLog " - $hilos hilos: $vN millones de operaciones/s (escala x$escala sobre 1 hilo)"
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cpu) { Write-DiagLog " - CPU: $($cpu.Name.Trim()) | $($cpu.NumberOfCores) nucleos / $($cpu.NumberOfLogicalProcessors) hilos" }
+        if ($null -ne $tFin) {
+            Write-DiagLog " - Temperatura: $t0 °C antes -> $tFin °C tras la prueba"
+            if ($tFin -ge 90) { Diag-Aviso "La CPU llego a $tFin °C bajo carga: refrigeracion insuficiente." }
+            elseif ($tFin -ge 80) { Diag-Aviso "La CPU llego a $tFin °C bajo carga: conviene revisar disipador y pasta termica." }
+            else { Diag-Ok "Temperatura bajo carga correcta." }
+        }
+        if ($escala -lt ($hilos * 0.35)) { Diag-Aviso "La CPU escalo poco con todos los hilos (x$escala de $hilos): puede haber limitacion por temperatura/energia o procesos pesados en segundo plano." }
+        else { Diag-Ok "El procesador escala bien con todos sus hilos." }
+        $ref = if ($v1 -lt 40) { "bajo (equipo antiguo o de gama baja)" } elseif ($v1 -lt 90) { "medio" } else { "alto" }
+        Write-DiagLog " - Rendimiento por hilo: $ref (referencia relativa; compara con otros equipos usando esta misma prueba)"
+    } catch {
+        try { [DragonCpuBench]::Detener() | Out-Null } catch {}
+        Write-DiagLog "No se pudo ejecutar la prueba de rendimiento: $($_.Exception.Message)"
+    }
+}
+
+function Accion-InfoHardwareCompleta {
+    Write-DiagLog "=== INFORMACION DEL HARDWARE ==="
+    try {
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+        Write-DiagLog " - Equipo: $($cs.Manufacturer) $($cs.Model)"
+    } catch {}
+    try {
+        $bb = Get-CimInstance Win32_BaseBoard -ErrorAction Stop; $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop
+        Write-DiagLog " - Placa base: $($bb.Manufacturer) $($bb.Product)"
+        Write-DiagLog " - BIOS: $($bios.SMBIOSBIOSVersion) ($(try { $bios.ReleaseDate.ToString('yyyy-MM-dd') } catch { 'sin fecha' }))"
+        try { if ($bios.ReleaseDate -and ((Get-Date) - $bios.ReleaseDate).TotalDays -gt 1460) { Write-DiagLog "   La BIOS tiene mas de 4 años: revisa si el fabricante publico una actualizacion." } } catch {}
+    } catch {}
+    try {
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        Write-DiagLog " - Procesador: $($cpu.Name.Trim()) | $($cpu.NumberOfCores) nucleos / $($cpu.NumberOfLogicalProcessors) hilos | hasta $($cpu.MaxClockSpeed) MHz | Cache L3: $([math]::Round($cpu.L3CacheSize/1024,0)) MB"
+    } catch {}
+    try {
+        $tipos = @{ 20 = 'DDR'; 21 = 'DDR2'; 24 = 'DDR3'; 26 = 'DDR4'; 34 = 'DDR5'; 35 = 'LPDDR5' }
+        $mods = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop)
+        $arr = Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction SilentlyContinue | Select-Object -First 1
+        $totalGB = [math]::Round(($mods | Measure-Object Capacity -Sum).Sum / 1GB, 0)
+        Write-DiagLog " - Memoria RAM: $totalGB GB en $($mods.Count) modulo(s)$(if ($arr) { " de $($arr.MemoryDevices) ranuras" })"
+        foreach ($m in $mods) {
+            $tp = if ($tipos.ContainsKey([int]$m.SMBIOSMemoryType)) { $tipos[[int]$m.SMBIOSMemoryType] } else { 'RAM' }
+            Write-DiagLog "     · $($m.BankLabel) $($m.DeviceLocator): $([math]::Round($m.Capacity/1GB,0)) GB $tp $($m.Speed) MHz | $("$($m.Manufacturer)".Trim()) $("$($m.PartNumber)".Trim())"
+        }
+        if ($mods.Count -eq 1 -and $arr -and $arr.MemoryDevices -gt 1) { Write-DiagLog "   Solo hay 1 modulo: con 2 modulos iguales trabajaria en doble canal (mas rendimiento)." }
+    } catch {}
+    try {
+        foreach ($g in @(Get-CimInstance Win32_VideoController -ErrorAction Stop)) { Write-DiagLog " - Video: $($g.Name) | Driver $($g.DriverVersion)" }
+    } catch {}
+    try {
+        foreach ($d in @(Get-PhysicalDisk -ErrorAction Stop)) { Write-DiagLog " - Disco: $($d.FriendlyName) | $($d.MediaType) $($d.BusType) | $([math]::Round($d.Size/1GB,0)) GB | $($d.HealthStatus)" }
+    } catch {}
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        Write-DiagLog " - Sistema: $($os.Caption) $($os.OSArchitecture) | Version $($os.Version) | Instalado el $($os.InstallDate.ToString('yyyy-MM-dd'))"
+    } catch {}
+    try { Write-DiagLog " - Arranque seguro (Secure Boot): $(if (Confirm-SecureBootUEFI -ErrorAction Stop) { 'Activado' } else { 'Desactivado' })" } catch { Write-DiagLog " - Arranque seguro: no disponible (BIOS clasica o sin permisos)" }
+    try { $tpm = Get-Tpm -ErrorAction Stop; Write-DiagLog " - TPM: $(if ($tpm.TpmPresent) { if ($tpm.TpmReady) { 'Presente y listo' } else { 'Presente' } } else { 'No presente' })" } catch {}
+}
+
+function Accion-ProbarDispositivosAudio {
+    Write-DiagLog "=== DISPOSITIVOS DE AUDIO ==="
+    try {
+        $snd = @(Get-CimInstance Win32_SoundDevice -ErrorAction Stop)
+        if ($snd.Count -eq 0) { Diag-Aviso "No se detecto ninguna tarjeta de sonido."; return }
+        foreach ($s in $snd) {
+            Write-DiagLog " - $($s.Name) | Estado: $($s.Status) | Fabricante: $($s.Manufacturer)"
+            if ("$($s.Status)" -ne 'OK') { Diag-Aviso "El dispositivo de audio '$($s.Name)' reporta estado $($s.Status). Reinstala su controlador." }
+        }
+        $svc = Get-Service Audiosrv -ErrorAction SilentlyContinue
+        if ($svc) {
+            Write-DiagLog " - Servicio de audio de Windows: $($svc.Status)"
+            if ("$($svc.Status)" -ne 'Running') { Diag-Aviso "El servicio de audio de Windows (Audiosrv) esta detenido; sin el no habra sonido." } else { Diag-Ok "Audio de Windows en ejecucion." }
+        }
+        try {
+            $ep = @(Get-PnpDevice -Class AudioEndpoint -PresentOnly -ErrorAction Stop)
+            foreach ($e in $ep) { Write-DiagLog "     · $($e.FriendlyName) ($($e.Status))" }
+        } catch {}
+        Write-DiagLog "Usa los botones de altavoz izquierdo/derecho y microfono para probar el sonido real."
+    } catch { Write-DiagLog "No se pudo consultar los dispositivos de audio." }
+}
+
+function Accion-ProbarDispositivosProblemas {
+    Write-DiagLog "=== DISPOSITIVOS CON PROBLEMAS (Administrador de dispositivos) ==="
+    try {
+        $codigos = @{ 1 = 'mal configurado'; 3 = 'driver danado o poca memoria'; 10 = 'no puede iniciar'; 12 = 'recursos en conflicto'; 18 = 'reinstalar driver'; 19 = 'registro danado'; 22 = 'deshabilitado'; 24 = 'no presente o con fallos'; 28 = 'sin driver instalado'; 31 = 'no funciona correctamente'; 33 = 'recurso no determinado'; 39 = 'driver danado o ausente'; 40 = 'registro invalido'; 41 = 'Windows lo detecto pero no puede cargarlo'; 43 = 'Windows lo detuvo (reporto problemas)'; 45 = 'dispositivo no conectado'; 52 = 'driver sin firma digital' }
+        $malos = @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object { $_.ConfigManagerErrorCode -gt 0 })
+        if ($malos.Count -eq 0) { Diag-Ok "Ningun dispositivo reporta problemas."; return }
+        foreach ($m in $malos) {
+            $c = [int]$m.ConfigManagerErrorCode
+            $txt = if ($codigos.ContainsKey($c)) { $codigos[$c] } else { 'con problema' }
+            if ($c -eq 22) { Write-DiagLog " - $($m.Name): deshabilitado manualmente (codigo 22)" }
+            else { Diag-Aviso "$($m.Name): $txt (codigo $c). Actualiza o reinstala el controlador en la pestaña Controladores." }
+        }
+    } catch { Write-DiagLog "No se pudo consultar el Administrador de dispositivos." }
+}
+
+function Accion-ProbarEventosCriticos {
+    Write-DiagLog "=== EVENTOS CRITICOS DEL SISTEMA (ultimos 7 dias) ==="
+    try {
+        $desde = (Get-Date).AddDays(-7)
+        $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Level = @(1, 2); StartTime = $desde } -MaxEvents 400 -ErrorAction Stop)
+        if ($ev.Count -eq 0) { Diag-Ok "Sin incidencias graves en el registro del sistema durante la ultima semana."; return }
+        Write-DiagLog "Se registraron $($ev.Count) evento(s) graves. Los mas frecuentes:"
+        $grupos = $ev | Group-Object ProviderName | Sort-Object Count -Descending | Select-Object -First 8
+        foreach ($g in $grupos) {
+            $ult = ($g.Group | Sort-Object TimeCreated -Descending | Select-Object -First 1)
+            $msg = (("$($ult.Message)" -split "`r?`n")[0]).Trim(); if ($msg.Length -gt 110) { $msg = $msg.Substring(0, 110) + '...' }
+            Write-DiagLog " - $($g.Name): $($g.Count) vez/veces | ultimo $($ult.TimeCreated.ToString('dd/MM HH:mm')) | $msg"
+        }
+        $graves = @($ev | Where-Object { $_.ProviderName -match 'WHEA|Kernel-Power|disk|Ntfs|nvlddmkm|stornvme|volmgr|BugCheck' })
+        if ($graves.Count) { Diag-Aviso "Hay $($graves.Count) evento(s) relacionados con hardware/apagados inesperados. Usa 'Escanear hardware' en la pestaña Registro de errores para el detalle." }
+    } catch { Write-DiagLog "No se pudo leer el registro de eventos del sistema (¿sin permisos?)." }
+}
+
+function Accion-ProbarEstadoWindows {
+    Write-DiagLog "=== ESTADO GENERAL DE WINDOWS ==="
+    try {
+        $pendiente = (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired') -or (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\PendingFileRenameOperations')
+        if ($pendiente) { Diag-Aviso "Hay un reinicio pendiente (actualizaciones o instalaciones). Reinicia el equipo." } else { Diag-Ok "No hay reinicios pendientes." }
+    } catch {}
+    try {
+        $mp = Get-MpComputerStatus -ErrorAction Stop
+        if ($mp.RealTimeProtectionEnabled) { Diag-Ok "Proteccion en tiempo real de Windows Defender: activa." } else { Diag-Aviso "La proteccion en tiempo real esta desactivada (puede haber otro antivirus instalado)." }
+        $edad = ((Get-Date) - $mp.AntivirusSignatureLastUpdated).TotalDays
+        if ($edad -gt 7) { Diag-Aviso "Las firmas del antivirus tienen $([int]$edad) dias. Actualizalas." } else { Write-DiagLog " - Firmas del antivirus al dia ($([int]$edad) dia(s))." }
+    } catch { Write-DiagLog " - Windows Defender no disponible (puede haber otro antivirus)." }
+    try {
+        $fw = @(Get-NetFirewallProfile -ErrorAction Stop | Where-Object { -not $_.Enabled })
+        if ($fw.Count) { Diag-Aviso "El firewall esta desactivado en: $(($fw | ForEach-Object { $_.Name }) -join ', ')." } else { Diag-Ok "Firewall de Windows activo en todos los perfiles." }
+    } catch {}
+    try {
+        $uac = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction Stop).EnableLUA
+        if ($uac -eq 1) { Diag-Ok "Control de cuentas de usuario (UAC) activo." } else { Diag-Aviso "UAC esta desactivado: menos proteccion ante programas maliciosos." }
+    } catch {}
+    try {
+        $svc = Get-Service wuauserv -ErrorAction Stop
+        Write-DiagLog " - Windows Update: servicio $($svc.Status) ($($svc.StartType))"
+        if ("$($svc.StartType)" -eq 'Disabled') { Write-DiagLog "   Windows Update esta deshabilitado: no recibira parches de seguridad." }
+    } catch {}
+    try {
+        $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction Stop
+        $pct = [math]::Round(($ld.FreeSpace / $ld.Size) * 100, 0)
+        if ($pct -lt 10) { Diag-Aviso "La unidad del sistema tiene solo $pct% libre." } else { Diag-Ok "Espacio en la unidad del sistema correcto ($pct% libre)." }
+    } catch {}
+}
+
+function Accion-DiagnosticoCompletoEquipo {
+    $Script:DiagAdvertencias = 0
+    Write-DiagLog "========================================"
+    Write-DiagLog "   DIAGNOSTICO COMPLETO DEL EQUIPO"
+    Write-DiagLog "========================================"
+    Accion-InfoHardwareCompleta
+    Accion-ProbarGraficaDiag
+    Accion-VerDetallesPantalla
+    Accion-ProbarAlmacenamiento
+    Accion-ProbarVelocidadDisco
+    Accion-ProbarVentiladores
+    Accion-ProbarTemperaturaCPU
+    Accion-ProbarBateria
+    Accion-ProbarDispositivosAudio
+    Accion-ProbarBluetooth
+    Accion-ProbarPuertosUSB
+    Accion-ProbarRed
+    Accion-ProbarWifi
+    Accion-ProbarTiempoArranque
+    Accion-ProbarDispositivosProblemas
+    Accion-ProbarEstadoWindows
+    Accion-ProbarEventosCriticos
+    Write-DiagLog "========================================"
+    if ($Script:DiagAdvertencias -eq 0) { Write-DiagLog "   RESULTADO: todo en orden, sin advertencias." }
+    else { Write-DiagLog "   RESULTADO: $($Script:DiagAdvertencias) advertencia(s) para revisar (lineas con ⚠ ATENCION)." }
+    Write-DiagLog "   Para camara, microfono, altavoces, teclado, mouse, pantalla, RAM, velocidad de Internet y rendimiento de CPU usa los botones individuales."
+    Write-DiagLog "========================================"
 }
 
 function Show-PruebaMouse {
@@ -4938,40 +5740,97 @@ function Test-PermisoCamaraWindows {
 
 $Script:MensajeSinImagenCamara = "No llega imagen de la camara. Revisa: 1) Configuracion de Windows > Privacidad y seguridad > Camara: activa 'Acceso a la camara' y 'Permitir que las aplicaciones de escritorio accedan a la camara'. 2) Que ninguna otra app (Teams, Zoom, navegador) este usando la camara. 3) Que la camara no tenga el obturador/tapa fisica cerrada o este desactivada con una tecla Fn."
 
-function Show-PruebaCamara {
-    Write-DiagLog "=== CAMARA (vista previa en vivo propia) ==="
+# --- Ventana de camara unica (Diagnostico y Modificacion) ---
+# La camara SIEMPRE se abre en su propia ventana: lista de camaras, resolucion, rotar/voltear,
+# captura de foto y reintento automatico con otras resoluciones si no llega imagen.
+
+$Global:VentanaCamaraActual = $null
+
+function Global:Aplicar-TransformCamaraEx {
+    param($Bitmap, [int]$Rot, [bool]$FlipH, [bool]$FlipV)
+    switch ($Rot) {
+        90  { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate90FlipNone) }
+        180 { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate180FlipNone) }
+        270 { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate270FlipNone) }
+        default {}
+    }
+    if ($FlipH) { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipX) }
+    if ($FlipV) { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipY) }
+}
+
+function Global:Show-VentanaCamara {
+    param([string]$Origen = 'Diagnostico', [int]$IndiceInicial = 0)
+
+    if ($Global:VentanaCamaraActual) {
+        try { $Global:VentanaCamaraActual.WindowState = 'Normal'; $Global:VentanaCamaraActual.Activate(); return } catch { $Global:VentanaCamaraActual = $null }
+    }
+    $esDiag = ($Origen -eq 'Diagnostico')
+    $log = if ($esDiag) { { param($m) Write-DiagLog $m } } else { { param($m) Write-Log $m } }
+
+    if ($esDiag) { Write-DiagLog "=== CAMARA (ventana de vista previa en vivo) ===" }
     if (-not (Initialize-ModuloCamara)) {
-        Write-DiagLog "El modulo de camara no esta disponible (se descarga la primera vez y requiere internet; revisa el registro de actividad)."
+        if ($esDiag) { Write-DiagLog "El modulo de camara no esta disponible (se descarga la primera vez y requiere internet; revisa el registro de actividad)." }
         if (Show-Confirm "No se pudo preparar el modulo de camara propio (se descarga la primera vez y necesita internet).`n`n¿Quieres abrir la app Camara de Windows para probar la camara?" "Camara") {
             try { Start-Process "microsoft.windows.camera:" } catch {}
         }
         return
     }
     if (-not (Test-PermisoCamaraWindows)) {
-        Write-DiagLog "AVISO: Windows tiene bloqueado el acceso a la camara para apps de escritorio (Configuracion > Privacidad > Camara)."
+        & $log "AVISO: Windows tiene bloqueado el acceso a la camara para apps de escritorio (Configuracion > Privacidad > Camara)."
     }
 
-    try {
-        $dispositivos = New-Object AForge.Video.DirectShow.FilterInfoCollection([AForge.Video.DirectShow.FilterCategory]::VideoInputDevice)
-        if ($dispositivos.Count -eq 0) {
-            Write-DiagLog "No se detecto ninguna camara conectada."
-            return
-        }
-        Write-DiagLog "Camara(s) detectada(s): $($dispositivos.Count)"
-        for ($i = 0; $i -lt $dispositivos.Count; $i++) { Write-DiagLog " - $($dispositivos[$i].Name)" }
+    $dispositivos = $null
+    try { $dispositivos = New-Object AForge.Video.DirectShow.FilterInfoCollection([AForge.Video.DirectShow.FilterCategory]::VideoInputDevice) } catch {
+        & $log "No se pudo listar las camaras: $($_.Exception.Message)"
+    }
+    if (-not $dispositivos -or $dispositivos.Count -eq 0) {
+        & $log "No se detecto ninguna camara conectada."
+        Show-Aviso "No se detecto ninguna camara conectada.`n`nRevisa que este enchufada y que Windows la muestre en el Administrador de dispositivos (Camaras / Dispositivos de imagen)." "Sin camara"
+        return
+    }
+    & $log "Camara(s) detectada(s): $($dispositivos.Count)"
+    for ($i = 0; $i -lt $dispositivos.Count; $i++) { & $log " - $($dispositivos[$i].Name)" }
 
-        [xml]$xamlCam = @"
+    [xml]$xamlCam = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Prueba de camara - The Dragon Tool" Height="560" Width="760" WindowStartupLocation="CenterScreen" Background="#10141D">
+        Title="Camara - The Dragon Tool" Height="680" Width="980" MinHeight="520" MinWidth="760"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
   <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
   <DockPanel Margin="14">
     <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
-    <TextBlock DockPanel.Dock="Top" Text="Si ves tu imagen en vivo, la camara funciona correctamente." Foreground="White" Margin="0,0,0,10"/>
-    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-      <Button x:Name="BtnCerrarCamara" Content="Cerrar" Width="100"/>
-    </StackPanel>
-    <Border BorderBrush="#232B3D" BorderThickness="1" Background="#070A10">
+    <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="220"/>
+      </Grid.ColumnDefinitions>
+      <ComboBox x:Name="CmbCamVentana" Grid.Column="0" Margin="0,0,8,0"/>
+      <Button x:Name="BtnCamRefrescar" Grid.Column="1" Content="🔄" Width="42" Margin="0,0,8,0" ToolTip="Volver a buscar camaras"/>
+      <ComboBox x:Name="CmbCamResolucion" Grid.Column="2" ToolTip="Resolucion de la camara"/>
+    </Grid>
+    <WrapPanel DockPanel.Dock="Bottom" Margin="0,10,0,0" HorizontalAlignment="Center">
+      <Button x:Name="BtnCamIniciar" Content="▶️ Iniciar" Width="110" Height="38" BorderBrush="#2F7CF6"/>
+      <Button x:Name="BtnCamDetener" Content="⏹️ Detener" Width="110" Height="38"/>
+      <Button x:Name="BtnCamRotIzq" Content="↺ Rotar" Width="95" Height="38"/>
+      <Button x:Name="BtnCamRotDer" Content="↻ Rotar" Width="95" Height="38"/>
+      <Button x:Name="BtnCamFlipH" Content="⇋ Espejo" Width="100" Height="38"/>
+      <Button x:Name="BtnCamFlipV" Content="⇕ Voltear" Width="100" Height="38"/>
+      <Button x:Name="BtnCamReset" Content="↩️ Restablecer" Width="125" Height="38"/>
+      <Button x:Name="BtnCamFoto" Content="📸 Capturar foto" Width="145" Height="38" BorderBrush="#2F7CF6"/>
+      <Button x:Name="BtnCamAppWindows" Content="🪟 App Camara de Windows" Width="200" Height="38"/>
+      <Button x:Name="BtnCerrarCamara" Content="Cerrar" Width="90" Height="38" BorderBrush="#A85050"/>
+    </WrapPanel>
+    <TextBlock x:Name="TxtCamInfo" DockPanel.Dock="Bottom" Foreground="#66AEFF" FontFamily="Consolas" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap" Text="Camara detenida."/>
+    <Border DockPanel.Dock="Right" Width="230" Margin="10,0,0,0" BorderBrush="#232B3D" BorderThickness="1" Background="#0A0D14" CornerRadius="6" Padding="10">
+      <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel>
+          <TextBlock Text="🔎 Detalles" Foreground="#66AEFF" FontWeight="Bold" Margin="0,0,0,6"/>
+          <TextBlock x:Name="TxtCamDetalles" Foreground="White" TextWrapping="Wrap" FontSize="12" Text="Se mostraran al llegar la primera imagen."/>
+        </StackPanel>
+      </ScrollViewer>
+    </Border>
+    <Border BorderBrush="#232B3D" BorderThickness="1" Background="#070A10" CornerRadius="6">
       <Grid>
         <Image x:Name="ImgCamara" Stretch="Uniform"/>
         <TextBlock x:Name="TxtCamEstado" Text="Iniciando la camara..." Foreground="#66AEFF" TextWrapping="Wrap" TextAlignment="Center"
@@ -4981,79 +5840,244 @@ function Show-PruebaCamara {
   </DockPanel>
 </Window>
 "@
-        $readerCam = New-Object System.Xml.XmlNodeReader $xamlCam
-        $winCam = [Windows.Markup.XamlReader]::Load($readerCam)
-        Iniciar-EfectosNeon -Ventana $winCam
-        $imgCtrl = $winCam.FindName("ImgCamara")
-        $txtEstado = $winCam.FindName("TxtCamEstado")
+    $readerCam = New-Object System.Xml.XmlNodeReader $xamlCam
+    $winCam = [Windows.Markup.XamlReader]::Load($readerCam)
+    try { if ($window -and $window.IsVisible) { $winCam.Owner = $window } } catch {}
+    Iniciar-EfectosNeon -Ventana $winCam
 
-        $receptor = New-Object DragonCamReceptor
-        $videoSource = New-Object AForge.Video.DirectShow.VideoCaptureDevice($dispositivos[0].MonikerString)
-        $receptor.Conectar($videoSource)
-        $mensajeSinImagen = $Script:MensajeSinImagenCamara
-        $est = @{ Inicio = (Get-Date); Frames = 0 }
+    $img        = $winCam.FindName("ImgCamara")
+    $txtEstado  = $winCam.FindName("TxtCamEstado")
+    $txtInfo    = $winCam.FindName("TxtCamInfo")
+    $txtDet     = $winCam.FindName("TxtCamDetalles")
+    $cmbCam     = $winCam.FindName("CmbCamVentana")
+    $cmbRes     = $winCam.FindName("CmbCamResolucion")
+    $mensajeSin = $Script:MensajeSinImagenCamara
 
-        # Temporizador de la interfaz (~30 por segundo): toma el ultimo fotograma guardado por el
-        # receptor y lo muestra. Todo esto corre en el hilo de la interfaz, donde PowerShell si funciona.
-        $temporizador = New-Object System.Windows.Threading.DispatcherTimer
-        $temporizador.Interval = [TimeSpan]::FromMilliseconds(33)
-        $temporizador.Add_Tick({
-            $bmp = $receptor.Tomar()
-            if (-not $bmp) {
-                if ($est.Frames -eq 0 -and ((Get-Date) - $est.Inicio).TotalSeconds -gt 6) {
-                    $detalleError = if ($receptor.UltimoError) { "`n`nError reportado: $($receptor.UltimoError)" } else { "" }
-                    $txtEstado.Text = $mensajeSinImagen + $detalleError
-                }
-                return
-            }
-            try {
-                $hbitmap = $bmp.GetHbitmap()
-                try {
-                    $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHBitmap($hbitmap, [IntPtr]::Zero, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
-                    $src.Freeze()
-                    $imgCtrl.Source = $src
-                } finally {
-                    try { [DragonToolGdi]::DeleteObject($hbitmap) | Out-Null } catch {}
-                }
-                $est.Frames++
-                if ($txtEstado.Visibility -ne 'Collapsed') { $txtEstado.Visibility = 'Collapsed' }
-            } catch {} finally { $bmp.Dispose() }
-        }.GetNewClosure())
-
-        $videoSource.Start()
-        $temporizador.Start()
-
-        $winCam.Add_Closed({
-            try { $temporizador.Stop() } catch {}
-            try { $videoSource.SignalToStop(); $videoSource.WaitForStop() } catch {}
-            try { $receptor.Liberar() } catch {}
-        }.GetNewClosure())
-        $winCam.FindName("BtnCerrarCamara").Add_Click({ $winCam.Close() })
-
-        $winCam.ShowDialog() | Out-Null
-        Write-DiagLog "Prueba de camara finalizada ($($est.Frames) fotogramas mostrados)."
-    } catch {
-        Write-DiagLog "No se pudo iniciar la prueba de camara: $($_.Exception.Message)"
+    $st = @{
+        Dispositivos = $dispositivos; Fuente = $null; Receptor = (New-Object DragonCamReceptor)
+        Rot = 0; FlipH = $false; FlipV = $false; Inicio = (Get-Date); Frames = 0; Activa = $false
+        Src = $null; Caps = @(); IdxRes = -1; Probadas = @(); Cargando = $false
+        Ancho = 0; Alto = 0; FpsContador = 0; FpsMarca = (Get-Date); Fps = 0; DetallesCargados = $false
+        Origen = $Origen; FramesTotal = 0
     }
+
+    $temporizador = New-Object System.Windows.Threading.DispatcherTimer
+    $temporizador.Interval = [TimeSpan]::FromMilliseconds(33)
+
+    # Texto de orientacion actual
+    $textoInfo = {
+        $o = @()
+        if ($st.Rot -ne 0) { $o += "giro $($st.Rot) grados" }
+        if ($st.FlipH) { $o += "espejo" }
+        if ($st.FlipV) { $o += "volteada" }
+        $ori = if ($o.Count) { $o -join ', ' } else { 'normal' }
+        $res = if ($st.Ancho -gt 0) { "$($st.Ancho)x$($st.Alto)" } else { '---' }
+        $txtInfo.Text = "Resolucion: $res   |   FPS: $($st.Fps)   |   Fotogramas: $($st.Frames)   |   Orientacion: $ori"
+    }.GetNewClosure()
+
+    # Detiene solo la fuente de video (no el temporizador)
+    $pararFuente = {
+        if ($st.Fuente) {
+            try { $st.Fuente.SignalToStop(); $st.Fuente.WaitForStop() } catch {}
+            $st.Fuente = $null
+        }
+    }.GetNewClosure()
+
+    # Elige la resolucion mas compatible: la mas cercana a 640x480
+    $mejorResolucion = {
+        param($caps, $excluir)
+        $mejor = -1; $mejorPuntaje = [double]::MaxValue
+        for ($i = 0; $i -lt $caps.Count; $i++) {
+            if ($excluir -contains $i) { continue }
+            $p = [math]::Abs($caps[$i].FrameSize.Width - 640) + [math]::Abs($caps[$i].FrameSize.Height - 480)
+            if ($p -lt $mejorPuntaje) { $mejorPuntaje = $p; $mejor = $i }
+        }
+        return $mejor
+    }.GetNewClosure()
+
+    # Llena la lista de resoluciones de la camara elegida
+    $llenarResoluciones = {
+        $st.Cargando = $true
+        $items = New-Object System.Collections.Generic.List[string]
+        $items.Add("Automatica (recomendada)")
+        $st.Caps = @()
+        try {
+            $idx = [math]::Max(0, $cmbCam.SelectedIndex)
+            $tmp = New-Object AForge.Video.DirectShow.VideoCaptureDevice($st.Dispositivos[$idx].MonikerString)
+            $caps = @($tmp.VideoCapabilities)
+            $st.Caps = $caps
+            for ($i = 0; $i -lt $caps.Count; $i++) {
+                $items.Add(("{0} x {1}  ({2} fps)" -f $caps[$i].FrameSize.Width, $caps[$i].FrameSize.Height, $caps[$i].AverageFrameRate))
+            }
+        } catch {}
+        $cmbRes.ItemsSource = $items
+        $cmbRes.SelectedIndex = 0
+        $st.Cargando = $false
+    }.GetNewClosure()
+
+    # Arranca la camara con una resolucion (-1 = automatica)
+    $arrancar = {
+        param([int]$idxRes)
+        & $pararFuente
+        $idxCam = [math]::Max(0, $cmbCam.SelectedIndex)
+        try {
+            $fuente = New-Object AForge.Video.DirectShow.VideoCaptureDevice($st.Dispositivos[$idxCam].MonikerString)
+            $caps = @($fuente.VideoCapabilities)
+            if ($idxRes -lt 0 -and $caps.Count -gt 0) { $idxRes = & $mejorResolucion $caps @() }
+            if ($idxRes -ge 0 -and $caps.Count -gt $idxRes) {
+                $fuente.VideoResolution = $caps[$idxRes]
+                $st.Probadas = @($st.Probadas + $idxRes)
+            }
+            $st.IdxRes = $idxRes
+            $st.Receptor.Conectar($fuente)
+            $st.Inicio = (Get-Date); $st.Frames = 0; $st.Ancho = 0; $st.Alto = 0; $st.Activa = $true
+            $fuente.Start()
+            $st.Fuente = $fuente
+            $txtEstado.Text = "Iniciando la camara..."
+            $txtEstado.Visibility = 'Visible'
+            if (-not $temporizador.IsEnabled) { $temporizador.Start() }
+        } catch {
+            $st.Activa = $false
+            $txtEstado.Text = "No se pudo iniciar la camara: $($_.Exception.Message)"
+            $txtEstado.Visibility = 'Visible'
+            Write-Log "No se pudo iniciar la camara: $($_.Exception.Message)" -Tipo ERROR
+        }
+    }.GetNewClosure()
+
+    $temporizador.Add_Tick({
+        if (-not $st.Activa) { return }
+        $bmp = $st.Receptor.Tomar()
+        if (-not $bmp) {
+            $seg = ((Get-Date) - $st.Inicio).TotalSeconds
+            if ($st.Frames -eq 0 -and $seg -gt 5) {
+                # Sin imagen: probar automaticamente otra resolucion (hasta 3 intentos)
+                $siguiente = if ($st.Caps.Count -gt 1) { & $mejorResolucion $st.Caps $st.Probadas } else { -1 }
+                if ($siguiente -ge 0 -and $st.Probadas.Count -lt 4) {
+                    $txtEstado.Text = "Sin imagen. Probando otra resolucion ($($st.Caps[$siguiente].FrameSize.Width)x$($st.Caps[$siguiente].FrameSize.Height))..."
+                    & $arrancar $siguiente
+                } else {
+                    $detalle = if ($st.Receptor.UltimoError) { "`n`nError reportado: $($st.Receptor.UltimoError)" } else { "" }
+                    $txtEstado.Text = $mensajeSin + $detalle
+                    $st.Activa = $false
+                }
+            }
+            return
+        }
+        try {
+            Aplicar-TransformCamaraEx -Bitmap $bmp -Rot $st.Rot -FlipH $st.FlipH -FlipV $st.FlipV
+            $primero = ($st.Frames -eq 0)
+            $st.Ancho = $bmp.Width; $st.Alto = $bmp.Height
+            $hbitmap = $bmp.GetHbitmap()
+            try {
+                $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHBitmap($hbitmap, [IntPtr]::Zero, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+                $src.Freeze()
+                $img.Source = $src
+                $st.Src = $src
+            } finally {
+                try { [DragonToolGdi]::DeleteObject($hbitmap) | Out-Null } catch {}
+            }
+            $st.Frames++; $st.FramesTotal++; $st.FpsContador++
+            if ($primero) {
+                $txtEstado.Visibility = 'Collapsed'
+                if (-not $st.DetallesCargados) {
+                    $st.DetallesCargados = $true
+                    try { $txtDet.Text = Obtener-DetallesCamara -Nombre $st.Dispositivos[[math]::Max(0, $cmbCam.SelectedIndex)].Name } catch {}
+                }
+            }
+            if (((Get-Date) - $st.FpsMarca).TotalSeconds -ge 1) {
+                $st.Fps = $st.FpsContador; $st.FpsContador = 0; $st.FpsMarca = (Get-Date)
+                & $textoInfo
+            }
+        } catch {} finally { $bmp.Dispose() }
+    }.GetNewClosure())
+
+    # Lista de camaras
+    $llenarCamaras = {
+        $st.Cargando = $true
+        try {
+            $st.Dispositivos = New-Object AForge.Video.DirectShow.FilterInfoCollection([AForge.Video.DirectShow.FilterCategory]::VideoInputDevice)
+            $nombres = New-Object System.Collections.Generic.List[string]
+            for ($i = 0; $i -lt $st.Dispositivos.Count; $i++) { $nombres.Add($st.Dispositivos[$i].Name) }
+            $cmbCam.ItemsSource = $nombres
+            if ($nombres.Count -gt 0) { $cmbCam.SelectedIndex = [math]::Min($IndiceInicial, $nombres.Count - 1) }
+        } catch {}
+        $st.Cargando = $false
+    }.GetNewClosure()
+
+    & $llenarCamaras
+    & $llenarResoluciones
+
+    $cmbCam.Add_SelectionChanged({
+        if ($st.Cargando) { return }
+        $st.DetallesCargados = $false; $st.Probadas = @()
+        & $llenarResoluciones
+        if ($st.Activa) { & $arrancar -1 }
+    }.GetNewClosure())
+    $cmbRes.Add_SelectionChanged({
+        if ($st.Cargando -or $cmbRes.SelectedIndex -lt 0) { return }
+        $st.Probadas = @()
+        if ($st.Activa -or $st.Fuente) { & $arrancar ($cmbRes.SelectedIndex - 1) }
+    }.GetNewClosure())
+
+    $winCam.FindName("BtnCamRefrescar").Add_Click({
+        & $pararFuente; $st.Activa = $false
+        & $llenarCamaras; & $llenarResoluciones
+        $txtInfo.Text = "Lista de camaras actualizada: $($st.Dispositivos.Count) detectada(s)."
+    }.GetNewClosure())
+    $winCam.FindName("BtnCamIniciar").Add_Click({ $st.Probadas = @(); & $arrancar ($cmbRes.SelectedIndex - 1) }.GetNewClosure())
+    $winCam.FindName("BtnCamDetener").Add_Click({
+        & $pararFuente; $st.Activa = $false; $st.Frames = 0
+        $img.Source = $null
+        $txtEstado.Text = "Camara detenida. Pulsa 'Iniciar'."; $txtEstado.Visibility = 'Visible'
+        $txtInfo.Text = "Camara detenida."
+    }.GetNewClosure())
+    $winCam.FindName("BtnCamRotIzq").Add_Click({ $st.Rot = (($st.Rot - 90) + 360) % 360; & $textoInfo }.GetNewClosure())
+    $winCam.FindName("BtnCamRotDer").Add_Click({ $st.Rot = ($st.Rot + 90) % 360; & $textoInfo }.GetNewClosure())
+    $winCam.FindName("BtnCamFlipH").Add_Click({ $st.FlipH = -not $st.FlipH; & $textoInfo }.GetNewClosure())
+    $winCam.FindName("BtnCamFlipV").Add_Click({ $st.FlipV = -not $st.FlipV; & $textoInfo }.GetNewClosure())
+    $winCam.FindName("BtnCamReset").Add_Click({ $st.Rot = 0; $st.FlipH = $false; $st.FlipV = $false; & $textoInfo }.GetNewClosure())
+    $winCam.FindName("BtnCamFoto").Add_Click({
+        if (-not $st.Src) { $txtInfo.Text = "Todavia no hay imagen para capturar."; return }
+        try {
+            $carpeta = [Environment]::GetFolderPath('MyPictures')
+            if (-not $carpeta -or -not (Test-Path $carpeta)) { $carpeta = [Environment]::GetFolderPath('Desktop') }
+            $ruta = Join-Path $carpeta ("DragonTool_Camara_{0}.png" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+            $enc = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+            $enc.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($st.Src))
+            $fs = [System.IO.File]::Create($ruta)
+            try { $enc.Save($fs) } finally { $fs.Close() }
+            $txtInfo.Text = "Foto guardada: $ruta"
+            Write-Log "Foto de la camara guardada en: $ruta" -Tipo OK
+            try { Start-Process explorer.exe -ArgumentList "/select,`"$ruta`"" } catch {}
+        } catch {
+            $txtInfo.Text = "No se pudo guardar la foto: $($_.Exception.Message)"
+            Write-Log "No se pudo guardar la foto de la camara: $($_.Exception.Message)" -Tipo ERROR
+        }
+    }.GetNewClosure())
+    $winCam.FindName("BtnCamAppWindows").Add_Click({
+        & $pararFuente; $st.Activa = $false
+        $txtEstado.Text = "Camara liberada para la app de Windows."; $txtEstado.Visibility = 'Visible'
+        try { Start-Process "microsoft.windows.camera:" } catch {}
+    }.GetNewClosure())
+    $winCam.FindName("BtnCerrarCamara").Add_Click({ $winCam.Close() }.GetNewClosure())
+
+    $winCam.Add_Closed({
+        try { $temporizador.Stop() } catch {}
+        try { & $pararFuente } catch {}
+        try { $st.Receptor.Liberar() } catch {}
+        $Global:VentanaCamaraActual = $null
+        if ($st.Origen -eq 'Diagnostico') { Write-DiagLog "Prueba de camara finalizada ($($st.FramesTotal) fotogramas mostrados)." }
+        else { Write-Log "Ventana de camara cerrada ($($st.FramesTotal) fotogramas mostrados)." -Tipo INFO }
+    }.GetNewClosure())
+
+    $Global:VentanaCamaraActual = $winCam
+    $winCam.Show()
+    & $textoInfo
+    & $arrancar ($cmbRes.SelectedIndex - 1)
 }
 
-# --- Pestaña Modificacion: opcion Camara (vista en vivo embebida, con rotar/voltear) ---
+function Show-PruebaCamara { Show-VentanaCamara -Origen 'Diagnostico' }
 
-$Script:ModCamVideoSource = $null
-$Script:ModCamTemporizador = $null
-$Global:DragonCamMod = $null
-$Script:ModCamActiva = $false
-$Script:ModCamRotacion = 0
-$Script:ModCamFlipH = $false
-$Script:ModCamFlipV = $false
-$Script:ModCamDispositivos = $null
-$Script:ModCamUltimoAncho = 0
-$Script:ModCamUltimoAlto = 0
-$Script:ModCamDetalleBase = ""
-
-# Carga (o recarga) la lista de camaras detectadas en el ComboBox de la
-# pestaña Modificacion. Prepara los componentes de camara (AForge) la
-# primera vez que se usa, igual que la prueba de camara de Diagnostico.
 function Global:Cargar-ListaCamarasModificacion {
     $cmb = $window.FindName("CmbModCamaraDispositivo")
     if (-not $cmb) { return }
@@ -5062,15 +6086,29 @@ function Global:Cargar-ListaCamarasModificacion {
         return
     }
     try {
-        $Script:ModCamDispositivos = New-Object AForge.Video.DirectShow.FilterInfoCollection([AForge.Video.DirectShow.FilterCategory]::VideoInputDevice)
+        $disp = New-Object AForge.Video.DirectShow.FilterInfoCollection([AForge.Video.DirectShow.FilterCategory]::VideoInputDevice)
         $nombres = @()
-        for ($i = 0; $i -lt $Script:ModCamDispositivos.Count; $i++) { $nombres += $Script:ModCamDispositivos[$i].Name }
+        for ($i = 0; $i -lt $disp.Count; $i++) { $nombres += $disp[$i].Name }
         $cmb.ItemsSource = $nombres
         if ($nombres.Count -gt 0) { $cmb.SelectedIndex = 0 }
+        $txt = $window.FindName("TxtModCamaraDetalles")
+        if ($txt) {
+            $txt.Text = if ($nombres.Count -gt 0) { "Camaras detectadas: $($nombres.Count)`r`n - " + ($nombres -join "`r`n - ") + "`r`n`r`nPulsa 'Abrir camara en ventana' para ver la imagen en vivo." } else { "No se detecto ninguna camara conectada." }
+        }
         Write-Log "Camaras detectadas: $($nombres.Count)" -Tipo INFO
     } catch {
         Write-Log "No se pudo listar las camaras: $($_.Exception.Message)" -Tipo ERROR
     }
+}
+
+function Global:Iniciar-CamaraModificacion {
+    $cmb = $window.FindName("CmbModCamaraDispositivo")
+    $indice = if ($cmb -and $cmb.SelectedIndex -ge 0) { $cmb.SelectedIndex } else { 0 }
+    Show-VentanaCamara -Origen 'Modificacion' -IndiceInicial $indice
+}
+
+function Global:Detener-CamaraModificacion {
+    if ($Global:VentanaCamaraActual) { try { $Global:VentanaCamaraActual.Close() } catch {} }
 }
 
 # Busca informacion adicional del dispositivo (fabricante, controlador) en
@@ -5098,168 +6136,6 @@ function Global:Obtener-DetallesCamara {
         }
     } catch {}
     return ($lineas -join "`r`n")
-}
-
-# Actualiza el panel de texto con los detalles + resolucion actual +
-# orientacion (rotacion/volteo aplicados). Se llama al iniciar la camara,
-# al cambiar la orientacion y cuando llega el primer fotograma.
-function Global:Refrescar-DetallesCamaraModificacion {
-    $txtDetalles = $window.FindName("TxtModCamaraDetalles")
-    if (-not $txtDetalles) { return }
-    $orientacion = if ($Script:ModCamRotacion -eq 0 -and -not $Script:ModCamFlipH -and -not $Script:ModCamFlipV) {
-        "Normal (sin cambios)"
-    } else {
-        $partes = @()
-        if ($Script:ModCamRotacion -ne 0) { $partes += "girada $($Script:ModCamRotacion) grados" }
-        if ($Script:ModCamFlipH) { $partes += "volteada horizontalmente" }
-        if ($Script:ModCamFlipV) { $partes += "volteada verticalmente" }
-        $partes -join ", "
-    }
-    $resolucion = if ($Script:ModCamUltimoAncho -gt 0) { "$($Script:ModCamUltimoAncho) x $($Script:ModCamUltimoAlto) px" } else { "(esperando el primer fotograma...)" }
-    $base = if ($Script:ModCamDetalleBase) { $Script:ModCamDetalleBase } else { "Camara detenida." }
-    $txtDetalles.Text = "$base`r`n`r`nResolucion actual: $resolucion`r`nOrientacion: $orientacion"
-}
-
-# Aplica la rotacion/volteo actuales directamente sobre los pixeles del
-# fotograma (no es un efecto visual de la ventana: la imagen realmente se
-# gira/voltea), asi que se ve bien sin importar el tamaño del panel.
-function Global:Aplicar-TransformCamara {
-    param($Bitmap)
-    switch ($Script:ModCamRotacion) {
-        90  { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate90FlipNone) }
-        180 { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate180FlipNone) }
-        270 { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::Rotate270FlipNone) }
-        default {}
-    }
-    if ($Script:ModCamFlipH) { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipX) }
-    if ($Script:ModCamFlipV) { $Bitmap.RotateFlip([System.Drawing.RotateFlipType]::RotateNoneFlipY) }
-}
-
-# Se ejecuta ~30 veces por segundo en el hilo de la interfaz mientras la camara de Modificacion
-# esta encendida: toma el ultimo fotograma que dejo el receptor (C#), le aplica rotar/voltear y lo muestra.
-function Global:Actualizar-FotogramaCamaraModificacion {
-    $cam = $Global:DragonCamMod
-    if (-not $cam -or -not $cam.Receptor) { return }
-    $bmp = $cam.Receptor.Tomar()
-    if (-not $bmp) {
-        if ($cam.Frames -eq 0 -and -not $cam.Avisado -and ((Get-Date) - $cam.Inicio).TotalSeconds -gt 6) {
-            $cam.Avisado = $true
-            $txtSinSenal = $window.FindName("TxtModCamaraSinSenal")
-            if ($txtSinSenal) {
-                $detalleError = if ($cam.Receptor.UltimoError) { "`n`nError reportado: $($cam.Receptor.UltimoError)" } else { "" }
-                $txtSinSenal.Text = $Script:MensajeSinImagenCamara + $detalleError
-                $txtSinSenal.MaxWidth = 420
-                $txtSinSenal.Visibility = 'Visible'
-            }
-        }
-        return
-    }
-    try {
-        Aplicar-TransformCamara -Bitmap $bmp
-        $esPrimerFotograma = ($Script:ModCamUltimoAncho -eq 0)
-        $Script:ModCamUltimoAncho = $bmp.Width
-        $Script:ModCamUltimoAlto = $bmp.Height
-        $hbitmap = $bmp.GetHbitmap()
-        try {
-            $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHBitmap($hbitmap, [IntPtr]::Zero, [System.Windows.Int32Rect]::Empty, [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
-            $src.Freeze()
-            $cam.Img.Source = $src
-        } finally {
-            try { [DragonToolGdi]::DeleteObject($hbitmap) | Out-Null } catch {}
-        }
-        $cam.Frames++
-        if ($esPrimerFotograma) {
-            $txtSinSenal = $window.FindName("TxtModCamaraSinSenal")
-            if ($txtSinSenal) { $txtSinSenal.Visibility = 'Collapsed' }
-            Refrescar-DetallesCamaraModificacion
-        }
-    } catch {} finally { $bmp.Dispose() }
-}
-
-function Global:Iniciar-CamaraModificacion {
-    if ($Script:ModCamActiva) { return }
-    if (-not (Initialize-ModuloCamara)) {
-        Show-Aviso "No se pudo preparar el modulo de camara. Se descarga la primera vez y necesita conexion a internet (revisa el registro de actividad)." "Camara"
-        return
-    }
-    if (-not $Script:ModCamDispositivos -or $Script:ModCamDispositivos.Count -eq 0) {
-        Cargar-ListaCamarasModificacion
-    }
-    if (-not $Script:ModCamDispositivos -or $Script:ModCamDispositivos.Count -eq 0) {
-        Show-Aviso "No se detecto ninguna camara conectada." "Sin camara"
-        return
-    }
-    if (-not (Test-PermisoCamaraWindows)) {
-        Write-Log "Windows tiene bloqueado el acceso a la camara para apps de escritorio (Configuracion > Privacidad > Camara)." -Tipo AVISO
-    }
-
-    $cmb = $window.FindName("CmbModCamaraDispositivo")
-    $indice = if ($cmb -and $cmb.SelectedIndex -ge 0) { $cmb.SelectedIndex } else { 0 }
-    $imgCtrl = $window.FindName("ImgModCamara")
-    $txtSinSenal = $window.FindName("TxtModCamaraSinSenal")
-
-    try {
-        $dispositivoSeleccionado = $Script:ModCamDispositivos[$indice]
-        $Script:ModCamUltimoAncho = 0
-        $Script:ModCamUltimoAlto = 0
-        $Script:ModCamDetalleBase = Obtener-DetallesCamara -Nombre $dispositivoSeleccionado.Name
-        Refrescar-DetallesCamaraModificacion
-
-        $receptor = New-Object DragonCamReceptor
-        $videoSource = New-Object AForge.Video.DirectShow.VideoCaptureDevice($dispositivoSeleccionado.MonikerString)
-        $receptor.Conectar($videoSource)
-
-        # Estado compartido (global: lo lee la funcion que dibuja cada fotograma)
-        $Global:DragonCamMod = @{ Receptor = $receptor; Img = $imgCtrl; Frames = 0; Inicio = (Get-Date); Avisado = $false }
-
-        $temporizador = New-Object System.Windows.Threading.DispatcherTimer
-        $temporizador.Interval = [TimeSpan]::FromMilliseconds(33)
-        $temporizador.Add_Tick({ Actualizar-FotogramaCamaraModificacion })
-        $videoSource.Start()
-        $temporizador.Start()
-
-        $Script:ModCamVideoSource = $videoSource
-        $Script:ModCamTemporizador = $temporizador
-        $Script:ModCamActiva = $true
-        if ($txtSinSenal) {
-            $txtSinSenal.Text = "Iniciando la camara..."
-            $txtSinSenal.Visibility = 'Visible'
-        }
-        Write-Log "Camara de modificacion iniciada: $($dispositivoSeleccionado.Name)" -Tipo OK
-    } catch {
-        Write-Log "No se pudo iniciar la camara: $($_.Exception.Message)" -Tipo ERROR
-        Show-Aviso "No se pudo iniciar la camara: $($_.Exception.Message)" "Error"
-    }
-}
-
-function Global:Detener-CamaraModificacion {
-    if ($Script:ModCamTemporizador) {
-        try { $Script:ModCamTemporizador.Stop() } catch {}
-        $Script:ModCamTemporizador = $null
-    }
-    if ($Script:ModCamVideoSource) {
-        try { $Script:ModCamVideoSource.SignalToStop(); $Script:ModCamVideoSource.WaitForStop() } catch {}
-        $Script:ModCamVideoSource = $null
-    }
-    if ($Global:DragonCamMod -and $Global:DragonCamMod.Receptor) {
-        try { $Global:DragonCamMod.Receptor.Liberar() } catch {}
-    }
-    $Global:DragonCamMod = $null
-    $Script:ModCamActiva = $false
-    $Script:ModCamUltimoAncho = 0
-    $Script:ModCamUltimoAlto = 0
-    $Script:ModCamDetalleBase = ""
-    $imgCtrl = $window.FindName("ImgModCamara")
-    $txtSinSenal = $window.FindName("TxtModCamaraSinSenal")
-    $txtDetalles = $window.FindName("TxtModCamaraDetalles")
-    if ($imgCtrl) { $imgCtrl.Source = $null }
-    if ($txtSinSenal) {
-        $txtSinSenal.Text = "Camara detenida. Pulsa 'Iniciar camara'."
-        $txtSinSenal.MaxWidth = 260
-        $txtSinSenal.Visibility = 'Visible'
-    }
-    if ($txtDetalles) { $txtDetalles.Text = "Selecciona 'Iniciar camara' para ver aqui sus detalles (nombre, controlador, resolucion, orientacion actual)." }
-    Write-Log "Camara de modificacion detenida." -Tipo INFO
 }
 
 # ---------------------------------------------------------------------------
@@ -6250,29 +7126,6 @@ function Global:Accion-BuscarFirmwareAlmacenamiento {
     }
 }
 
-function Accion-DiagnosticoCompletoEquipo {
-    Write-DiagLog "========================================"
-    Write-DiagLog "   DIAGNOSTICO COMPLETO DEL EQUIPO"
-    Write-DiagLog "========================================"
-    Accion-ProbarGraficaDiag
-    Accion-VerDetallesPantalla
-    Accion-ProbarAlmacenamiento
-    Accion-ProbarVelocidadDisco
-    Accion-ProbarVentiladores
-    Accion-ProbarTemperaturaCPU
-    Accion-ProbarBateria
-    Accion-ProbarBluetooth
-    Accion-ProbarPuertosUSB
-    Accion-ProbarRed
-    Accion-ProbarTiempoArranque
-    Write-DiagLog "=== CONTROLADORES CON PROBLEMAS ==="
-    try {
-        $problemas = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.Status -ne 'OK' }
-        if ($problemas) { foreach ($p in $problemas) { Write-DiagLog " - $($p.FriendlyName): $($p.Status)" } }
-        else { Write-DiagLog "No se detectaron controladores con problemas." }
-    } catch {}
-    Write-DiagLog "Diagnostico automatico finalizado. Para camara, microfono, audio, teclado, mouse, pantalla y RAM usa los botones individuales (son pruebas interactivas)."
-}
 
 # ---------------------------------------------------------------------------
 #  PERFILES RAPIDOS
@@ -6496,155 +7349,540 @@ function Accion-TareasDiagnosticoOn {
 }
 
 # ---------------------------------------------------------------------------
-#  PERFILES RAPIDOS (reforzados: CPU, RAM y disco)
+#  PERFILES RAPIDOS (reforzados: cambios visibles + resultado antes/despues)
 # ---------------------------------------------------------------------------
+
+$Script:PasosPerfil = $null   # lista de pasos aplicados (solo existe mientras corre un perfil)
+
+# --- Efectos visuales: se aplican AL INSTANTE con SystemParametersInfo (no hace falta cerrar sesion) ---
+$Script:TipoFxListo = $false
+function Ensure-TipoFx {
+    if ($Script:TipoFxListo) { return }
+    $codigo = @"
+using System;
+using System.Runtime.InteropServices;
+public class DragonToolFx {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ANIMATIONINFO { public uint cbSize; public int iMinAnimate; }
+    [DllImport("user32.dll", SetLastError=true)]
+    static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
+    [DllImport("user32.dll", SetLastError=true, EntryPoint="SystemParametersInfo")]
+    static extern bool SystemParametersInfoAnim(uint uiAction, uint uiParam, ref ANIMATIONINFO pvParam, uint fWinIni);
+    [DllImport("user32.dll", SetLastError=true, EntryPoint="SystemParametersInfo")]
+    static extern bool SystemParametersInfoMouse(uint uiAction, uint uiParam, int[] pvParam, uint fWinIni);
+    public static bool Bool(uint accion, bool valor) { return SystemParametersInfo(accion, 0, valor ? new IntPtr(1) : IntPtr.Zero, 3); }
+    public static bool MinAnimate(bool encendido) {
+        ANIMATIONINFO ai = new ANIMATIONINFO();
+        ai.cbSize = (uint)Marshal.SizeOf(typeof(ANIMATIONINFO));
+        ai.iMinAnimate = encendido ? 1 : 0;
+        return SystemParametersInfoAnim(0x0049, ai.cbSize, ref ai, 3);
+    }
+    public static bool Mouse(int umbral1, int umbral2, int aceleracion) {
+        int[] v = new int[] { umbral1, umbral2, aceleracion };
+        return SystemParametersInfoMouse(0x0004, 0, v, 3);
+    }
+}
+"@
+    Add-Type -TypeDefinition $codigo -ErrorAction Stop
+    $Script:TipoFxListo = $true
+}
+
+$Script:AccionesEfectosFx = @(0x1003, 0x1005, 0x1007, 0x1013, 0x1015, 0x1017, 0x1043, 0x101B, 0x1025)
+
+function Accion-EfectosRendimientoMaximo {
+    try {
+        Ensure-TipoFx
+        Accion-EfectosVisualesSilencioso
+        foreach ($a in $Script:AccionesEfectosFx) { [DragonToolFx]::Bool([uint32]$a, $false) | Out-Null }
+        [DragonToolFx]::MinAnimate($false) | Out-Null
+        foreach ($par in @(
+            @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', 'TaskbarAnimations', 0),
+            @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', 'ListviewAlphaSelect', 0),
+            @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', 'ListviewShadow', 0),
+            @('HKCU:\Software\Microsoft\Windows\DWM', 'EnableAeroPeek', 0))) {
+            try {
+                if (-not (Test-Path $par[0])) { New-Item -Path $par[0] -Force | Out-Null }
+                Set-ItemProperty -Path $par[0] -Name $par[1] -Value $par[2] -Type DWord -ErrorAction Stop
+            } catch {}
+        }
+        Write-Log "Animaciones, sombras y desvanecimientos de Windows desactivados al instante (ventanas, menus, barra de tareas)." -Tipo OK
+    } catch { Write-Log "No se pudieron aplicar todos los efectos visuales: $($_.Exception.Message)" -Tipo AVISO }
+}
+
+function Accion-EfectosRestaurarPorDefecto {
+    try {
+        Ensure-TipoFx
+        foreach ($a in $Script:AccionesEfectosFx) { [DragonToolFx]::Bool([uint32]$a, $true) | Out-Null }
+        [DragonToolFx]::MinAnimate($true) | Out-Null
+        foreach ($par in @(
+            @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', 'TaskbarAnimations', 1),
+            @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', 'ListviewAlphaSelect', 1),
+            @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced', 'ListviewShadow', 1),
+            @('HKCU:\Software\Microsoft\Windows\DWM', 'EnableAeroPeek', 1))) {
+            try { if (Test-Path $par[0]) { Set-ItemProperty -Path $par[0] -Name $par[1] -Value $par[2] -Type DWord -ErrorAction SilentlyContinue } } catch {}
+        }
+        Write-Log "Animaciones y efectos visuales de Windows restaurados." -Tipo OK
+    } catch {}
+}
+
+function Accion-AceleracionMouseOff {
+    try {
+        Ensure-TipoFx
+        $p = 'HKCU:\Control Panel\Mouse'
+        Set-ItemProperty -Path $p -Name 'MouseSpeed' -Value '0' -Type String
+        Set-ItemProperty -Path $p -Name 'MouseThreshold1' -Value '0' -Type String
+        Set-ItemProperty -Path $p -Name 'MouseThreshold2' -Value '0' -Type String
+        [DragonToolFx]::Mouse(0, 0, 0) | Out-Null
+        Write-Log "Aceleracion del mouse desactivada (punteria 1:1, mejor para juegos)." -Tipo OK
+    } catch { Write-Log "No se pudo desactivar la aceleracion del mouse." -Tipo AVISO }
+}
+function Accion-AceleracionMouseOn {
+    try {
+        Ensure-TipoFx
+        $p = 'HKCU:\Control Panel\Mouse'
+        Set-ItemProperty -Path $p -Name 'MouseSpeed' -Value '1' -Type String -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $p -Name 'MouseThreshold1' -Value '6' -Type String -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $p -Name 'MouseThreshold2' -Value '10' -Type String -ErrorAction SilentlyContinue
+        [DragonToolFx]::Mouse(6, 10, 1) | Out-Null
+    } catch {}
+}
+
+# --- Programas de inicio no esenciales (se desactivan como lo hace el Administrador de tareas: reversible) ---
+$Script:PatronInicioNoEsencial = 'Spotify|Discord|Steam|EpicGames|Teams|Skype|Zoom|Slack|Dropbox|GoogleDrive|Adobe|CCXProcess|iTunes|uTorrent|BitTorrent|YourPhone|PhoneLink|AutoLaunch|Opera|Battle\.net|EADesktop|Origin|Ubisoft|Java|jusched|OneDrive'
+$Script:RutasInicio = @(
+    @{ Run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; Ap = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' },
+    @{ Run = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; Ap = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' }
+)
+
+function Global:Get-InicioActivosCount {
+    $n = 0
+    foreach ($r in $Script:RutasInicio) {
+        $props = Get-ItemProperty -Path $r.Run -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -match '^PS(Path|ParentPath|ChildName|Drive|Provider)$') { continue }
+            $off = $false
+            try {
+                $ap = (Get-ItemProperty -Path $r.Ap -Name $p.Name -ErrorAction Stop).($p.Name)
+                if ($ap -is [byte[]] -and $ap.Length -gt 0 -and (($ap[0] -band 1) -eq 1)) { $off = $true }
+            } catch {}
+            if (-not $off) { $n++ }
+        }
+    }
+    return $n
+}
+
+function Accion-InicioNoEsencialOff {
+    $nombres = New-Object System.Collections.Generic.List[string]
+    foreach ($r in $Script:RutasInicio) {
+        $props = Get-ItemProperty -Path $r.Run -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -match '^PS(Path|ParentPath|ChildName|Drive|Provider)$') { continue }
+            if ($p.Name -notmatch $Script:PatronInicioNoEsencial) { continue }
+            try {
+                if (-not (Test-Path $r.Ap)) { New-Item -Path $r.Ap -Force | Out-Null }
+                Set-ItemProperty -Path $r.Ap -Name $p.Name -Value ([byte[]](3,0,0,0,0,0,0,0,0,0,0,0)) -Type Binary -ErrorAction Stop
+                $nombres.Add($p.Name)
+            } catch {}
+        }
+    }
+    if ($nombres.Count -gt 0) { Write-Log "Programas de inicio desactivados ($($nombres.Count)): $($nombres -join ', ') - el equipo arrancara mas rapido." -Tipo OK }
+    else { Write-Log "No se encontraron programas de inicio no esenciales activos." -Tipo INFO }
+}
+function Accion-InicioNoEsencialRestaurar {
+    foreach ($r in $Script:RutasInicio) {
+        $props = Get-ItemProperty -Path $r.Run -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -notmatch $Script:PatronInicioNoEsencial) { continue }
+            try { Set-ItemProperty -Path $r.Ap -Name $p.Name -Value ([byte[]](2,0,0,0,0,0,0,0,0,0,0,0)) -Type Binary -ErrorAction Stop } catch {}
+        }
+    }
+    Write-Log "Programas de inicio restaurados a su estado habitual." -Tipo OK
+}
+
+# --- CPU a maximo rendimiento (sin ventanas de confirmacion) ---
+function Aplicar-CPUMaximoSilencioso {
+    $esLaptop = $false
+    try { $esLaptop = [bool](Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue) } catch {}
+    try {
+        if (-not $esLaptop) { powercfg -setactive SCHEME_MIN | Out-Null }
+        powercfg -setacvalueindex scheme_current sub_processor 0cc5b647-c1df-4637-891a-dec35c318583 100 | Out-Null
+        powercfg -setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 100 | Out-Null
+        powercfg -setactive scheme_current | Out-Null
+        $d = if ($esLaptop) { "solo conectado a la corriente (para cuidar la bateria)" } else { "plan Alto rendimiento" }
+        Write-Log "CPU a maximo rendimiento: todos los nucleos disponibles y sin bajar la frecuencia - $d." -Tipo OK
+    } catch { Write-Log "No se pudo ajustar la CPU a maximo rendimiento." -Tipo AVISO }
+}
+function Restaurar-CPUPredeterminado {
+    try {
+        powercfg -setacvalueindex scheme_current sub_processor 0cc5b647-c1df-4637-891a-dec35c318583 10 | Out-Null
+        powercfg -setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 5 | Out-Null
+        powercfg -setactive scheme_current | Out-Null
+    } catch {}
+}
+
+# --- RAM: vacia el working set de todos los procesos y purga la lista en espera. Devuelve MB liberados. ---
+function Liberar-RAMSilencioso {
+    param([switch]$Profundo)
+    try {
+        Ensure-TipoLimpiadorRAM
+        $antes = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024
+        foreach ($p in @(Get-Process | Where-Object { $_.Id -ne $PID })) {
+            try { [DragonToolMemUtils]::EmptyWorkingSet($p.Handle) | Out-Null } catch {}
+        }
+        if ($Profundo) { try { [DragonToolMemUtils]::PurgeStandbyList() | Out-Null } catch {} }
+        try { ipconfig /flushdns | Out-Null } catch {}
+        Start-Sleep -Milliseconds 400
+        $despues = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024
+        $mb = [math]::Round($despues - $antes)
+        Write-Log "Memoria RAM liberada: $([math]::Max(0,$mb)) MB$(if ($Profundo) { ' (incluye lista en espera)' })." -Tipo OK
+    } catch { Write-Log "No se pudo liberar la RAM: $($_.Exception.Message)" -Tipo AVISO }
+}
+
+function Reiniciar-ExplorerSilencioso {
+    try {
+        Stop-Process -Name explorer -Force -ErrorAction Stop
+        Start-Sleep -Milliseconds 1500
+        if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+        Write-Log "Escritorio y barra de tareas recargados para aplicar los cambios visuales." -Tipo OK
+    } catch { Write-Log "No se pudo recargar el escritorio." -Tipo AVISO }
+}
+
+function Optimizar-DiscoTrimSilencioso {
+    try {
+        $letra = "$env:SystemDrive".TrimEnd(':')
+        Optimize-Volume -DriveLetter $letra -ReTrim -ErrorAction Stop | Out-Null
+        Write-Log "Unidad $($letra): optimizada (TRIM) - mejor rendimiento del SSD." -Tipo OK
+    } catch { Write-Log "No se pudo optimizar el disco (puede ser un disco mecanico o no compatible)." -Tipo INFO }
+}
+
+# --- Instantanea del sistema (para mostrar el antes/despues) ---
+function Global:Leer-Reg {
+    param([string]$Ruta, [string]$Nombre, $Defecto = $null)
+    try { $v = (Get-ItemProperty -Path $Ruta -Name $Nombre -ErrorAction Stop).$Nombre; if ($null -eq $v) { return $Defecto } else { return $v } } catch { return $Defecto }
+}
+function Global:Texto-Servicio {
+    param([string]$Nombre)
+    $s = Get-Service -Name $Nombre -ErrorAction SilentlyContinue
+    if (-not $s) { return 'No existe' }
+    $inicio = switch ("$($s.StartType)") { 'Disabled' { 'Desactivado' } 'Manual' { 'Manual' } 'Automatic' { 'Automatico' } default { "$($s.StartType)" } }
+    $estado = if ("$($s.Status)" -eq 'Running') { 'en ejecucion' } else { 'detenido' }
+    return "$inicio, $estado"
+}
+function Global:Get-InstantaneaSistema {
+    $o = [ordered]@{}
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $o.RamLibreMB = if ($os) { [math]::Round($os.FreePhysicalMemory / 1024) } else { 0 }
+    $procs = @(Get-Process -ErrorAction SilentlyContinue)
+    $o.Procesos = $procs.Count
+    $o.Hilos = [int](($procs | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum)
+    $o.ServiciosActivos = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { "$($_.Status)" -eq 'Running' }).Count
+    $o.InicioActivos = Get-InicioActivosCount
+    $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
+    $o.DiscoLibreGB = if ($ld) { [math]::Round($ld.FreeSpace / 1GB, 2) } else { 0 }
+    $plan = ''
+    try { $l = (powercfg /getactivescheme) -join ' '; if ($l -match '\(([^)]+)\)') { $plan = $Matches[1] } } catch {}
+    $o.PlanEnergia = if ($plan) { $plan } else { 'Desconocido' }
+    $fx = Leer-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' 'VisualFXSetting' 0
+    $o.EfectosVisuales = switch ([int]$fx) { 1 { 'Mejor apariencia' } 2 { 'Mejor rendimiento' } 3 { 'Personalizado' } default { 'Predeterminado de Windows' } }
+    $anim = Leer-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarAnimations' 1
+    $o.AnimacionesBarra = if ([int]$anim -eq 0) { 'Desactivadas' } else { 'Activadas' }
+    $o.Transparencia = if ([int](Leer-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'EnableTransparency' 1) -eq 0) { 'Desactivada' } else { 'Activada' }
+    $o.Hibernacion = if (Test-Path "$($env:SystemDrive)\hiberfil.sys") { 'Activada' } else { 'Desactivada' }
+    $o.InicioRapido = if ([int](Leer-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' 'HiberbootEnabled' 0) -eq 1) { 'Activado' } else { 'Desactivado' }
+    $o.ModoJuego = if ([int](Leer-Reg 'HKCU:\Software\Microsoft\GameBar' 'AutoGameModeEnabled' 0) -eq 1) { 'Activado' } else { 'Desactivado' }
+    $o.GrabacionJuegos = if ([int](Leer-Reg 'HKCU:\System\GameConfigStore' 'GameDVR_Enabled' 1) -eq 0) { 'Desactivada' } else { 'Activada' }
+    $o.GPUHardware = if ([int](Leer-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' 'HwSchMode' 1) -eq 2) { 'Activada' } else { 'Desactivada' }
+    $o.AceleracionMouse = if ("$(Leer-Reg 'HKCU:\Control Panel\Mouse' 'MouseSpeed' '1')" -eq '0') { 'Desactivada' } else { 'Activada' }
+    $o.AppsSegundoPlano = if ([int](Leer-Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' 'GlobalUserDisabled' 0) -eq 1) { 'Bloqueadas' } else { 'Permitidas' }
+    $o.SysMain = Texto-Servicio 'SysMain'
+    $o.Busqueda = Texto-Servicio 'WSearch'
+    $o.Telemetria = Texto-Servicio 'DiagTrack'
+    $o.PrioridadPrimerPlano = if ([int](Leer-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' 'Win32PrioritySeparation' 2) -eq 38) { 'Maxima (primer plano)' } else { 'Predeterminada' }
+    [PSCustomObject]$o
+}
+
+# Ejecuta los pasos de un perfil con progreso real y sin repetir codigo.
+function Invoke-PasosPerfil {
+    param($Ventana, $Pasos)
+    $n = [math]::Max(1, @($Pasos).Count)
+    $i = 0
+    foreach ($p in $Pasos) {
+        $pct = 3 + [int][math]::Round(($i / $n) * 94)
+        Update-VentanaProgreso -Ventana $Ventana -Porcentaje $pct -Estado $p.Txt -LogLinea $p.Txt
+        try { & $p.Accion } catch { Write-Log "Paso con error ($($p.Txt)): $($_.Exception.Message)" -Tipo AVISO }
+        $i++
+    }
+}
+
+function Finalizar-Perfil {
+    param($Ventana, [string]$Titulo, $Antes, [string]$Nota = '', [bool]$Reinicio = $true)
+    Close-VentanaProgreso -Ventana $Ventana -MensajeFinal "$Titulo aplicado."
+    Start-Sleep -Milliseconds 300
+    $despues = Get-InstantaneaSistema
+    $pasos = @()
+    if ($Script:PasosPerfil) { $pasos = @($Script:PasosPerfil) }
+    $Script:PasosPerfil = $null
+    Write-Log "$Titulo aplicado." -Tipo OK
+    Show-ResultadoPerfil -Titulo $Titulo -Antes $Antes -Despues $despues -Pasos $pasos -Nota $Nota -OfrecerReinicio $Reinicio
+}
+
+# Ventana de resultados: tarjetas con contadores animados + tabla de ajustes antes/despues.
+function Global:Show-ResultadoPerfil {
+    param([string]$Titulo, $Antes, $Despues, $Pasos, [string]$Nota = '', [bool]$OfrecerReinicio = $true)
+
+    $metricas = @(
+        @{ T = 'Memoria RAM libre';        Ic = '🧠'; A = [double]$Antes.RamLibreMB;       D = [double]$Despues.RamLibreMB;       U = 'MB'; Mejor = 'Sube' },
+        @{ T = 'Procesos en ejecucion';    Ic = '⚙️'; A = [double]$Antes.Procesos;         D = [double]$Despues.Procesos;         U = '';   Mejor = 'Baja' },
+        @{ T = 'Subprocesos (hilos)';      Ic = '🧵'; A = [double]$Antes.Hilos;            D = [double]$Despues.Hilos;            U = '';   Mejor = 'Baja' },
+        @{ T = 'Servicios activos';        Ic = '🛠️'; A = [double]$Antes.ServiciosActivos; D = [double]$Despues.ServiciosActivos; U = '';   Mejor = 'Baja' },
+        @{ T = 'Programas de inicio';      Ic = '🚀'; A = [double]$Antes.InicioActivos;    D = [double]$Despues.InicioActivos;    U = '';   Mejor = 'Baja' },
+        @{ T = 'Espacio libre en disco';   Ic = '💽'; A = [double]$Antes.DiscoLibreGB;     D = [double]$Despues.DiscoLibreGB;     U = 'GB'; Mejor = 'Sube' }
+    )
+    $ajustesDef = @(
+        @('Plan de energia', 'PlanEnergia'), @('Efectos visuales', 'EfectosVisuales'), @('Animaciones de la barra', 'AnimacionesBarra'),
+        @('Transparencia de Windows', 'Transparencia'), @('Prioridad de CPU (primer plano)', 'PrioridadPrimerPlano'),
+        @('Apps en segundo plano', 'AppsSegundoPlano'), @('SysMain (Superfetch)', 'SysMain'), @('Busqueda (indexacion)', 'Busqueda'),
+        @('Telemetria (DiagTrack)', 'Telemetria'), @('Hibernacion', 'Hibernacion'), @('Inicio rapido', 'InicioRapido'),
+        @('Modo juego', 'ModoJuego'), @('Grabacion en segundo plano (Game DVR)', 'GrabacionJuegos'),
+        @('GPU acelerada por hardware', 'GPUHardware'), @('Aceleracion del mouse', 'AceleracionMouse')
+    )
+    $filas = foreach ($d in $ajustesDef) {
+        $a = "$($Antes.($d[1]))"; $b = "$($Despues.($d[1]))"
+        [PSCustomObject]@{ Ajuste = $d[0]; Antes = $a; Despues = $b; Cambio = ($a -ne $b); Estado = $(if ($a -ne $b) { '✔  Cambiado' } else { '=  Sin cambios' }) }
+    }
+    $filas = @($filas | Sort-Object @{Expression = 'Cambio'; Descending = $true})
+    $cambios = @($filas | Where-Object { $_.Cambio }).Count
+
+    $tarjetas = ''
+    for ($i = 0; $i -lt $metricas.Count; $i++) {
+        $tarjetas += ('<Border x:Name="Card@@I@@" Background="#CC0A0D14" BorderBrush="#2F7CF6" BorderThickness="1" CornerRadius="10" Padding="12,10" Margin="5">' +
+            '<StackPanel><TextBlock x:Name="TxtT@@I@@" FontSize="12" Foreground="#9FB4D8"/>' +
+            '<TextBlock x:Name="TxtV@@I@@" FontSize="28" FontWeight="Bold" Foreground="White" Margin="0,2,0,0"/>' +
+            '<TextBlock x:Name="TxtA@@I@@" FontSize="11" Foreground="#7C93BD" Margin="0,2,0,4"/>' +
+            '<Border x:Name="ChipD@@I@@" CornerRadius="10" Padding="8,2" HorizontalAlignment="Left" Background="#223052"><TextBlock x:Name="TxtD@@I@@" FontSize="12" FontWeight="Bold"/></Border>' +
+            '</StackPanel></Border>').Replace('@@I@@', "$i")
+    }
+
+    [xml]$x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Resultado del perfil - The Dragon Tool" Height="780" Width="940" MinHeight="560" MinWidth="720"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="16">
+    <WrapPanel DockPanel.Dock="Bottom" HorizontalAlignment="Right" Margin="0,12,0,0">
+      <Button x:Name="BtnResReiniciar" Content="🔄 Reiniciar ahora" Width="180" Height="42" BorderBrush="#2F7CF6"/>
+      <Button x:Name="BtnResCerrar" Content="✅ Listo" Width="140" Height="42"/>
+    </WrapPanel>
+    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <TextBlock x:Name="TxtResTitulo" FontSize="22" FontWeight="Bold" Foreground="White"/>
+      <TextBlock x:Name="TxtResResumen" FontSize="13" Foreground="#66AEFF" TextWrapping="Wrap" Margin="0,4,0,0"/>
+    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel>
+        <UniformGrid x:Name="GridTarjetas" Columns="3">$tarjetas</UniformGrid>
+        <TextBlock Text="🔧 Ajustes del sistema: antes y despues" FontSize="15" FontWeight="Bold" Foreground="#66AEFF" Margin="5,14,0,6"/>
+        <DataGrid x:Name="GridAjustes" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" MaxHeight="360" Margin="5,0,5,0">
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Ajuste" Binding="{Binding Ajuste}" Width="2*"/>
+            <DataGridTextColumn Header="Antes" Binding="{Binding Antes}" Width="1.4*"/>
+            <DataGridTextColumn Header="Despues" Binding="{Binding Despues}" Width="1.4*"/>
+            <DataGridTextColumn Header="Estado" Binding="{Binding Estado}" Width="1.1*">
+              <DataGridTextColumn.ElementStyle>
+                <Style TargetType="TextBlock">
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding Cambio}" Value="True"><Setter Property="Foreground" Value="#29D398"/><Setter Property="FontWeight" Value="Bold"/></DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </DataGridTextColumn.ElementStyle>
+            </DataGridTextColumn>
+          </DataGrid.Columns>
+        </DataGrid>
+        <TextBlock Text="📋 Pasos aplicados" FontSize="15" FontWeight="Bold" Foreground="#66AEFF" Margin="5,14,0,6"/>
+        <TextBox x:Name="TxtResPasos" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" Height="170" Margin="5,0,5,0"
+                 Background="#070A10" Foreground="#9FE8C8" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto"/>
+        <TextBlock x:Name="TxtResNota" Foreground="#FFC857" TextWrapping="Wrap" FontSize="12" Margin="5,10,5,0"/>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>
+"@
+    $w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
+    try { if ($window -and $window.IsVisible) { $w.Owner = $window } } catch {}
+    Iniciar-EfectosNeon -Ventana $w
+
+    $w.FindName("TxtResTitulo").Text = "✅ $Titulo aplicado"
+    $dRam = [math]::Round($Despues.RamLibreMB - $Antes.RamLibreMB)
+    $dProc = [int]($Despues.Procesos - $Antes.Procesos)
+    $w.FindName("TxtResResumen").Text = "$cambios ajuste(s) del sistema cambiado(s)  |  RAM libre: $(if ($dRam -ge 0) { '+' })$dRam MB  |  Procesos: $(if ($dProc -gt 0) { '+' })$dProc  |  Inicio: $($Antes.InicioActivos) → $($Despues.InicioActivos) programas"
+
+    $txtV = @(); $valA = @(); $valD = @(); $fmt = @()
+    for ($i = 0; $i -lt $metricas.Count; $i++) {
+        $m = $metricas[$i]
+        $f = if ($m.U -eq 'GB') { 'N2' } else { 'N0' }
+        $w.FindName("TxtT$i").Text = "$($m.Ic)  $($m.T)"
+        $tv = $w.FindName("TxtV$i")
+        $tv.Text = ($m.A.ToString($f)) + $(if ($m.U) { " $($m.U)" } else { '' })
+        $w.FindName("TxtA$i").Text = "Antes: $($m.A.ToString($f))$(if ($m.U) { ' ' + $m.U })   →   Ahora: $($m.D.ToString($f))$(if ($m.U) { ' ' + $m.U })"
+        $diff = $m.D - $m.A
+        $mejora = if ($m.Mejor -eq 'Sube') { $diff -gt 0 } else { $diff -lt 0 }
+        $signo = if ($diff -gt 0) { '▲ +' } elseif ($diff -lt 0) { '▼ ' } else { '● ' }
+        $td = $w.FindName("TxtD$i")
+        $td.Text = "$signo$($diff.ToString($f))$(if ($m.U) { ' ' + $m.U })" + $(if ($diff -eq 0) { '  sin cambio' } elseif ($mejora) { '  mejor' } else { '  mas alto' })
+        $color = if ($diff -eq 0) { '#9FB4D8' } elseif ($mejora) { '#29D398' } else { '#FFC857' }
+        $td.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($color)
+        $txtV += $tv; $valA += $m.A; $valD += $m.D; $fmt += @{ F = $f; U = $m.U }
+    }
+    $w.FindName("GridAjustes").ItemsSource = $filas
+    $listaPasos = New-Object System.Collections.Generic.List[string]
+    foreach ($p in @($Pasos)) { if ($p -and ($listaPasos.Count -eq 0 -or $listaPasos[$listaPasos.Count - 1] -ne $p)) { $listaPasos.Add("✔ $p") } }
+    $w.FindName("TxtResPasos").Text = if ($listaPasos.Count) { $listaPasos -join "`r`n" } else { "(sin pasos registrados)" }
+    $w.FindName("TxtResNota").Text = $Nota
+    if (-not $OfrecerReinicio) { $w.FindName("BtnResReiniciar").Visibility = 'Collapsed' }
+
+    # Animacion: los numeros "corren" de su valor anterior al nuevo y las tarjetas entran escalonadas.
+    $est = @{ T = 0 }
+    $temporizador = New-Object System.Windows.Threading.DispatcherTimer
+    $temporizador.Interval = [TimeSpan]::FromMilliseconds(30)
+    $temporizador.Add_Tick({
+        $est.T++
+        $f = [math]::Min(1.0, $est.T / 34.0)
+        $e = 1 - [math]::Pow(1 - $f, 3)
+        for ($i = 0; $i -lt $txtV.Count; $i++) {
+            $v = $valA[$i] + ($valD[$i] - $valA[$i]) * $e
+            $txtV[$i].Text = $v.ToString($fmt[$i].F) + $(if ($fmt[$i].U) { ' ' + $fmt[$i].U } else { '' })
+        }
+        if ($f -ge 1.0) { $temporizador.Stop() }
+    }.GetNewClosure())
+    $w.Add_ContentRendered({
+        try { Animar-EntradaElementos -Elementos $w.FindName("GridTarjetas").Children -DesdeY 30 -PasoMs 90 -DuracionMs 460 } catch {}
+        $temporizador.Start()
+    }.GetNewClosure())
+    $w.Add_Closed({ try { $temporizador.Stop() } catch {} }.GetNewClosure())
+
+    $w.FindName("BtnResCerrar").Add_Click({ $w.Close() }.GetNewClosure())
+    $w.FindName("BtnResReiniciar").Add_Click({
+        if (Show-Confirm "El equipo se reiniciara en 10 segundos para completar los cambios. Guarda tu trabajo.`n`n¿Reiniciar ahora?") {
+            try { Start-Process shutdown.exe -ArgumentList '/r', '/t', '10', '/c', '"The Dragon Tool: aplicando cambios del perfil"' } catch {}
+        }
+    }.GetNewClosure())
+    $w.ShowDialog() | Out-Null
+}
 
 function Perfil-BajoConsumo {
     if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "Perfil para equipos con pocos recursos (Celeron, Core i3, Core 2 Duo, poca RAM o disco lento).`n`nSe desactivaran servicios en segundo plano, SysMain y la indexacion de busqueda, apps en segundo plano, sugerencias de Windows, transparencia, hibernacion, Delivery Optimization y tareas de diagnostico; se agruparan mas servicios de Windows en menos procesos, se cerraran apps no esenciales que esten corriendo, se limpiaran archivos temporales/papelera, y se priorizara la CPU para las apps abiertas (menos procesos y subprocesos = menos carga de CPU).`n`n¿Aplicar perfil de Bajo consumo?")) { return }
+    if (-not (Show-Confirm "Perfil para equipos con pocos recursos (Celeron, Core i3, Core 2 Duo, poca RAM o disco lento).`n`nSe desactivaran servicios en segundo plano, SysMain y la indexacion de busqueda, apps en segundo plano, sugerencias de Windows, programas de inicio no esenciales, transparencia, animaciones y sombras (efecto visible al instante), hibernacion, Delivery Optimization y tareas de diagnostico; se agruparan mas servicios de Windows en menos procesos, se cerraran apps no esenciales, se limpiaran temporales/papelera, la CPU quedara a maximo rendimiento y se liberara la memoria RAM.`n`nAl final se recargara el escritorio (la barra de tareas parpadeara un segundo) y veras un resumen con los cambios.`n`n¿Aplicar perfil de Bajo consumo?")) { return }
 
+    $antes = Get-InstantaneaSistema
+    $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
     $prog = New-VentanaProgreso -Titulo "Aplicando perfil: Equipo de bajo consumo"
     $pasos = @(
-        @{ Pct=7; Txt="Desactivando servicios de telemetria y funciones poco usadas..."; Accion={ foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener } } }
-        @{ Pct=15; Txt="Desactivando SysMain, indexacion, panel tactil, fax y Xbox..."; Accion={
-            Set-ServicioSeguro -Nombre 'SysMain' -StartupType Disabled -Detener
-            Set-ServicioSeguro -Nombre 'WSearch' -StartupType Disabled -Detener
-            Set-ServicioSeguro -Nombre 'TabletInputService' -StartupType Disabled -Detener
-            Set-ServicioSeguro -Nombre 'Fax' -StartupType Disabled -Detener
-            foreach ($s in @('XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc')) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener }
-        } }
-        @{ Pct=25; Txt="Ajustando transparencia y efectos visuales..."; Accion={ Accion-TransparenciaYEfectosOff } }
-        @{ Pct=32; Txt="Desactivando apps en segundo plano..."; Accion={ Accion-BackgroundAppsOff } }
-        @{ Pct=39; Txt="Desactivando sugerencias de Windows..."; Accion={ Accion-SugerenciasOff } }
-        @{ Pct=46; Txt="Desactivando inicio automatico de OneDrive..."; Accion={ Accion-OneDriveStartupOff } }
-        @{ Pct=53; Txt="Desactivando hibernacion (libera espacio en disco)..."; Accion={ Accion-HibernacionOff } }
-        @{ Pct=60; Txt="Limitando espacio de Restaurar sistema..."; Accion={ Accion-RestaurarSistemaLimitar } }
-        @{ Pct=67; Txt="Desactivando Delivery Optimization y tareas de diagnostico..."; Accion={ Accion-DeliveryOptimizationOff; Accion-TareasDiagnosticoOff } }
-        @{ Pct=75; Txt="Agrupando servicios de Windows para reducir procesos en ejecucion..."; Accion={ Accion-AgruparServiciosSvcHost } }
-        @{ Pct=82; Txt="Cerrando aplicaciones no esenciales en segundo plano..."; Accion={ Accion-CerrarProcesosNoEsenciales } }
-        @{ Pct=90; Txt="Limpiando archivos temporales y papelera de reciclaje..."; Accion={ Accion-LimpiarTemporales; Accion-VaciarPapelera } }
-        @{ Pct=97; Txt="Priorizando CPU para aplicaciones en primer plano..."; Accion={ Accion-PriorizarPrimerPlano } }
+        @{ Txt="Desactivando servicios de telemetria y funciones poco usadas..."; Accion={ foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener } } },
+        @{ Txt="Desactivando SysMain, indexacion, panel tactil, fax y Xbox..."; Accion={
+            foreach ($s in @('SysMain','WSearch','TabletInputService','Fax','XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc')) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener }
+        } },
+        @{ Txt="Quitando transparencia, animaciones y sombras (cambio visible al instante)..."; Accion={ Accion-TransparenciaOff; Accion-EfectosRendimientoMaximo } },
+        @{ Txt="Bloqueando apps en segundo plano..."; Accion={ Accion-BackgroundAppsOff } },
+        @{ Txt="Desactivando sugerencias y anuncios de Windows..."; Accion={ Accion-SugerenciasOff } },
+        @{ Txt="Desactivando programas de inicio no esenciales (OneDrive, Teams, Spotify, Discord...)..."; Accion={ Accion-OneDriveStartupOff; Accion-InicioNoEsencialOff } },
+        @{ Txt="Desactivando hibernacion (libera espacio en disco)..."; Accion={ Accion-HibernacionOff } },
+        @{ Txt="Limitando espacio de Restaurar sistema..."; Accion={ Accion-RestaurarSistemaLimitar } },
+        @{ Txt="Desactivando Delivery Optimization y tareas de diagnostico..."; Accion={ Accion-DeliveryOptimizationOff; Accion-TareasDiagnosticoOff } },
+        @{ Txt="Agrupando servicios de Windows para reducir procesos en ejecucion..."; Accion={ Accion-AgruparServiciosSvcHost } },
+        @{ Txt="Cerrando aplicaciones no esenciales en segundo plano..."; Accion={ Accion-CerrarProcesosNoEsenciales } },
+        @{ Txt="Poniendo la CPU a maximo rendimiento y priorizando primer plano..."; Accion={ Aplicar-CPUMaximoSilencioso; Accion-PriorizarPrimerPlano } },
+        @{ Txt="Limpiando temporales, papelera y cache DNS..."; Accion={ Accion-LimpiarTemporales; Accion-VaciarPapelera; Accion-VaciarDNS } },
+        @{ Txt="Recargando el escritorio para aplicar los efectos visuales..."; Accion={ Reiniciar-ExplorerSilencioso } },
+        @{ Txt="Liberando memoria RAM (incluida la lista en espera)..."; Accion={ Liberar-RAMSilencioso -Profundo } }
     )
-    foreach ($p in $pasos) {
-        Update-VentanaProgreso -Ventana $prog -Porcentaje $p.Pct -Estado $p.Txt -LogLinea $p.Txt
-        & $p.Accion
-    }
-    Close-VentanaProgreso -Ventana $prog -MensajeFinal "Perfil de Bajo consumo aplicado."
-    Write-Log "Perfil de Bajo consumo aplicado. Se recomienda reiniciar el equipo." -Tipo OK
-    Show-Aviso "Perfil de Bajo consumo aplicado.`nReinicia el equipo para que todos los cambios (menos procesos/subprocesos activos, CPU, RAM y disco) surtan efecto completo." "Perfil aplicado"
+    Invoke-PasosPerfil -Ventana $prog -Pasos $pasos
+    Finalizar-Perfil -Ventana $prog -Titulo "Perfil Bajo consumo" -Antes $antes -Nota "Se recomienda reiniciar el equipo para que los servicios desactivados y el agrupamiento de procesos surtan efecto completo (menos procesos/subprocesos activos, CPU, RAM y disco)."
 }
 
 function Perfil-EquipoModerno {
     if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "Perfil para equipos con buen hardware (SSD/NVMe, 8GB+ RAM).`n`nSe desactivaran servicios de telemetria y funciones poco usadas (mapas, fax, Xbox, etc.), sugerencias de Windows y Delivery Optimization, manteniendo la busqueda y el precargado activados; se activara Storage Sense e Inicio rapido, se limpiaran temporales, y el plan de energia quedara en Equilibrado.`n`n¿Aplicar perfil de Equipo moderno?")) { return }
+    if (-not (Show-Confirm "Perfil para equipos con buen hardware (SSD/NVMe, 8GB+ RAM).`n`nSe desactivaran servicios de telemetria y funciones poco usadas (mapas, fax, Xbox, etc.), sugerencias de Windows, Delivery Optimization y programas de inicio no esenciales, manteniendo la busqueda, el precargado y la apariencia de Windows; se activara Storage Sense e Inicio rapido, se optimizara el SSD (TRIM), se limpiaran temporales y se liberara RAM; el plan de energia quedara en Equilibrado.`n`nAl final veras un resumen con los cambios.`n`n¿Aplicar perfil de Equipo moderno?")) { return }
 
+    $antes = Get-InstantaneaSistema
+    $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
     $prog = New-VentanaProgreso -Titulo "Aplicando perfil: Equipo moderno"
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 12 -Estado "Desactivando servicios de telemetria..." -LogLinea "Ajustando servicios de telemetria a Manual."
-    foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Manual -Detener }
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 28 -Estado "Desactivando servicios de Xbox..." -LogLinea "Ajustando servicios de Xbox a Manual."
-    foreach ($s in @('XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc')) { Set-ServicioSeguro -Nombre $s -StartupType Manual -Detener }
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 45 -Estado "Desactivando sugerencias de Windows y Delivery Optimization..." -LogLinea "Aplicando ajustes de sugerencias y Delivery Optimization."
-    Accion-SugerenciasOff
-    Accion-DeliveryOptimizationOff
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 58 -Estado "Activando Storage Sense (limpieza automatica)..." -LogLinea "Storage Sense activado."
-    try {
-        $pathStorage = "HKCU:\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy"
-        if (-not (Test-Path $pathStorage)) { New-Item -Path $pathStorage -Force | Out-Null }
-        Set-ItemProperty -Path $pathStorage -Name "01" -Value 1 -Type DWord
-        Set-ItemProperty -Path $pathStorage -Name "04" -Value 1 -Type DWord
-    } catch { Write-Log "No se pudo activar Storage Sense." -Tipo AVISO }
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 70 -Estado "Activando Inicio rapido (Fast Startup)..."
-    try {
-        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "HiberbootEnabled" -Value 1 -Type DWord
-        Write-Log "Inicio rapido (Fast Startup) activado." -Tipo OK
-        Update-VentanaProgreso -Ventana $prog -Porcentaje 70 -Estado "Inicio rapido activado" -LogLinea "Inicio rapido (Fast Startup) activado."
-    } catch { Write-Log "No se pudo activar el Inicio rapido." -Tipo AVISO }
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 82 -Estado "Limpiando archivos temporales..." -LogLinea "Limpiando archivos temporales."
-    Accion-LimpiarTemporales
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 92 -Estado "Ajustando plan de energia..." -LogLinea "Estableciendo plan de energia Equilibrado."
-    try {
-        powercfg -setactive SCHEME_BALANCED
-        Write-Log "Plan de energia establecido en Equilibrado." -Tipo OK
-    } catch { Write-Log "No se pudo cambiar el plan de energia." -Tipo AVISO }
-
-    Close-VentanaProgreso -Ventana $prog -MensajeFinal "Perfil de Equipo moderno aplicado."
-    Write-Log "Perfil de Equipo moderno aplicado. Se recomienda reiniciar el equipo." -Tipo OK
-    Show-Aviso "Perfil de Equipo moderno aplicado.`nReinicia el equipo para que todos los cambios surtan efecto." "Perfil aplicado"
+    $pasos = @(
+        @{ Txt="Ajustando servicios de telemetria a Manual..."; Accion={ foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Manual -Detener } } },
+        @{ Txt="Ajustando servicios de Xbox a Manual..."; Accion={ foreach ($s in @('XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc')) { Set-ServicioSeguro -Nombre $s -StartupType Manual -Detener } } },
+        @{ Txt="Desactivando sugerencias de Windows y Delivery Optimization..."; Accion={ Accion-SugerenciasOff; Accion-DeliveryOptimizationOff } },
+        @{ Txt="Desactivando programas de inicio no esenciales..."; Accion={ Accion-InicioNoEsencialOff } },
+        @{ Txt="Activando Storage Sense (limpieza automatica)..."; Accion={
+            $pathStorage = "HKCU:\Software\Microsoft\Windows\CurrentVersion\StorageSense\Parameters\StoragePolicy"
+            if (-not (Test-Path $pathStorage)) { New-Item -Path $pathStorage -Force | Out-Null }
+            Set-ItemProperty -Path $pathStorage -Name "01" -Value 1 -Type DWord
+            Set-ItemProperty -Path $pathStorage -Name "04" -Value 1 -Type DWord
+            Write-Log "Storage Sense activado." -Tipo OK
+        } },
+        @{ Txt="Activando Inicio rapido (Fast Startup)..."; Accion={
+            Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "HiberbootEnabled" -Value 1 -Type DWord
+            Write-Log "Inicio rapido (Fast Startup) activado." -Tipo OK
+        } },
+        @{ Txt="Optimizando el SSD (TRIM)..."; Accion={ Optimizar-DiscoTrimSilencioso } },
+        @{ Txt="Limpiando archivos temporales..."; Accion={ Accion-LimpiarTemporales } },
+        @{ Txt="Estableciendo plan de energia Equilibrado..."; Accion={ powercfg -setactive SCHEME_BALANCED; Write-Log "Plan de energia establecido en Equilibrado." -Tipo OK } },
+        @{ Txt="Liberando memoria RAM..."; Accion={ Liberar-RAMSilencioso } }
+    )
+    Invoke-PasosPerfil -Ventana $prog -Pasos $pasos
+    Finalizar-Perfil -Ventana $prog -Titulo "Perfil Equipo moderno" -Antes $antes -Nota "Reinicia el equipo para que todos los cambios surtan efecto."
 }
 
 function Perfil-Gamer {
     if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "Perfil para mejorar el rendimiento en juegos.`n`nAlto rendimiento, Modo juego, GPU acelerada por hardware, perfil de baja latencia (prioridad de tareas en tiempo real), sin limite de red para multimedia, SysMain/indexacion desactivados, Delivery Optimization desactivado, apps no esenciales cerradas (Discord, Spotify, etc.) y CPU priorizado para primer plano (los servicios de Xbox se mantienen activos).`n`n¿Aplicar perfil Gamer?")) { return }
+    if (-not (Show-Confirm "Perfil para mejorar el rendimiento en juegos.`n`nAlto rendimiento, CPU con todos los nucleos disponibles, Modo juego, GPU acelerada por hardware, baja latencia (prioridad de tareas en tiempo real), sin limite de red para multimedia ni algoritmo de Nagle (menos ping), mouse sin aceleracion (punteria 1:1), animaciones y sombras de Windows desactivadas al instante, grabacion en segundo plano desactivada, SysMain/indexacion desactivados, Delivery Optimization desactivado, apps no esenciales cerradas (Discord, Spotify, etc.) y la RAM liberada (los servicios de Xbox se mantienen activos).`n`nAl final se recargara el escritorio y veras un resumen con los cambios.`n`n¿Aplicar perfil Gamer?")) { return }
 
+    $antes = Get-InstantaneaSistema
+    $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
     $prog = New-VentanaProgreso -Titulo "Aplicando perfil: Equipo gamer"
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 8 -Estado "Desactivando servicios de telemetria..." -LogLinea "Ajustando servicios de telemetria a Manual."
-    foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Manual -Detener }
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 17 -Estado "Desactivando SysMain, indexacion y panel tactil..." -LogLinea "SysMain, WSearch y TabletInputService ajustados."
-    Set-ServicioSeguro -Nombre 'SysMain' -StartupType Disabled -Detener
-    Set-ServicioSeguro -Nombre 'WSearch' -StartupType Manual -Detener
-    Set-ServicioSeguro -Nombre 'TabletInputService' -StartupType Manual -Detener
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 27 -Estado "Desactivando Delivery Optimization..." -LogLinea "Delivery Optimization desactivado."
-    Accion-DeliveryOptimizationOff
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 36 -Estado "Cerrando aplicaciones no esenciales en segundo plano..." -LogLinea "Cerrando apps no esenciales para liberar recursos."
-    Accion-CerrarProcesosNoEsenciales
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 45 -Estado "Priorizando CPU para primer plano..." -LogLinea "CPU priorizada para primer plano."
-    Accion-PriorizarPrimerPlano
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 55 -Estado "Aplicando perfil de baja latencia (prioridad en tiempo real)..." -LogLinea "SystemResponsiveness y prioridad de tareas 'Games' ajustadas."
-    Aplicar-BajaLatenciaCore
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 66 -Estado "Estableciendo plan de energia de Alto rendimiento..."
-    try {
-        powercfg -setactive SCHEME_MIN
-        Write-Log "Plan de energia establecido en Alto rendimiento." -Tipo OK
-        Update-VentanaProgreso -Ventana $prog -Porcentaje 66 -Estado "Estableciendo plan de energia de Alto rendimiento..." -LogLinea "Plan de energia: Alto rendimiento."
-    } catch { Write-Log "No se pudo cambiar el plan de energia." -Tipo AVISO }
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 76 -Estado "Activando Modo juego de Windows..."
-    try {
-        $pathGameBar = "HKCU:\Software\Microsoft\GameBar"
-        if (-not (Test-Path $pathGameBar)) { New-Item -Path $pathGameBar -Force | Out-Null }
-        Set-ItemProperty -Path $pathGameBar -Name "AllowAutoGameMode" -Value 1 -Type DWord
-        Set-ItemProperty -Path $pathGameBar -Name "AutoGameModeEnabled" -Value 1 -Type DWord
-        Write-Log "Modo juego de Windows activado." -Tipo OK
-        Update-VentanaProgreso -Ventana $prog -Porcentaje 76 -Estado "Modo juego activado" -LogLinea "Modo juego de Windows activado."
-    } catch { Write-Log "No se pudo activar el Modo juego." -Tipo AVISO }
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 85 -Estado "Desactivando grabacion en segundo plano de Game Bar..."
-    try {
-        $pathDVR = "HKCU:\System\GameConfigStore"
-        if (-not (Test-Path $pathDVR)) { New-Item -Path $pathDVR -Force | Out-Null }
-        Set-ItemProperty -Path $pathDVR -Name "GameDVR_Enabled" -Value 0 -Type DWord
-        Write-Log "Grabacion en segundo plano de Xbox Game Bar desactivada." -Tipo OK
-        Update-VentanaProgreso -Ventana $prog -Porcentaje 85 -Estado "Game DVR desactivado" -LogLinea "Grabacion en segundo plano desactivada."
-    } catch { Write-Log "No se pudo desactivar la grabacion de Game Bar." -Tipo AVISO }
-
-    Update-VentanaProgreso -Ventana $prog -Porcentaje 90 -Estado "Verificando GPU acelerada por hardware..."
-    try {
-        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -Value 2 -Type DWord
-        Update-VentanaProgreso -Ventana $prog -Porcentaje 90 -Estado "GPU acelerada activada" -LogLinea "Programacion de GPU por hardware activada."
-    } catch { Write-Log "Tu equipo/drivers pueden no soportar la programacion de GPU por hardware." -Tipo AVISO }
-
-    Close-VentanaProgreso -Ventana $prog -MensajeFinal "Perfil Gamer aplicado."
-    Write-Log "Perfil Gamer aplicado. Se recomienda reiniciar el equipo." -Tipo OK
-    Show-Aviso "Perfil Gamer aplicado.`nReinicia el equipo para que todos los cambios (especialmente el de GPU y baja latencia) surtan efecto." "Perfil aplicado"
+    $pasos = @(
+        @{ Txt="Ajustando servicios de telemetria a Manual..."; Accion={ foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Manual -Detener } } },
+        @{ Txt="Ajustando SysMain, indexacion y panel tactil..."; Accion={
+            Set-ServicioSeguro -Nombre 'SysMain' -StartupType Disabled -Detener
+            Set-ServicioSeguro -Nombre 'WSearch' -StartupType Manual -Detener
+            Set-ServicioSeguro -Nombre 'TabletInputService' -StartupType Manual -Detener
+        } },
+        @{ Txt="Desactivando Delivery Optimization..."; Accion={ Accion-DeliveryOptimizationOff } },
+        @{ Txt="Cerrando aplicaciones no esenciales en segundo plano..."; Accion={ Accion-CerrarProcesosNoEsenciales } },
+        @{ Txt="Desactivando programas de inicio no esenciales..."; Accion={ Accion-InicioNoEsencialOff } },
+        @{ Txt="Priorizando la CPU para el juego en primer plano..."; Accion={ Accion-PriorizarPrimerPlano } },
+        @{ Txt="Aplicando perfil de baja latencia (prioridad en tiempo real y GPU por hardware)..."; Accion={ Aplicar-BajaLatenciaCore } },
+        @{ Txt="Poniendo la CPU a maximo rendimiento (todos los nucleos disponibles)..."; Accion={ Aplicar-CPUMaximoSilencioso } },
+        @{ Txt="Activando Modo juego de Windows..."; Accion={
+            $p = "HKCU:\Software\Microsoft\GameBar"
+            if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+            Set-ItemProperty -Path $p -Name "AllowAutoGameMode" -Value 1 -Type DWord
+            Set-ItemProperty -Path $p -Name "AutoGameModeEnabled" -Value 1 -Type DWord
+            Write-Log "Modo juego de Windows activado." -Tipo OK
+        } },
+        @{ Txt="Desactivando la grabacion en segundo plano de Game Bar..."; Accion={
+            $p = "HKCU:\System\GameConfigStore"
+            if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null }
+            Set-ItemProperty -Path $p -Name "GameDVR_Enabled" -Value 0 -Type DWord
+            Write-Log "Grabacion en segundo plano de Xbox Game Bar desactivada." -Tipo OK
+        } },
+        @{ Txt="Reduciendo el ping (algoritmo de Nagle desactivado)..."; Accion={ Accion-DesactivarNagleOn } },
+        @{ Txt="Desactivando la aceleracion del mouse (punteria 1:1)..."; Accion={ Accion-AceleracionMouseOff } },
+        @{ Txt="Quitando animaciones y sombras de Windows (cambio visible al instante)..."; Accion={ Accion-EfectosRendimientoMaximo } },
+        @{ Txt="Recargando el escritorio para aplicar los efectos visuales..."; Accion={ Reiniciar-ExplorerSilencioso } },
+        @{ Txt="Liberando memoria RAM (incluida la lista en espera)..."; Accion={ Liberar-RAMSilencioso -Profundo } }
+    )
+    Invoke-PasosPerfil -Ventana $prog -Pasos $pasos
+    Finalizar-Perfil -Ventana $prog -Titulo "Perfil Gamer" -Antes $antes -Nota "Reinicia el equipo para que la GPU por hardware y la baja latencia surtan efecto completo."
 }
 
 function Perfil-Restaurar {
     if (-not (Requiere-Admin)) { return }
     if (-not (Show-Confirm "Esto revertira los cambios de los perfiles rapidos y del modo manual: servicios a Automatico/Manual, plan de energia a Equilibrado, efectos visuales, transparencia, apps en segundo plano, sugerencias, hibernacion, Delivery Optimization y prioridad de CPU a sus valores por defecto.`n`n¿Restaurar configuracion predeterminada?")) { return }
 
+    $antes = Get-InstantaneaSistema
+    $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
     $prog = New-VentanaProgreso -Titulo "Restaurando configuracion predeterminada"
 
     $todos = $Script:ServiciosBloatComun + @('SysMain','WSearch','TabletInputService','Fax','XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc')
@@ -6675,6 +7913,10 @@ function Perfil-Restaurar {
     Accion-TransparenciaOn
     Accion-BackgroundAppsOn
     Accion-SugerenciasOn
+    Accion-EfectosRestaurarPorDefecto
+    Accion-AceleracionMouseOn
+    Accion-InicioNoEsencialRestaurar
+    Restaurar-CPUPredeterminado
 
     Update-VentanaProgreso -Ventana $prog -Porcentaje 85 -Estado "Restaurando hibernacion, Delivery Optimization y tareas..." -LogLinea "Restaurando hibernacion y tareas de diagnostico."
     Accion-HibernacionOn
@@ -6689,9 +7931,9 @@ function Perfil-Restaurar {
     try { Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile" -Name "SystemResponsiveness" -Value 20 -Type DWord -ErrorAction SilentlyContinue } catch {}
     try { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "HiberbootEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue } catch {}
 
-    Close-VentanaProgreso -Ventana $prog -MensajeFinal "Configuracion predeterminada restaurada."
-    Write-Log "Configuracion predeterminada restaurada. Se recomienda reiniciar el equipo." -Tipo OK
-    Show-Aviso "Configuracion predeterminada restaurada.`nReinicia el equipo para completar los cambios." "Restauracion completa"
+    Update-VentanaProgreso -Ventana $prog -Porcentaje 98 -Estado "Recargando el escritorio..." -LogLinea "Recargando el escritorio para mostrar los efectos restaurados."
+    Reiniciar-ExplorerSilencioso
+    Finalizar-Perfil -Ventana $prog -Titulo "Configuracion predeterminada" -Antes $antes -Nota "Reinicia el equipo para completar la restauracion."
 }
 
 # ---------------------------------------------------------------------------
@@ -8320,7 +9562,7 @@ function Show-VentanaNavegador {
     Iniciar-EfectosNeon -Ventana $winNav
     # (el giro del borde neon de este navegador usa su propio pincel NeonBrushNav)
     try {
-        $pincelNav = $winNav.FindResource("NeonBrushNav")
+        $pincelNav = Obtener-PincelNeon -Elemento $winNav -Clave "NeonBrushNav"
         [void](Animar-PincelNeon -Pincel $pincelNav)
     } catch { }
     $urlRespaldo = if ($TextoRespaldo) { Get-UrlRespaldoBusqueda -Texto $TextoRespaldo } else { $null }
@@ -10488,9 +11730,15 @@ function Buscar-DriverLaptop {
                         <Button x:Name="BtnAbrirMinidumpTab" Content="📁 Abrir carpeta de volcados" Width="230" Height="46" FontSize="12"/>
                         <Button x:Name="BtnDriversRecientes" Content="🕒 Controladores recientes" Width="230" Height="46" FontSize="12"/>
                         <Button x:Name="BtnSFCTab" Content="🔍 Verificar archivos de sistema" Width="230" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnExplicarBSOD" Content="🔎 Explicar error seleccionado (causa y solucion)" Width="330" Height="46" FontSize="12" BorderBrush="#2F7CF6"/>
                     </WrapPanel>
+                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10" LastChildFill="False">
+                        <TextBlock Text="¿No tienes historial? Consulta un codigo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                        <ComboBox x:Name="CmbCodigoBSOD" Width="420" Margin="0,0,10,0"/>
+                        <Button x:Name="BtnExplicarCodigoBSOD" Content="📖 Explicar codigo" Width="170" Height="38" FontSize="12"/>
+                    </DockPanel>
                     <TextBlock x:Name="TxtResumenBSODTab" DockPanel.Dock="Top" Foreground="#66AEFF" FontWeight="Bold" Margin="0,0,0,8" TextWrapping="Wrap"/>
-                    <DataGrid x:Name="GridBSODTab" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
+                    <DataGrid x:Name="GridBSODTab" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" ToolTip="Doble clic para ver la causa y la solucion">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Fecha" Binding="{Binding Fecha}" Width="1.2*"/>
                             <DataGridTextColumn Header="Codigo" Binding="{Binding Codigo}" Width="*"/>
@@ -10527,7 +11775,20 @@ function Buscar-DriverLaptop {
                         <Button x:Name="BtnProbarArranque" Content="⏱️ Tiempo de arranque" Width="190" Height="46" FontSize="12"/>
                         <Button x:Name="BtnProbarBluetooth" Content="📶 Verificar Bluetooth" Width="190" Height="46" FontSize="12"/>
                         <Button x:Name="BtnProbarUSB" Content="🔌 Dispositivos USB conectados" Width="220" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnProbarCPU" Content="🚀 Rendimiento del procesador (10 s)" Width="240" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnInfoHardware" Content="🧾 Informacion del hardware" Width="210" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnProbarAudioDisp" Content="🎧 Dispositivos de audio" Width="200" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnProbarWifi" Content="📡 Wi-Fi (senal y velocidad)" Width="210" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnProbarInternet" Content="⚡ Velocidad de Internet" Width="200" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnProbarDispProblemas" Content="🧩 Dispositivos con problemas" Width="230" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnProbarEventos" Content="📜 Eventos criticos (7 dias)" Width="220" Height="46" FontSize="12"/>
+                        <Button x:Name="BtnProbarEstadoWin" Content="🛡️ Estado de Windows y seguridad" Width="250" Height="46" FontSize="12"/>
                         <Button x:Name="BtnDiagCompleto" Content="🧩 Diagnostico completo automatico" Width="240" Height="46" FontSize="12" BorderBrush="{StaticResource Acento}"/>
+                    </WrapPanel>
+                    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                        <Button x:Name="BtnDiagCopiar" Content="📋 Copiar resultados" Width="180" Height="38" FontSize="12"/>
+                        <Button x:Name="BtnDiagExportar" Content="💾 Guardar informe" Width="180" Height="38" FontSize="12"/>
+                        <Button x:Name="BtnDiagLimpiar" Content="🧹 Limpiar pantalla" Width="180" Height="38" FontSize="12"/>
                     </WrapPanel>
                     <TextBox x:Name="TxtDiagResultados" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="240"
                              Background="#070A10" Foreground="#66AEFF" FontFamily="Consolas" FontSize="12"
@@ -10541,18 +11802,35 @@ function Buscar-DriverLaptop {
                 <DockPanel Margin="14">
                     <Border DockPanel.Dock="Top" Style="{StaticResource TarjetaSeccion}">
                         <StackPanel>
-                            <TextBlock Text="🐞 Registro de errores del programa" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
-                            <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,10"
-                                       Text="Aqui se registran automaticamente todos los errores y avisos que ocurren mientras usas el programa, con su origen: si fue una prueba de diagnostico, una descarga, la instalacion/desinstalacion de un programa, un ajuste del registro, o un error inesperado del programa en si."/>
-                            <DockPanel Margin="0,0,0,10" MaxWidth="500" HorizontalAlignment="Left">
+                            <TextBlock Text="🐞 Monitoreo de errores (programa y hardware)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,8"/>
+                            <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,10" FontSize="12"
+                                       Text="Registra automaticamente los errores y avisos del programa (pruebas, descargas, instalaciones, registro, controladores, perfiles, camara y fallos inesperados) y revisa el hardware: eventos del visor de sucesos (disco, CPU/WHEA, GPU, apagados inesperados) y el estado de discos, RAM, temperatura, bateria y dispositivos. Selecciona un registro para ver que paso y como solucionarlo."/>
+                            <UniformGrid Columns="4" Margin="0,0,0,10">
+                                <Border Background="#33FF6B6B" BorderBrush="#FF6B6B" BorderThickness="1" CornerRadius="8" Padding="10,6" Margin="0,0,8,0">
+                                    <StackPanel><TextBlock x:Name="TxtStatErrores" Text="0" FontSize="24" FontWeight="Bold" Foreground="#FF6B6B"/><TextBlock Text="Errores" Foreground="White" FontSize="12"/></StackPanel>
+                                </Border>
+                                <Border Background="#33FFC857" BorderBrush="#FFC857" BorderThickness="1" CornerRadius="8" Padding="10,6" Margin="0,0,8,0">
+                                    <StackPanel><TextBlock x:Name="TxtStatAvisos" Text="0" FontSize="24" FontWeight="Bold" Foreground="#FFC857"/><TextBlock Text="Avisos" Foreground="White" FontSize="12"/></StackPanel>
+                                </Border>
+                                <Border Background="#332F7CF6" BorderBrush="#2F7CF6" BorderThickness="1" CornerRadius="8" Padding="10,6" Margin="0,0,8,0">
+                                    <StackPanel><TextBlock x:Name="TxtStatHardware" Text="0" FontSize="24" FontWeight="Bold" Foreground="#66AEFF"/><TextBlock Text="De hardware" Foreground="White" FontSize="12"/></StackPanel>
+                                </Border>
+                                <Border Background="#3329D398" BorderBrush="#29D398" BorderThickness="1" CornerRadius="8" Padding="10,6">
+                                    <StackPanel><TextBlock x:Name="TxtStatPrograma" Text="0" FontSize="24" FontWeight="Bold" Foreground="#29D398"/><TextBlock Text="Del programa" Foreground="White" FontSize="12"/></StackPanel>
+                                </Border>
+                            </UniformGrid>
+                            <DockPanel Margin="0,0,0,10" MaxWidth="560" HorizontalAlignment="Left">
                                 <TextBlock Text="🔍" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="14"/>
                                 <TextBox x:Name="TxtBuscarError" Padding="8,6"/>
                             </DockPanel>
-                            <DockPanel Margin="0,0,0,10" MaxWidth="360" HorizontalAlignment="Left">
+                            <WrapPanel Margin="0,0,0,10">
                                 <TextBlock Text="Categoria:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                <ComboBox x:Name="CmbFiltroCategoriaError">
+                                <ComboBox x:Name="CmbFiltroCategoriaError" Width="250" Margin="0,0,16,0">
                                     <ComboBoxItem Content="Todas" IsSelected="True"/>
+                                    <ComboBoxItem Content="Hardware"/>
+                                    <ComboBoxItem Content="Programa (excepcion)"/>
                                     <ComboBoxItem Content="Prueba de diagnostico"/>
+                                    <ComboBoxItem Content="Camara"/>
                                     <ComboBoxItem Content="Descarga de archivos"/>
                                     <ComboBoxItem Content="Instalar/Desinstalar programas"/>
                                     <ComboBoxItem Content="Registro de Windows"/>
@@ -10560,22 +11838,44 @@ function Buscar-DriverLaptop {
                                     <ComboBoxItem Content="Perfiles de optimizacion"/>
                                     <ComboBoxItem Content="Programa general"/>
                                 </ComboBox>
-                            </DockPanel>
+                                <TextBlock Text="Tipo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <ComboBox x:Name="CmbFiltroTipoError" Width="140">
+                                    <ComboBoxItem Content="Todos" IsSelected="True"/>
+                                    <ComboBoxItem Content="ERROR"/>
+                                    <ComboBoxItem Content="AVISO"/>
+                                </ComboBox>
+                            </WrapPanel>
                             <WrapPanel>
-                                <Button x:Name="BtnActualizarErrores" Content="🔄 Actualizar" Width="150" Height="42" FontSize="12"/>
-                                <Button x:Name="BtnCopiarErrores" Content="📋 Copiar todo" Width="150" Height="42" FontSize="12"/>
+                                <Button x:Name="BtnActualizarErrores" Content="🔄 Actualizar" Width="140" Height="42" FontSize="12"/>
+                                <Button x:Name="BtnEscanearHardware" Content="🔬 Escanear hardware ahora" Width="210" Height="42" FontSize="12" BorderBrush="#2F7CF6"/>
+                                <Button x:Name="BtnCopiarErrores" Content="📋 Copiar todo" Width="140" Height="42" FontSize="12"/>
                                 <Button x:Name="BtnExportarErrores" Content="💾 Exportar a archivo" Width="170" Height="42" FontSize="12"/>
                                 <Button x:Name="BtnLimpiarErrores" Content="🗑️ Limpiar registro" Width="160" Height="42" FontSize="12" BorderBrush="#A85050"/>
                             </WrapPanel>
-                            <TextBlock x:Name="TxtResumenErrores" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" Margin="0,10,0,0"/>
+                            <CheckBox x:Name="ChkMonitoreoVivo" Content="📡 Monitoreo en vivo del hardware (revisa cada 3 minutos mientras el programa este abierto)" Foreground="White" Margin="0,12,0,0" FontSize="12"/>
+                            <TextBlock x:Name="TxtEstadoMonitor" Foreground="#7C93BD" FontSize="12" Margin="0,4,0,0" Text="Monitoreo en vivo: apagado."/>
+                            <TextBlock x:Name="TxtResumenErrores" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" Margin="0,8,0,0"/>
                         </StackPanel>
                     </Border>
+                    <TextBox x:Name="TxtDetalleError" DockPanel.Dock="Bottom" Height="170" Margin="0,10,0,0" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+                             Background="#070A10" Foreground="#66AEFF" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto"
+                             Text="Selecciona un registro de la lista para ver que paso y como solucionarlo."/>
                     <DataGrid x:Name="GridRegistroErrores" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="Hora" Binding="{Binding Hora}" Width="0.6*"/>
-                            <DataGridTextColumn Header="Tipo" Binding="{Binding Tipo}" Width="0.5*"/>
-                            <DataGridTextColumn Header="Categoria" Binding="{Binding Categoria}" Width="1.4*"/>
-                            <DataGridTextColumn Header="Origen (funcion)" Binding="{Binding Origen}" Width="1.4*"/>
+                            <DataGridTextColumn Header="Hora" Binding="{Binding Hora}" Width="0.8*"/>
+                            <DataGridTextColumn Header="Tipo" Binding="{Binding Tipo}" Width="0.55*">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Tipo}" Value="ERROR"><Setter Property="Foreground" Value="#FF6B6B"/><Setter Property="FontWeight" Value="Bold"/></DataTrigger>
+                                            <DataTrigger Binding="{Binding Tipo}" Value="AVISO"><Setter Property="Foreground" Value="#FFC857"/></DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="Categoria" Binding="{Binding Categoria}" Width="1.3*"/>
+                            <DataGridTextColumn Header="Origen" Binding="{Binding Origen}" Width="1.5*"/>
+                            <DataGridTextColumn Header="x" Binding="{Binding Veces}" Width="0.3*"/>
                             <DataGridTextColumn Header="Mensaje" Binding="{Binding Mensaje}" Width="3*"/>
                         </DataGrid.Columns>
                     </DataGrid>
@@ -10597,45 +11897,21 @@ function Buscar-DriverLaptop {
                         <Grid>
                             <!-- Panel: Camara -->
                             <Grid x:Name="PanelModCamara">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" MinWidth="380"/>
-                                    <ColumnDefinition Width="280"/>
-                                </Grid.ColumnDefinitions>
-
-                                <Border Grid.Column="0" Style="{StaticResource TarjetaSeccion}" Margin="0,0,12,14">
+                                <Border Style="{StaticResource TarjetaSeccion}" MaxWidth="700" HorizontalAlignment="Left" Margin="0,0,0,14">
                                     <StackPanel>
-                                        <TextBlock Text="📷 Camara en vivo" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
+                                        <TextBlock Text="📷 Camara" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
                                         <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,10" FontSize="12"
-                                                   Text="Visualiza tu camara sin abrir la app Camara de Windows. Puedes rotarla o voltearla si la imagen se ve al reves (util con algunas camaras externas o de portatiles con la tapa girada)."/>
+                                                   Text="La camara se abre en una ventana propia, sin usar la app Camara de Windows: eliges la camara y la resolucion, puedes rotarla, voltearla (efecto espejo) y capturar fotos. Si no llega imagen, el programa prueba solo otras resoluciones."/>
                                         <DockPanel Margin="0,0,0,10">
                                             <Button x:Name="BtnModCamaraActualizarLista" DockPanel.Dock="Right" Content="🔄" Width="42" Margin="8,0,0,0" ToolTip="Actualizar lista de camaras"/>
                                             <ComboBox x:Name="CmbModCamaraDispositivo"/>
                                         </DockPanel>
-                                        <Border BorderBrush="#232B3D" BorderThickness="1" Background="#0A0D14" Height="340" CornerRadius="6">
-                                            <Grid>
-                                                <Image x:Name="ImgModCamara" Stretch="Uniform"/>
-                                                <TextBlock x:Name="TxtModCamaraSinSenal" Text="Camara detenida. Pulsa 'Iniciar camara'." Foreground="{StaticResource TextoSecundario}" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="260"/>
-                                            </Grid>
-                                        </Border>
-                                        <WrapPanel Margin="0,12,0,0">
-                                            <Button x:Name="BtnModCamaraIniciar" Content="▶️ Iniciar camara" Width="160" Height="42" FontSize="12" BorderBrush="{StaticResource Acento}"/>
-                                            <Button x:Name="BtnModCamaraDetener" Content="⏹️ Detener camara" Width="160" Height="42" FontSize="12" BorderBrush="#A85050"/>
+                                        <WrapPanel Margin="0,0,0,12">
+                                            <Button x:Name="BtnModCamaraIniciar" Content="🪟 Abrir camara en ventana" Width="230" Height="44" FontSize="12" BorderBrush="{StaticResource Acento}"/>
+                                            <Button x:Name="BtnModCamaraDetener" Content="⏹️ Cerrar ventana de camara" Width="230" Height="44" FontSize="12" BorderBrush="#A85050"/>
                                         </WrapPanel>
-                                        <TextBlock Text="Rotar y voltear:" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" Margin="0,14,0,6"/>
-                                        <WrapPanel>
-                                            <Button x:Name="BtnModCamaraRotarIzq" Content="↺ Rotar izquierda" Width="155" Height="40" FontSize="12"/>
-                                            <Button x:Name="BtnModCamaraRotarDer" Content="↻ Rotar derecha" Width="150" Height="40" FontSize="12"/>
-                                            <Button x:Name="BtnModCamaraVoltearH" Content="⇋ Voltear horizontal" Width="165" Height="40" FontSize="12"/>
-                                            <Button x:Name="BtnModCamaraVoltearV" Content="⇕ Voltear vertical" Width="150" Height="40" FontSize="12"/>
-                                            <Button x:Name="BtnModCamaraRestablecer" Content="↩️ Restablecer" Width="130" Height="40" FontSize="12"/>
-                                        </WrapPanel>
-                                    </StackPanel>
-                                </Border>
-
-                                <Border Grid.Column="1" Style="{StaticResource TarjetaSeccion}" Margin="0,0,0,14">
-                                    <StackPanel>
-                                        <TextBlock Text="🔎 Detalles de la camara" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
-                                        <TextBlock x:Name="TxtModCamaraDetalles" Foreground="White" TextWrapping="Wrap" FontSize="12" Text="Selecciona 'Iniciar camara' para ver aqui sus detalles (nombre, controlador, resolucion, orientacion actual)."/>
+                                        <TextBlock Text="🔎 Detalles de la camara" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,4,0,6"/>
+                                        <TextBlock x:Name="TxtModCamaraDetalles" Foreground="White" TextWrapping="Wrap" FontSize="12" Text="Aqui veras las camaras detectadas. Pulsa 'Abrir camara en ventana' para ver la imagen en vivo."/>
                                     </StackPanel>
                                 </Border>
                             </Grid>
@@ -10832,7 +12108,7 @@ function Buscar-DriverLaptop {
                         <Border Style="{StaticResource TarjetaSeccion}">
                             <StackPanel>
                                 <TextBlock Text="✨ Novedades de esta version" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
-                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🎨 Nueva interfaz neon: borde de ventana animado con degradado azul con blanco que fluye, fondo translucido con luces suaves en movimiento y barra de titulo propia (minimizar, maximizar, cerrar).&#10;✨ Boton de la barra de titulo para apagar o encender los efectos animados (modo rendimiento).&#10;☰ Panel lateral de navegacion: oculto al abrir; pulsa MENU para elegir una pestaña y se esconde solo (Esc tambien lo cierra).&#10;🔘 Todos los botones, campos de texto, tablas y barras de desplazamiento con estilo neon redondeado y translucido.&#10;📊 Barras de progreso animadas, con brillo que las recorre, aura y porcentaje en vivo.&#10;⬅ Boton 'Volver' en todas las ventanas que se abren.&#10;🧩 Controladores: el explorador ahora abre ventanas con listas rapidas (todos, que necesitan atencion, faltantes) y se agrego la busqueda de controladores obsoletos o no compatibles para seleccionarlos y borrarlos con copia de seguridad.&#10;🗑️ Programas: 'Desinstalar programas' abre una ventana con la lista de programas instalados, con buscador y los botones 'Desinstalar sin dejar rastros' y 'Forzar desinstalacion'.&#10;🛠️ Pestaña Modificacion: camara (rotar/voltear), pantalla (frecuencia de actualizacion), teclado, parlante y almacenamiento.&#10;🩺 Diagnostico ampliado: camara, teclado, microfono, altavoces, pantalla, RAM, almacenamiento, ventiladores, GPU, mouse, bateria, red, temperatura, arranque, Bluetooth, USB y diagnostico completo automatico.&#10;🚀 Ejecucion desde GitHub con un solo comando en cualquier equipo (ver abajo).&#10;📷 Camara corregida: la vista previa ahora se muestra en la pestaña Camara y en Diagnostico (descarga el componente la primera vez; requiere permiso de camara en Windows).&#10;🗑️ Quitar apps de Windows (Perfiles de optimizacion): lista las apps incluidas, incluida Microsoft Store, y las desinstala.&#10;🎞️ Mas animaciones: entrada escalonada de paneles, transicion entre pestañas, botones con zoom y efecto de respiracion."/>
+                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🎨 Nueva interfaz neon: borde de ventana animado con degradado azul con blanco que fluye, fondo translucido con luces suaves en movimiento y barra de titulo propia (minimizar, maximizar, cerrar).&#10;✨ Boton de la barra de titulo para apagar o encender los efectos animados (modo rendimiento).&#10;☰ Panel lateral de navegacion: oculto al abrir; pulsa MENU para elegir una pestaña y se esconde solo (Esc tambien lo cierra).&#10;🔘 Todos los botones, campos de texto, tablas y barras de desplazamiento con estilo neon redondeado y translucido.&#10;📊 Barras de progreso animadas, con brillo que las recorre, aura y porcentaje en vivo.&#10;⬅ Boton 'Volver' en todas las ventanas que se abren.&#10;🧩 Controladores: el explorador ahora abre ventanas con listas rapidas (todos, que necesitan atencion, faltantes) y se agrego la busqueda de controladores obsoletos o no compatibles para seleccionarlos y borrarlos con copia de seguridad.&#10;🗑️ Programas: 'Desinstalar programas' abre una ventana con la lista de programas instalados, con buscador y los botones 'Desinstalar sin dejar rastros' y 'Forzar desinstalacion'.&#10;🛠️ Pestaña Modificacion: camara (rotar/voltear), pantalla (frecuencia de actualizacion), teclado, parlante y almacenamiento.&#10;🩺 Diagnostico ampliado: camara, teclado, microfono, altavoces, pantalla, RAM, almacenamiento, ventiladores, GPU, mouse, bateria, red, temperatura, arranque, Bluetooth, USB y diagnostico completo automatico.&#10;🚀 Ejecucion desde GitHub con un solo comando en cualquier equipo (ver abajo).&#10;📷 Camara en su propia ventana (Diagnostico y Modificacion): eliges camara y resolucion, rotas, volteas, capturas fotos y, si no llega imagen, el programa prueba otras resoluciones solo (la primera vez descarga un componente; requiere permiso de camara en Windows).&#10;🗑️ Quitar apps de Windows (Perfiles de optimizacion): lista las apps incluidas, incluida Microsoft Store, y las desinstala.&#10;🎞️ Mas animaciones: entrada escalonada de paneles, transicion entre pestañas, botones con zoom y efecto de respiracion.&#10;⚡ Perfiles de optimizacion mejorados (Bajo consumo, Equipo moderno y Gamer): ahora quitan animaciones y sombras al instante, desactivan programas de inicio no esenciales, liberan RAM, ponen la CPU a maximo rendimiento y, al terminar, muestran una ventana con el ANTES y DESPUES (RAM, procesos, hilos, servicios, inicio, disco y cada ajuste).&#10;💀 BSOD: boton 'Explicar error seleccionado' (o doble clic) con el motivo de la pantalla azul y los pasos para solucionarla; catalogo de 45 codigos consultable aunque no tengas historial.&#10;🐞 Monitoreo de errores renovado: errores del programa y de hardware (visor de sucesos, S.M.A.R.T., temperatura, bateria, dispositivos), contadores, filtros, solucion sugerida por cada registro y monitoreo en vivo opcional.&#10;🩺 Diagnostico con mas pruebas: rendimiento de CPU, informacion del hardware, dispositivos de audio, Wi-Fi, velocidad de Internet, dispositivos con problemas, eventos criticos y estado de Windows; pruebas anteriores reforzadas con veredictos y resumen final, mas botones para copiar o guardar el informe."/>
                             </StackPanel>
                         </Border>
 
@@ -11113,28 +12389,6 @@ $window.FindName("CmbSeccionProgramas").Add_SelectionChanged({
 $window.FindName("BtnModCamaraIniciar").Add_Click({ Iniciar-CamaraModificacion })
 $window.FindName("BtnModCamaraDetener").Add_Click({ Detener-CamaraModificacion })
 $window.FindName("BtnModCamaraActualizarLista").Add_Click({ Cargar-ListaCamarasModificacion })
-$window.FindName("BtnModCamaraRotarIzq").Add_Click({
-    $Script:ModCamRotacion = (($Script:ModCamRotacion - 90) + 360) % 360
-    Refrescar-DetallesCamaraModificacion
-})
-$window.FindName("BtnModCamaraRotarDer").Add_Click({
-    $Script:ModCamRotacion = ($Script:ModCamRotacion + 90) % 360
-    Refrescar-DetallesCamaraModificacion
-})
-$window.FindName("BtnModCamaraVoltearH").Add_Click({
-    $Script:ModCamFlipH = -not $Script:ModCamFlipH
-    Refrescar-DetallesCamaraModificacion
-})
-$window.FindName("BtnModCamaraVoltearV").Add_Click({
-    $Script:ModCamFlipV = -not $Script:ModCamFlipV
-    Refrescar-DetallesCamaraModificacion
-})
-$window.FindName("BtnModCamaraRestablecer").Add_Click({
-    $Script:ModCamRotacion = 0
-    $Script:ModCamFlipH = $false
-    $Script:ModCamFlipV = $false
-    Refrescar-DetallesCamaraModificacion
-})
 # Al abrir la pestaña Modificacion por primera vez, carga la lista de camaras
 # automaticamente para que el usuario no tenga que pulsar "Actualizar" antes
 # de poder elegir una. Tambien: si el usuario se va a OTRA pestaña mientras
@@ -11148,9 +12402,6 @@ $window.FindName("TabControlPrincipal").Add_SelectionChanged({
         $Script:_camarasModCargadasUnaVez = $true
         Cargar-ListaCamarasModificacion
     }
-    if (-not $enModificacion -and $Script:ModCamActiva) {
-        Detener-CamaraModificacion
-    }
 })
 
 # --- Pestaña Modificacion: cambio de seccion (Camara / Pantalla / Teclado / Parlante) ---
@@ -11161,7 +12412,6 @@ function Mostrar-SeccionModificacion {
     $window.FindName("PanelModTeclado").Visibility = if ($Seccion -eq 'Teclado') { 'Visible' } else { 'Collapsed' }
     $window.FindName("PanelModParlante").Visibility = if ($Seccion -eq 'Parlante') { 'Visible' } else { 'Collapsed' }
     $window.FindName("PanelModAlmacenamiento").Visibility = if ($Seccion -eq 'Almacenamiento') { 'Visible' } else { 'Collapsed' }
-    if ($Seccion -ne 'Camara' -and $Script:ModCamActiva) { Detener-CamaraModificacion }
 }
 $window.FindName("CmbSeccionModificacion").Add_SelectionChanged({
     $sel = $window.FindName("CmbSeccionModificacion").SelectedItem
@@ -11569,6 +12819,22 @@ $window.FindName("BtnDiagMemoriaTab").Add_Click({ Accion-DiagnosticoMemoriaWindo
 $window.FindName("BtnAbrirMinidumpTab").Add_Click({ Accion-AbrirCarpetaMinidump })
 $window.FindName("BtnDriversRecientes").Add_Click({ Accion-VerControladoresRecientes })
 $window.FindName("BtnSFCTab").Add_Click({ Accion-VerificarArchivosSistema })
+function Global:Explicar-BSODSeleccionado {
+    $fila = $window.FindName("GridBSODTab").SelectedItem
+    if (-not $fila) { Show-Aviso "Selecciona primero un error de la lista y vuelve a pulsar el boton." "Selecciona un error"; return }
+    $cod = if ($fila.Codigo -and $fila.Codigo -ne 'Desconocido') { $fila.Codigo } else { $null }
+    Show-VentanaExplicarBSOD -Codigo $cod -Fecha $fila.Fecha
+}
+$window.FindName("BtnExplicarBSOD").Add_Click({ Explicar-BSODSeleccionado })
+$window.FindName("GridBSODTab").Add_MouseDoubleClick({ if ($window.FindName("GridBSODTab").SelectedItem) { Explicar-BSODSeleccionado } })
+$cmbCodBSOD = $window.FindName("CmbCodigoBSOD")
+$cmbCodBSOD.ItemsSource = @($Script:TablaBugCheck.Keys | Sort-Object | ForEach-Object { "$_  -  $($Script:TablaBugCheck[$_].Nombre)" })
+if ($cmbCodBSOD.Items.Count -gt 0) { $cmbCodBSOD.SelectedIndex = 0 }
+$window.FindName("BtnExplicarCodigoBSOD").Add_Click({
+    $sel = $window.FindName("CmbCodigoBSOD").SelectedItem
+    if (-not $sel) { return }
+    Show-VentanaExplicarBSOD -Codigo (("$sel" -split '\s+')[0])
+})
 Cargar-DatosBSODTab
 
 # --- Pestaña Diagnosticar equipo ---
@@ -11593,37 +12859,133 @@ $window.FindName("BtnProbarArranque").Add_Click({ Accion-ProbarTiempoArranque })
 $window.FindName("BtnProbarBluetooth").Add_Click({ Accion-ProbarBluetooth })
 $window.FindName("BtnProbarUSB").Add_Click({ Accion-ProbarPuertosUSB })
 $window.FindName("BtnDiagCompleto").Add_Click({ Accion-DiagnosticoCompletoEquipo })
+$window.FindName("BtnProbarCPU").Add_Click({ Accion-ProbarCPUBenchmark })
+$window.FindName("BtnInfoHardware").Add_Click({ Accion-InfoHardwareCompleta })
+$window.FindName("BtnProbarAudioDisp").Add_Click({ Accion-ProbarDispositivosAudio })
+$window.FindName("BtnProbarWifi").Add_Click({ Accion-ProbarWifi })
+$window.FindName("BtnProbarInternet").Add_Click({ Accion-ProbarVelocidadInternet })
+$window.FindName("BtnProbarDispProblemas").Add_Click({ Accion-ProbarDispositivosProblemas })
+$window.FindName("BtnProbarEventos").Add_Click({ Accion-ProbarEventosCriticos })
+$window.FindName("BtnProbarEstadoWin").Add_Click({ Accion-ProbarEstadoWindows })
+$window.FindName("BtnDiagCopiar").Add_Click({
+    $t = $window.FindName("TxtDiagResultados").Text
+    if ([string]::IsNullOrWhiteSpace($t) -or -not $Script:DiagLogIniciado) { Show-Aviso "Todavia no hay resultados para copiar. Ejecuta alguna prueba primero." "Sin resultados"; return }
+    try { Set-Clipboard -Value $t -ErrorAction Stop; Write-Log "Resultados del diagnostico copiados al portapapeles." -Tipo OK } catch { Write-Log "No se pudo copiar al portapapeles: $($_.Exception.Message)" -Tipo AVISO }
+})
+$window.FindName("BtnDiagExportar").Add_Click({
+    $t = $window.FindName("TxtDiagResultados").Text
+    if ([string]::IsNullOrWhiteSpace($t) -or -not $Script:DiagLogIniciado) { Show-Aviso "Todavia no hay resultados para guardar. Ejecuta alguna prueba primero." "Sin resultados"; return }
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.SaveFileDialog
+    $dlg.Title = "Guardar informe de diagnostico"
+    $dlg.Filter = "Archivo de texto (*.txt)|*.txt"
+    $dlg.FileName = "DragonTool_Diagnostico_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        try {
+            $cab = "The Dragon Tool - Informe de diagnostico`r`nEquipo: $env:COMPUTERNAME | Fecha: $(Get-Date -Format 'yyyy-MM-dd HH:mm')`r`n`r`n"
+            Set-Content -Path $dlg.FileName -Value ($cab + $t) -Encoding UTF8
+            Write-Log "Informe de diagnostico guardado en: $($dlg.FileName)" -Tipo OK
+        } catch { Write-Log "No se pudo guardar el informe: $($_.Exception.Message)" -Tipo ERROR }
+    }
+})
+$window.FindName("BtnDiagLimpiar").Add_Click({
+    $window.FindName("TxtDiagResultados").Text = "Los resultados de cada prueba apareceran aqui. Ejecuta una o varias pruebas para ver el diagnostico."
+    $Script:DiagLogIniciado = $false
+})
 
 # --- Pestaña Registro de errores ---
-function Cargar-RegistroErrores {
+function Global:Cargar-RegistroErrores {
     $gridErr = $window.FindName("GridRegistroErrores")
+    if (-not $gridErr) { return }
     $filtroCategoria = $window.FindName("CmbFiltroCategoriaError").SelectedItem
+    $filtroTipo = $window.FindName("CmbFiltroTipoError").SelectedItem
     $textoBusqueda = $window.FindName("TxtBuscarError").Text
 
-    $items = $Script:RegistroErrores
+    $items = @($Script:RegistroErrores.ToArray())
     if ($filtroCategoria -and $filtroCategoria.Content -ne 'Todas') {
-        $items = $items | Where-Object { $_.Categoria -eq $filtroCategoria.Content }
+        $items = @($items | Where-Object { $_.Categoria -eq $filtroCategoria.Content })
+    }
+    if ($filtroTipo -and $filtroTipo.Content -ne 'Todos') {
+        $items = @($items | Where-Object { $_.Tipo -eq $filtroTipo.Content })
     }
     if (-not [string]::IsNullOrWhiteSpace($textoBusqueda)) {
-        $items = $items | Where-Object {
-            $_.Mensaje -match [regex]::Escape($textoBusqueda) -or $_.Origen -match [regex]::Escape($textoBusqueda)
-        }
+        $items = @($items | Where-Object {
+            $_.Mensaje -match [regex]::Escape($textoBusqueda) -or $_.Origen -match [regex]::Escape($textoBusqueda) -or $_.Categoria -match [regex]::Escape($textoBusqueda)
+        })
     }
-    $listaOrdenada = @($items | Sort-Object Hora -Descending)
+    $listaOrdenada = @($items | Sort-Object Momento -Descending)
     $gridErr.ItemsSource = $listaOrdenada
 
-    $totalErrores = @($Script:RegistroErrores | Where-Object { $_.Tipo -eq 'ERROR' }).Count
-    $totalAvisos = @($Script:RegistroErrores | Where-Object { $_.Tipo -eq 'AVISO' }).Count
-    $window.FindName("TxtResumenErrores").Text = "Mostrando $($listaOrdenada.Count) de $($Script:RegistroErrores.Count) registro(s) totales ($totalErrores error(es), $totalAvisos aviso(s))."
+    $todos = @($Script:RegistroErrores.ToArray())
+    $totalErrores = @($todos | Where-Object { $_.Tipo -eq 'ERROR' }).Count
+    $totalAvisos = @($todos | Where-Object { $_.Tipo -eq 'AVISO' }).Count
+    $totalHw = @($todos | Where-Object { $_.Categoria -eq 'Hardware' }).Count
+    $window.FindName("TxtStatErrores").Text = "$totalErrores"
+    $window.FindName("TxtStatAvisos").Text = "$totalAvisos"
+    $window.FindName("TxtStatHardware").Text = "$totalHw"
+    $window.FindName("TxtStatPrograma").Text = "$($todos.Count - $totalHw)"
+    $window.FindName("TxtResumenErrores").Text = "Mostrando $($listaOrdenada.Count) de $($todos.Count) registro(s) ($totalErrores error(es), $totalAvisos aviso(s))."
+}
+
+function Global:Actualizar-EstadoMonitoreo {
+    $txt = $window.FindName("TxtEstadoMonitor")
+    if (-not $txt) { return }
+    $vivo = ($Script:HwTimerVivo -and $Script:HwTimerVivo.IsEnabled)
+    $ult = if ($Script:HwUltimoEscaneo) { "ultimo escaneo a las $($Script:HwUltimoEscaneo.ToString('HH:mm:ss'))" } else { "aun sin escaneos" }
+    $txt.Text = if ($vivo) { "📡 Monitoreo en vivo: ACTIVO (cada 3 min) - $ult." } else { "Monitoreo en vivo: apagado - $ult." }
+}
+
+function Global:Iniciar-MonitoreoVivo {
+    if (-not $Script:HwTimerVivo) {
+        $Script:HwTimerVivo = New-Object System.Windows.Threading.DispatcherTimer
+        $Script:HwTimerVivo.Interval = [TimeSpan]::FromMinutes(3)
+        $Script:HwTimerVivo.Add_Tick({ Iniciar-EscaneoHardware -Horas 2 -Manual $false -IncluirEstado $true; Actualizar-EstadoMonitoreo })
+    }
+    $Script:HwTimerVivo.Start()
+    Write-Log "Monitoreo en vivo del hardware activado." -Tipo OK
+    Iniciar-EscaneoHardware -Horas 24 -Manual $false -IncluirEstado $true
+    Actualizar-EstadoMonitoreo
+}
+
+function Global:Detener-MonitoreoVivo {
+    if ($Script:HwTimerVivo) { $Script:HwTimerVivo.Stop() }
+    Write-Log "Monitoreo en vivo del hardware desactivado." -Tipo INFO
+    Actualizar-EstadoMonitoreo
+}
+
+function Global:Texto-RegistroError {
+    param($e)
+    "$($e.Fecha) [$($e.Tipo)] $($e.Categoria) - $($e.Origen): $($e.Mensaje) (x$($e.Veces))`r`n    Solucion sugerida: $($e.Solucion)"
 }
 
 $window.FindName("BtnActualizarErrores").Add_Click({ Cargar-RegistroErrores })
 $window.FindName("CmbFiltroCategoriaError").Add_SelectionChanged({ Cargar-RegistroErrores })
+$window.FindName("CmbFiltroTipoError").Add_SelectionChanged({ Cargar-RegistroErrores })
 $window.FindName("TxtBuscarError").Add_TextChanged({ Cargar-RegistroErrores })
+$window.FindName("BtnEscanearHardware").Add_Click({ Iniciar-EscaneoHardware -Horas 72 -Manual $true -IncluirEstado $true })
+$window.FindName("ChkMonitoreoVivo").Add_Checked({ Iniciar-MonitoreoVivo })
+$window.FindName("ChkMonitoreoVivo").Add_Unchecked({ Detener-MonitoreoVivo })
+
+$window.FindName("GridRegistroErrores").Add_SelectionChanged({
+    $it = $window.FindName("GridRegistroErrores").SelectedItem
+    $caja = $window.FindName("TxtDetalleError")
+    if (-not $it) { $caja.Text = "Selecciona un registro de la lista para ver que paso y como solucionarlo."; return }
+    $t = "[$($it.Tipo)]  $($it.Categoria)  -  $($it.Origen)`r`nCuando: $($it.Fecha)   |   Repeticiones: $($it.Veces)`r`n`r`nQUE PASO:`r`n$($it.Mensaje)`r`n`r`nQUE HACER:`r`n$($it.Solucion)"
+    if ($it.Detalle) { $t += "`r`n`r`nDETALLE TECNICO:`r`n$($it.Detalle)" }
+    $caja.Text = $t
+})
+
+$window.FindName("TabControlPrincipal").Add_SelectionChanged({
+    $tabActual = $window.FindName("TabControlPrincipal").SelectedItem
+    if ($tabActual -and "$($tabActual.Header)" -like "*Registro de errores*") {
+        Cargar-RegistroErrores
+        Actualizar-EstadoMonitoreo
+    }
+})
 
 $window.FindName("BtnCopiarErrores").Add_Click({
     if ($Script:RegistroErrores.Count -eq 0) { Show-Aviso "No hay errores registrados." "Registro vacio"; return }
-    $texto = ($Script:RegistroErrores | ForEach-Object { "$($_.Hora) [$($_.Tipo)] $($_.Categoria) - $($_.Origen): $($_.Mensaje)" }) -join "`r`n"
+    $texto = (@($Script:RegistroErrores.ToArray()) | Sort-Object Momento | ForEach-Object { Texto-RegistroError $_ }) -join "`r`n"
     try {
         Set-Clipboard -Value $texto -ErrorAction Stop
         Write-Log "Registro de errores copiado al portapapeles ($($Script:RegistroErrores.Count) entrada(s))." -Tipo OK
@@ -11641,7 +13003,7 @@ $window.FindName("BtnExportarErrores").Add_Click({
     $dialogo.FileName = "DragonTool_RegistroErrores_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
     if ($dialogo.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         try {
-            $texto = ($Script:RegistroErrores | ForEach-Object { "$($_.Hora) [$($_.Tipo)] $($_.Categoria) - $($_.Origen): $($_.Mensaje)" }) -join "`r`n"
+            $texto = (@($Script:RegistroErrores.ToArray()) | Sort-Object Momento | ForEach-Object { Texto-RegistroError $_ }) -join "`r`n"
             Set-Content -Path $dialogo.FileName -Value $texto -Encoding UTF8
             Write-Log "Registro de errores exportado a: $($dialogo.FileName)" -Tipo OK
             Show-Aviso "Registro exportado correctamente." "Exportado"
@@ -11655,9 +13017,9 @@ $window.FindName("BtnLimpiarErrores").Add_Click({
     if ($Script:RegistroErrores.Count -eq 0) { return }
     if (-not (Show-Confirm "¿Vaciar por completo el registro de errores? Esta accion no se puede deshacer.")) { return }
     $Script:RegistroErrores.Clear()
+    $Script:HwVistos = @{}
     Cargar-RegistroErrores
 })
-
 Cargar-RegistroErrores
 
 # --- Panel de Inicio: acciones rapidas y actualizacion periodica ---
@@ -11675,7 +13037,10 @@ Actualizar-PanelInicio
 
 $window.Dispatcher.add_UnhandledException({
     param($s, $e)
-    try { Write-Log "Error inesperado no controlado: $($e.Exception.Message)" -Tipo ERROR } catch {}
+    try {
+        $det = "$($e.Exception.GetType().FullName)`r`n$($e.Exception.StackTrace)"
+        Add-RegistroError -Tipo 'ERROR' -Categoria 'Programa (excepcion)' -Origen 'Interfaz (excepcion no controlada)' -Mensaje "Error inesperado no controlado: $($e.Exception.Message)" -Detalle $det
+    } catch {}
     $e.Handled = $true
 })
 
@@ -11684,7 +13049,8 @@ $window.Dispatcher.add_UnhandledException({
 # no dejar recursos abiertos de fondo.
 $window.Add_Closed({
     try { if ($Script:TimerInicio) { $Script:TimerInicio.Stop() } } catch {}
-    try { if ($Script:ModCamActiva) { Detener-CamaraModificacion } } catch {}
+    try { Detener-CamaraModificacion } catch {}
+    try { if ($Script:HwTimerVivo) { $Script:HwTimerVivo.Stop() } } catch {}
     try { if ($Script:TimerModPantallaEnergia) { $Script:TimerModPantallaEnergia.Stop() } } catch {}
 })
 
@@ -11813,7 +13179,7 @@ try {
 # Animacion del borde neon: un unico giro continuo del pincel compartido mueve
 # los colores alrededor de todos los botones y bordes a la vez (muy barato de dibujar).
 try {
-    $pincelNeon = $window.FindResource("NeonBrush")
+    $pincelNeon = Obtener-PincelNeon -Elemento $window
     if (-not (Animar-PincelNeon -Pincel $pincelNeon)) { throw "el pincel no admite animacion" }
 } catch {
     Write-Log "No se pudo animar el borde neon (se muestra estatico): $($_.Exception.Message)" -Tipo AVISO
