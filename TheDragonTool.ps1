@@ -828,6 +828,12 @@ function Global:Aplicar-MarcoNeon {
             if (-not [double]::IsNaN($Ventana.Height)) { $Ventana.Height = $Ventana.Height + 64 }
             if (-not [double]::IsNaN($Ventana.Width))  { $Ventana.Width  = $Ventana.Width + 24 }
         }
+        # Ninguna ventana debe ser mas grande que el area de trabajo de la pantalla
+        try {
+            $aw = [System.Windows.SystemParameters]::WorkArea
+            $Ventana.MaxHeight = $aw.Height
+            $Ventana.MaxWidth = $aw.Width
+        } catch { }
         if ($Ventana.MinHeight -gt 0) { $Ventana.MinHeight = $Ventana.MinHeight + 64 }
         if ($Ventana.MinWidth -gt 0)  { $Ventana.MinWidth  = $Ventana.MinWidth + 24 }
 
@@ -13185,36 +13191,72 @@ try {
     Write-Log "No se pudo animar el borde neon (se muestra estatico): $($_.Exception.Message)" -Tipo AVISO
 }
 
-# --- Ajuste automatico al tamaño de pantalla --------------------------
-# La ventana se diseño para 1060x780, pero en pantallas mas chicas (muchas
-# laptops de 14" traen 1366x768, y algunas incluso menos) ese alto no
-# entraba completo junto con la barra de tareas de Windows, y la ventana
-# quedaba cortada contra el borde inferior. Se ajusta el tamaño al AREA DE
-# TRABAJO real de la pantalla (la resolucion menos la barra de tareas), con
-# un margen, y nunca se agranda mas alla del tamaño de diseño original en
-# pantallas grandes. Cada pestaña ya tiene su propio ScrollViewer, asi que
-# si aun con el ajuste algo no entra completo, se puede desplazar sin perder
-# nada de la interfaz.
+# --- Ajuste automatico a la pantalla (tamaño inicial + escala al maximizar) ---
+# 1) Al abrir: la ventana se dimensiona segun el AREA DE TRABAJO real de la
+#    pantalla detectada (resolucion menos barra de tareas): ocupa ~92% de ella,
+#    con un tope para monitores enormes y nunca por debajo del minimo usable.
+# 2) Al maximizar o redimensionar: el contenido se ESCALA (LayoutTransform) en
+#    proporcion al espacio disponible, asi en pantallas grandes todo se ve mas
+#    grande y legible, y en pantallas chicas se reduce lo justo para que no se
+#    pierda ninguna opcion. Como es una transformacion de layout, el espacio
+#    sobrante se reparte y no queda nada cortado. Cada pestaña conserva ademas
+#    su ScrollViewer por si el contenido aun asi fuese mas largo.
+# F11 alterna entre maximizado y normal.
 try {
     $areaTrabajo = [System.Windows.SystemParameters]::WorkArea
-    $anchoDiseno = $window.Width
-    $altoDiseno = $window.Height
     $window.MinWidth = 760
     $window.MinHeight = 520
-    $anchoFinal = [Math]::Min($anchoDiseno, $areaTrabajo.Width * 0.94)
-    $altoFinal = [Math]::Min($altoDiseno, $areaTrabajo.Height * 0.92)
+    $anchoFinal = [Math]::Min($areaTrabajo.Width * 0.92, 1600)
+    $altoFinal = [Math]::Min($areaTrabajo.Height * 0.92, 1000)
     $window.Width = [Math]::Max($anchoFinal, $window.MinWidth)
     $window.Height = [Math]::Max($altoFinal, $window.MinHeight)
-    # Si ni siquiera al tamaño minimo entra en el area de trabajo (pantallas
-    # muy pequeñas), se maximiza para aprovechar todo el espacio disponible
-    # en vez de quedar con bordes cortados fuera de la pantalla.
+    # Pantallas muy pequeñas: se maximiza para aprovechar todo el espacio
     if ($window.MinWidth -gt $areaTrabajo.Width -or $window.MinHeight -gt $areaTrabajo.Height) {
         $window.WindowState = [System.Windows.WindowState]::Maximized
     }
+} catch { }
+
+try {
+    $zonaEscala = $window.Content.FindName("MnZonaCliente")
+    $contenidoEscala = if ($zonaEscala) { $zonaEscala.Child } else { $null }
+    if ($contenidoEscala) {
+        $transEscala = New-Object System.Windows.Media.ScaleTransform(1, 1)
+        $contenidoEscala.LayoutTransform = $transEscala
+        $contenidoEscala.UseLayoutRounding = $true
+        [System.Windows.Media.TextOptions]::SetTextFormattingMode($contenidoEscala, [System.Windows.Media.TextFormattingMode]::Ideal)
+        $estadoEscala = @{ Valor = 1.0 }
+        $ajustarEscala = {
+            try {
+                $zw = $zonaEscala.ActualWidth; $zh = $zonaEscala.ActualHeight
+                if ($zw -lt 50 -or $zh -lt 50) { return }
+                # Tamaño de referencia del diseño original (1060 x ~760 utiles)
+                $raw = [Math]::Min($zw / 1060.0, $zh / 760.0)
+                if ($raw -ge 1) { $nuevo = [Math]::Min(1 + ($raw - 1) * 0.9, 1.7) }
+                else { $nuevo = [Math]::Max($raw, 0.7) }
+                $nuevo = [Math]::Round($nuevo, 2)
+                if ([Math]::Abs($nuevo - $estadoEscala.Valor) -ge 0.02) {
+                    $estadoEscala.Valor = $nuevo
+                    $transEscala.ScaleX = $nuevo
+                    $transEscala.ScaleY = $nuevo
+                }
+            } catch { }
+        }.GetNewClosure()
+        $window.Add_SizeChanged($ajustarEscala)
+        $window.Add_Loaded($ajustarEscala)
+        $window.Add_StateChanged($ajustarEscala)
+    }
+    $window.Add_PreviewKeyDown({
+        param($s, $e)
+        try {
+            if ($e.Key -eq [System.Windows.Input.Key]::F11) {
+                if ($s.WindowState -eq [System.Windows.WindowState]::Maximized) { $s.WindowState = [System.Windows.WindowState]::Normal }
+                else { $s.WindowState = [System.Windows.WindowState]::Maximized }
+                $e.Handled = $true
+            }
+        } catch { }
+    })
 } catch {
-    # Si por algun motivo no se puede leer el area de trabajo de la pantalla,
-    # se deja el tamaño de diseño original tal cual (mismo comportamiento de
-    # antes de este ajuste).
+    Write-Log "No se pudo activar el escalado automatico a la pantalla: $($_.Exception.Message)" -Tipo AVISO
 }
 
 Write-Log "The Dragon Tool listo. Creado por $Script:Autor." -Tipo OK
