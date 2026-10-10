@@ -15092,7 +15092,7 @@ function Global:Pedir-DatosCliente {
     [xml]$xamlCli = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Datos del cliente" Height="470" Width="470"
+        Title="Datos del cliente" Height="500" Width="470"
         WindowStartupLocation="CenterScreen" Background="#10141D">
   <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
   <StackPanel Margin="16">
@@ -15100,9 +15100,9 @@ function Global:Pedir-DatosCliente {
     <TextBlock Text="📄 Informe de diagnóstico" Foreground="White" FontWeight="Bold" FontSize="16" Margin="0,0,0,4"/>
     <TextBlock Text="Estos datos se incluirán en el informe PDF." Foreground="#8FA3C7" Margin="0,0,0,12" TextWrapping="Wrap"/>
     <TextBlock Text="Nombre del usuario / cliente:" Foreground="White"/>
-    <TextBox x:Name="TxtCliente" Margin="0,2,0,10" Height="30" FontSize="14"/>
+    <TextBox x:Name="TxtCliente" Margin="0,2,0,10" Height="40" FontSize="14" VerticalContentAlignment="Center"/>
     <TextBlock Text="Fecha de ingreso o visita al taller (dd/mm/aaaa):" Foreground="White"/>
-    <TextBox x:Name="TxtFechaIngreso" Margin="0,2,0,10" Height="30" FontSize="14"/>
+    <TextBox x:Name="TxtFechaIngreso" Margin="0,2,0,10" Height="40" FontSize="14" VerticalContentAlignment="Center"/>
     <TextBlock Text="Problema reportado / observaciones (opcional):" Foreground="White"/>
     <TextBox x:Name="TxtObs" Margin="0,2,0,6" Height="80" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
     <TextBlock x:Name="TxtErrorCli" Foreground="#FF6B6B" FontWeight="Bold" Margin="0,0,0,8" TextWrapping="Wrap"/>
@@ -15120,13 +15120,21 @@ function Global:Pedir-DatosCliente {
     $txtF.Text = (Get-Date).ToString('dd/MM/yyyy')
     if ($Global:UltimoClienteInforme) { $txtC.Text = $Global:UltimoClienteInforme.Nombre; $txtF.Text = $Global:UltimoClienteInforme.FechaTexto; $txtO.Text = $Global:UltimoClienteInforme.Obs }
     $Global:_cliRes = $null
+    foreach ($tb in @($txtC, $txtF)) { $tb.Add_GotKeyboardFocus({ param($snd, $ev) try { $snd.SelectAll() } catch { } }) }
     $dlg.FindName("BtnCancelar").Add_Click({ $dlg.DialogResult = $false })
     $dlg.FindName("BtnAceptar").Add_Click({
         $nombre = $txtC.Text.Trim()
         if (-not $nombre) { $txtE.Text = "Escribe el nombre del usuario."; $txtC.Focus() | Out-Null; return }
-        $fecha = [datetime]::MinValue
-        $formatos = [string[]]@('dd/MM/yyyy', 'd/M/yyyy', 'dd-MM-yyyy', 'd-M-yyyy', 'yyyy-MM-dd', 'dd/MM/yy')
-        if (-not [datetime]::TryParseExact($txtF.Text.Trim(), $formatos, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$fecha)) {
+        $fecha = $null
+        $t = $txtF.Text.Trim()
+        if ($t -match '(\d{1,2})\s*[/\-\.]\s*(\d{1,2})\s*[/\-\.]\s*(\d{4}|\d{2})\b') {
+            $dd = [int]$Matches[1]; $mm = [int]$Matches[2]; $aa = [int]$Matches[3]
+            if ($aa -lt 100) { $aa += 2000 }
+            try { $fecha = New-Object DateTime($aa, $mm, $dd) } catch { $fecha = $null }
+        } elseif ($t -match '^(\d{4})-(\d{1,2})-(\d{1,2})$') {
+            try { $fecha = New-Object DateTime([int]$Matches[1], [int]$Matches[2], [int]$Matches[3]) } catch { $fecha = $null }
+        }
+        if (-not $fecha) {
             $txtE.Text = "La fecha no es valida. Usa el formato dd/mm/aaaa (por ejemplo 10/10/2026)."; $txtF.Focus() | Out-Null; return
         }
         $Global:_cliRes = @{ Nombre = $nombre; Fecha = $fecha; FechaTexto = $fecha.ToString('dd/MM/yyyy'); Obs = $txtO.Text.Trim() }
