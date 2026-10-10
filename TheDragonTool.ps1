@@ -5519,6 +5519,782 @@ function Accion-ProbarEstadoWindows {
     } catch {}
 }
 
+# ---------------------------------------------------------------------------
+#  ALMACENAMIENTO AVANZADO (disco duro / SSD): detalle fisico, particiones,
+#  atributos S.M.A.R.T., sectores danados, latencia, actividad y eventos
+# ---------------------------------------------------------------------------
+function Global:Format-TamanoDisco {
+    param([double]$Bytes)
+    if ($Bytes -ge 1TB) { return ("{0:N2} TB" -f ($Bytes / 1TB)) }
+    if ($Bytes -ge 1GB) { return ("{0:N1} GB" -f ($Bytes / 1GB)) }
+    return ("{0:N0} MB" -f ($Bytes / 1MB))
+}
+
+# Nombres legibles de los atributos S.M.A.R.T. mas comunes
+$Global:SmartNombres = @{
+    1 = 'Tasa de errores de lectura'; 3 = 'Tiempo de arranque del motor'; 4 = 'Ciclos de arranque/parada'
+    5 = 'Sectores reasignados'; 7 = 'Errores de posicionamiento'; 9 = 'Horas de uso'
+    10 = 'Reintentos de arranque del motor'; 12 = 'Ciclos de encendido'; 177 = 'Desgaste (nivelado de celdas)'
+    179 = 'Bloques de reserva usados'; 181 = 'Fallos de programacion'; 182 = 'Fallos de borrado'
+    183 = 'Errores de enlace SATA'; 184 = 'Errores de datos extremo a extremo'; 187 = 'Errores incorregibles reportados'
+    188 = 'Tiempos de espera de comandos'; 190 = 'Temperatura (flujo de aire)'; 191 = 'Golpes / impactos'
+    192 = 'Apagados inseguros'; 193 = 'Ciclos de estacionamiento de cabezales'; 194 = 'Temperatura'
+    195 = 'Errores corregidos por ECC'; 196 = 'Eventos de reasignacion'; 197 = 'Sectores pendientes de reasignar'
+    198 = 'Sectores incorregibles (offline)'; 199 = 'Errores CRC (cable/conexion)'; 200 = 'Errores de escritura multizona'
+    231 = 'Vida restante del SSD'; 232 = 'Reserva disponible'; 233 = 'Desgaste de la memoria flash'
+    241 = 'Total escrito (LBAs)'; 242 = 'Total leido (LBAs)'
+}
+
+# Decodifica el bloque binario S.M.A.R.T. (512 bytes) de Windows en una lista de atributos
+function Global:Convertir-AtributosSmart {
+    param([byte[]]$Datos, [byte[]]$Umbrales)
+    $res = @()
+    if (-not $Datos -or $Datos.Length -lt 362) { return $res }
+    $umb = @{}
+    if ($Umbrales -and $Umbrales.Length -ge 362) {
+        for ($i = 2; $i -le 350; $i += 12) {
+            $id = [int]$Umbrales[$i]
+            if ($id -ne 0) { $umb[$id] = [int]$Umbrales[$i + 1] }
+        }
+    }
+    for ($i = 2; $i -le 350; $i += 12) {
+        $id = [int]$Datos[$i]
+        if ($id -eq 0) { continue }
+        $raw = [int64]0
+        for ($k = 5; $k -ge 0; $k--) { $raw = ($raw -shl 8) -bor [int64]$Datos[$i + 5 + $k] }
+        $u = 0
+        if ($umb.ContainsKey($id)) { $u = $umb[$id] }
+        $res += [pscustomobject]@{ Id = $id; Valor = [int]$Datos[$i + 3]; Peor = [int]$Datos[$i + 4]; Umbral = $u; Raw = $raw; RawBajo = [int]$Datos[$i + 5] }
+    }
+    return $res
+}
+
+# Estadisticas de una lista de latencias (ms)
+function Global:Estadistica-Latencias {
+    param($Lista)
+    $arr = [double[]]$Lista.ToArray()
+    if ($arr.Length -eq 0) { return @{ Prom = 0; P95 = 0; P99 = 0; Max = 0 } }
+    [Array]::Sort($arr)
+    $suma = 0.0; foreach ($v in $arr) { $suma += $v }
+    $i95 = [Math]::Min($arr.Length - 1, [int][Math]::Floor($arr.Length * 0.95))
+    $i99 = [Math]::Min($arr.Length - 1, [int][Math]::Floor($arr.Length * 0.99))
+    return @{ Prom = ($suma / $arr.Length); P95 = $arr[$i95]; P99 = $arr[$i99]; Max = $arr[$arr.Length - 1] }
+}
+
+# Escribe los contadores de confiabilidad (salud, desgaste, errores) de un disco fisico; devuelve $true si habia datos
+function Global:Escribir-ContadoresDisco {
+    param($Disco)
+    try { $rc = $Disco | Get-StorageReliabilityCounter -ErrorAction Stop } catch { return $false }
+    if (-not $rc) { return $false }
+    $p1 = @()
+    if ($null -ne $rc.Temperature) { $p1 += "Temperatura: $($rc.Temperature) °C" }
+    if ($null -ne $rc.TemperatureMax -and [int]$rc.TemperatureMax -gt 0) { $p1 += "Maxima registrada: $($rc.TemperatureMax) °C" }
+    if ($null -ne $rc.Wear) { $p1 += "Desgaste: $($rc.Wear)%" }
+    if ($null -ne $rc.PowerOnHours) { $p1 += "Horas encendido: $($rc.PowerOnHours) h" }
+    if ($p1.Count) { Write-DiagLog "     $($p1 -join ' | ')" }
+    $p2 = @()
+    if ($null -ne $rc.ReadErrorsTotal) { $p2 += "Errores de lectura: $($rc.ReadErrorsTotal) (corregidos $($rc.ReadErrorsCorrected), sin corregir $($rc.ReadErrorsUncorrected))" }
+    if ($null -ne $rc.WriteErrorsTotal) { $p2 += "Errores de escritura: $($rc.WriteErrorsTotal) (sin corregir $($rc.WriteErrorsUncorrected))" }
+    if ($p2.Count) { Write-DiagLog "     $($p2 -join ' | ')" }
+    $p3 = @()
+    if ($null -ne $rc.StartStopCycleCount) { $p3 += "Ciclos de arranque/parada: $($rc.StartStopCycleCount)" }
+    if ($null -ne $rc.LoadUnloadCycleCount) { $p3 += "Ciclos de carga de cabezales: $($rc.LoadUnloadCycleCount)" }
+    if ($null -ne $rc.ReadLatencyMax -and [int64]$rc.ReadLatencyMax -gt 0) { $p3 += "Latencia max. lectura: $($rc.ReadLatencyMax) ms" }
+    if ($null -ne $rc.WriteLatencyMax -and [int64]$rc.WriteLatencyMax -gt 0) { $p3 += "Latencia max. escritura: $($rc.WriteLatencyMax) ms" }
+    if ($p3.Count) { Write-DiagLog "     $($p3 -join ' | ')" }
+    if ($null -ne $rc.Temperature -and [int]$rc.Temperature -gt 60) { Diag-Aviso "Temperatura alta del disco ($($rc.Temperature) °C). Mejora la ventilacion." }
+    if ($null -ne $rc.Wear -and [int]$rc.Wear -gt 85) { Diag-Aviso "El SSD tiene mas del 85% de desgaste. Planea reemplazarlo." }
+    $sinCorregir = 0
+    if ($null -ne $rc.ReadErrorsUncorrected) { $sinCorregir += [int64]$rc.ReadErrorsUncorrected }
+    if ($null -ne $rc.WriteErrorsUncorrected) { $sinCorregir += [int64]$rc.WriteErrorsUncorrected }
+    if ($sinCorregir -gt 0) { Diag-Aviso "El disco acumula $sinCorregir error(es) de lectura/escritura sin corregir (posibles sectores danados)." }
+    return $true
+}
+
+function Accion-DiscoDetalleFisico {
+    Write-DiagLog "=== DISCO: DETALLE FISICO Y SECTORES ==="
+    $pd = @(); $dk = @(); $wd = @()
+    try { $pd = @(Get-PhysicalDisk -ErrorAction Stop) } catch {}
+    try { $dk = @(Get-Disk -ErrorAction Stop) } catch {}
+    try { $wd = @(Get-CimInstance Win32_DiskDrive -ErrorAction Stop) } catch {}
+    if ($wd.Count -eq 0) { Write-DiagLog "No se pudo obtener la lista de discos de este equipo."; return }
+    foreach ($w in $wd) {
+        $num = "$($w.Index)"
+        $p = $pd | Where-Object { "$($_.DeviceId)" -eq $num } | Select-Object -First 1
+        $d = $dk | Where-Object { "$($_.Number)" -eq $num } | Select-Object -First 1
+        $tipo = ''; $bus = "$($w.InterfaceType)"
+        if ($p) { $tipo = "$($p.MediaType)"; $bus = "$($p.BusType)" }
+        Write-DiagLog " - Disco ${num}: $($w.Model) | $tipo | $bus | $(Format-TamanoDisco $w.Size)"
+        $serie = "$($w.SerialNumber)".Trim()
+        $linea = @()
+        if ($serie) { $linea += "Serie: $serie" }
+        if ($w.FirmwareRevision) { $linea += "Firmware: $($w.FirmwareRevision)" }
+        if ($d) { $linea += "Estilo de particion: $($d.PartitionStyle)"; $linea += "Particiones: $($d.NumberOfPartitions)" }
+        if ($linea.Count) { Write-DiagLog "     $($linea -join ' | ')" }
+        $ls = [int]$w.BytesPerSector
+        $ps = 0
+        if ($p) {
+            if ($p.LogicalSectorSize) { $ls = [int]$p.LogicalSectorSize }
+            if ($p.PhysicalSectorSize) { $ps = [int]$p.PhysicalSectorSize }
+        }
+        $fmt = ''
+        if ($ls -eq 512 -and $ps -eq 4096) { $fmt = ' (formato 512e / Advanced Format)' }
+        elseif ($ls -eq 4096) { $fmt = ' (formato 4Kn nativo)' }
+        $sec = "Sector logico: $ls bytes"
+        if ($ps -gt 0) { $sec += " | Sector fisico: $ps bytes" }
+        Write-DiagLog "     $sec$fmt"
+        if ($w.TotalSectors) {
+            $g = ''
+            if ($w.TotalCylinders) { $g = " | Geometria: $($w.TotalCylinders) cilindros x $($w.TotalHeads) cabezas x $($w.SectorsPerTrack) sectores/pista" }
+            Write-DiagLog "     Sectores totales: $('{0:N0}' -f [int64]$w.TotalSectors)$g"
+        }
+        if ($p -and $p.SpindleSpeed -and [int64]$p.SpindleSpeed -gt 0 -and [int64]$p.SpindleSpeed -lt 100000) { Write-DiagLog "     Velocidad de giro: $($p.SpindleSpeed) RPM (disco mecanico)" }
+        if ($d) {
+            if ($d.IsOffline) { Diag-Aviso "El disco $num esta sin conexion (offline) en Administracion de discos." }
+            if ($d.IsReadOnly) { Diag-Aviso "El disco $num esta en modo solo lectura." }
+        }
+        if ($p) {
+            if ("$($p.HealthStatus)" -eq 'Healthy') { Diag-Ok "Salud del disco ${num}: Healthy (OK)" }
+            else { Diag-Aviso "Salud del disco ${num}: $($p.HealthStatus) ($($p.OperationalStatus)). Haz copia de seguridad y revisa el disco." }
+            if (-not (Escribir-ContadoresDisco -Disco $p)) { Write-DiagLog "     (Este disco/controlador no entrega contadores de confiabilidad.)" }
+        }
+    }
+    # TRIM (importante para el rendimiento y vida util de los SSD)
+    try {
+        $t = (& fsutil.exe behavior query DisableDeleteNotify 2>&1) -join ' '
+        if ($t -match '=\s*0') { Diag-Ok "TRIM activado (los SSD liberan bloques correctamente)." }
+        elseif ($t -match '=\s*1') { Diag-Aviso "TRIM desactivado. En un SSD baja el rendimiento con el tiempo (activalo con: fsutil behavior set DisableDeleteNotify 0)." }
+    } catch {}
+}
+
+function Accion-DiscoParticiones {
+    Write-DiagLog "=== DISCO: PARTICIONES, VOLUMENES Y ALINEACION ==="
+    $parts = @(); $vols = @(); $wv = @()
+    try { $parts = @(Get-Partition -ErrorAction Stop | Sort-Object DiskNumber, PartitionNumber) } catch { Write-DiagLog "No se pudo leer la tabla de particiones (Get-Partition no disponible)."; return }
+    try { $vols = @(Get-Volume -ErrorAction Stop) } catch {}
+    try { $wv = @(Get-CimInstance Win32_Volume -Filter 'DriveType=3' -ErrorAction Stop) } catch {}
+    foreach ($pt in $parts) {
+        $letra = ''
+        if ($pt.DriveLetter) { $letra = "$($pt.DriveLetter):" }
+        $tipo = "$($pt.Type)"
+        Write-DiagLog " - Disco $($pt.DiskNumber) / Particion $($pt.PartitionNumber) $letra | $tipo | $(Format-TamanoDisco $pt.Size)"
+        $off = [int64]$pt.Offset
+        $alin = 'sin alinear a 4 KB'
+        if (($off % 1048576) -eq 0) { $alin = 'alineada a 1 MB (optima)' }
+        elseif (($off % 4096) -eq 0) { $alin = 'alineada a 4 KB (correcta)' }
+        Write-DiagLog "     Inicio: sector $('{0:N0}' -f ($off / 512)) | Alineacion: $alin"
+        if (($off % 4096) -ne 0) { Diag-Aviso "La particion no esta alineada a 4 KB: puede reducir el rendimiento en SSD y discos 4K." }
+        if ($pt.IsBoot) { Write-DiagLog "     Contiene el arranque (Boot)" }
+        if ($pt.IsSystem) { Write-DiagLog "     Particion del sistema (EFI/System)" }
+        if ($pt.DriveLetter) {
+            $v = $vols | Where-Object { "$($_.DriveLetter)" -eq "$($pt.DriveLetter)" } | Select-Object -First 1
+            $x = $wv | Where-Object { $_.DriveLetter -eq $letra } | Select-Object -First 1
+            if ($v) {
+                $libre = $v.SizeRemaining; $total = $v.Size
+                $pct = 0; if ($total -gt 0) { $pct = [math]::Round(($libre / $total) * 100, 0) }
+                Write-DiagLog "     Sistema de archivos: $($v.FileSystem) | Etiqueta: $($v.FileSystemLabel) | Libre: $(Format-TamanoDisco $libre) ($pct%)"
+                if ("$($v.HealthStatus)" -ne 'Healthy' -and "$($v.HealthStatus)") { Diag-Aviso "El volumen $letra reporta estado '$($v.HealthStatus)'. Ejecuta la verificacion CHKDSK." }
+                if ($total -gt 0 -and $pct -lt 10) { Diag-Aviso "Poco espacio libre en $letra ($pct%). Libera espacio para evitar lentitud." }
+            }
+            if ($x) {
+                $extra = @()
+                if ($x.BlockSize) { $extra += "Cluster: $($x.BlockSize) bytes" }
+                if ($x.Compressed) { $extra += "comprimido" }
+                if ($extra.Count) { Write-DiagLog "     $($extra -join ' | ')" }
+                if ($x.DirtyBitSet) { Diag-Aviso "El volumen $letra tiene el indicador de 'sucio' (apagado incorrecto o errores). Ejecuta CHKDSK." }
+                else { Diag-Ok "Volumen $letra sin indicador de error pendiente (dirty bit limpio)." }
+            }
+        }
+    }
+}
+
+function Accion-DiscoSmartAtributos {
+    Write-DiagLog "=== DISCO: ATRIBUTOS S.M.A.R.T. (sectores danados, desgaste, errores) ==="
+    $datos = @(); $umbr = @()
+    try { $datos = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_ATAPISmartData -ErrorAction Stop) } catch {}
+    try { $umbr = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictThresholds -ErrorAction Stop) } catch {}
+    if ($datos.Count -eq 0) {
+        Write-DiagLog "   Este equipo no expone la tabla S.M.A.R.T. clasica (discos NVMe, USB o controlador RAID). Se muestran los contadores de confiabilidad de Windows:"
+        $hubo = $false
+        try {
+            foreach ($p in @(Get-PhysicalDisk -ErrorAction Stop)) {
+                Write-DiagLog " - $($p.FriendlyName) | $($p.MediaType) | $($p.BusType)"
+                if (Escribir-ContadoresDisco -Disco $p) { $hubo = $true }
+            }
+        } catch {}
+        if (-not $hubo) { Write-DiagLog "   No hay contadores de confiabilidad disponibles. Prueba con la herramienta del fabricante del disco (CrystalDiskInfo, Samsung Magician, etc.)." }
+        return
+    }
+    foreach ($d in $datos) {
+        $u = $umbr | Where-Object { $_.InstanceName -eq $d.InstanceName } | Select-Object -First 1
+        $ub = $null; if ($u) { $ub = $u.VendorSpecific }
+        $attrs = @(Convertir-AtributosSmart -Datos $d.VendorSpecific -Umbrales $ub)
+        Write-DiagLog " - Unidad: $($d.InstanceName)"
+        if ($attrs.Count -eq 0) { Write-DiagLog "     (No se pudieron leer atributos de esta unidad.)"; continue }
+        Write-DiagLog ("     {0,-4} {1,-36} {2,5} {3,5} {4,6}  {5}" -f 'ID', 'Atributo', 'Valor', 'Peor', 'Umbral', 'Dato / estado')
+        foreach ($a in $attrs) {
+            $nombre = $Global:SmartNombres[[int]$a.Id]
+            $conocido = [bool]$nombre
+            if (-not $conocido) { $nombre = "Atributo $($a.Id)" }
+            $dato = "$($a.Raw)"
+            switch ($a.Id) {
+                9   { $dato = "$($a.Raw) h (~$([math]::Round($a.Raw / 24, 0)) dias)" }
+                190 { $dato = "$($a.RawBajo) °C" }
+                194 { $dato = "$($a.RawBajo) °C" }
+                241 { $dato = "$($a.Raw) (~$([math]::Round(($a.Raw * 512) / 1GB, 0)) GB)" }
+                242 { $dato = "$($a.Raw) (~$([math]::Round(($a.Raw * 512) / 1GB, 0)) GB)" }
+            }
+            $estado = ''
+            if ($a.Umbral -gt 0 -and $a.Valor -le $a.Umbral) { $estado = ' ⚠ POR DEBAJO DEL UMBRAL'; Diag-Aviso "S.M.A.R.T.: '$nombre' esta por debajo del umbral del fabricante. El disco esta fallando." }
+            elseif (@(5, 196, 197, 198) -contains $a.Id -and $a.Raw -gt 0) {
+                $estado = ' ⚠ SECTORES DANADOS'
+                Diag-Aviso "S.M.A.R.T.: '$nombre' = $($a.Raw). El disco tiene sectores defectuosos; haz copia de seguridad y planea reemplazarlo."
+            }
+            elseif (@(184, 187, 10) -contains $a.Id -and $a.Raw -gt 0) {
+                $estado = ' ⚠ ERRORES'
+                Diag-Aviso "S.M.A.R.T.: '$nombre' = $($a.Raw). Vigila el disco y haz copia de seguridad."
+            }
+            elseif ($a.Id -eq 199 -and $a.Raw -gt 0) {
+                $estado = ' ⚠ revisar cable'
+                Write-DiagLog "     (Errores CRC: suelen deberse al cable SATA o a la conexion; cambia el cable si aumentan.)"
+            }
+            elseif (@(194, 190) -contains $a.Id -and $a.RawBajo -ge 60) {
+                $estado = ' ⚠ CALIENTE'; Diag-Aviso "Temperatura del disco alta ($($a.RawBajo) °C)."
+            }
+            elseif (@(177, 231, 233) -contains $a.Id -and $a.Valor -le 20) {
+                $estado = ' ⚠ VIDA BAJA'; Diag-Aviso "'$nombre' indica poca vida util restante ($($a.Valor)%)."
+            }
+            elseif ($conocido) { $estado = ' OK' }
+            if ($conocido -or $estado) {
+                Write-DiagLog ("     {0,-4} {1,-36} {2,5} {3,5} {4,6}  {5}{6}" -f $a.Id, $nombre, $a.Valor, $a.Peor, $a.Umbral, $dato, $estado)
+            }
+        }
+        $pend = $attrs | Where-Object { $_.Id -eq 197 } | Select-Object -First 1
+        $real = $attrs | Where-Object { $_.Id -eq 5 } | Select-Object -First 1
+        if (($pend -and $pend.Raw -eq 0) -and ($real -and $real.Raw -eq 0)) { Diag-Ok "Sin sectores reasignados ni pendientes: la superficie del disco esta sana segun S.M.A.R.T." }
+    }
+}
+
+function Accion-DiscoEventos {
+    Write-DiagLog "=== DISCO: EVENTOS DE ERROR DEL SISTEMA (ultimos 30 dias) ==="
+    $desc = @{
+        'disk|7'  = 'Bloque defectuoso (bad block) detectado'
+        'disk|11' = 'Error del controlador de disco'
+        'disk|15' = 'Dispositivo de disco no listo'
+        'disk|51' = 'Error de paginacion en el disco'
+        'disk|52' = 'El disco predice un fallo (S.M.A.R.T.)'
+        'disk|153' = 'Reintento de E/S (el disco tarda o falla)'
+        'disk|154' = 'Error de hardware irrecuperable en el disco'
+        'Ntfs|55'  = 'Estructura del sistema de archivos danada'
+        'Ntfs|137' = 'NTFS no pudo escribir datos de la unidad'
+        'Ntfs|140' = 'NTFS no pudo vaciar datos al disco'
+        'stornvme|129' = 'Restablecimiento del dispositivo NVMe'
+        'storahci|129' = 'Restablecimiento del controlador SATA'
+        'stornvme|153' = 'Reintento de E/S en NVMe'
+    }
+    $ids = @(7, 11, 15, 51, 52, 129, 137, 140, 153, 154, 55)
+    $proveedores = @('disk', 'Ntfs', 'stornvme', 'storahci')
+    $evs = @()
+    try {
+        $evs = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = $proveedores; Id = $ids; StartTime = (Get-Date).AddDays(-30) } -ErrorAction Stop)
+    } catch {
+        if ("$($_.Exception.Message)" -match '(?i)no events|no se encontr') { $evs = @() }
+        else { Write-DiagLog "   No se pudo leer el visor de sucesos: $($_.Exception.Message)"; return }
+    }
+    $conocidos = @($evs | Where-Object { $desc.ContainsKey("$($_.ProviderName)|$($_.Id)") })
+    if ($conocidos.Count -eq 0) { Diag-Ok "No hay eventos de error de disco ni de sistema de archivos en los ultimos 30 dias."; return }
+    $grupos = $conocidos | Group-Object { "$($_.ProviderName)|$($_.Id)" } | Sort-Object Count -Descending
+    foreach ($g in $grupos) {
+        $ult = ($g.Group | Sort-Object TimeCreated -Descending | Select-Object -First 1).TimeCreated
+        $txt = $desc[$g.Name]
+        $linea = "$($g.Count) vez/veces - $txt (ultimo: $($ult.ToString('yyyy-MM-dd HH:mm')))"
+        if (@('disk|7', 'disk|11', 'disk|51', 'disk|52', 'disk|154', 'Ntfs|55') -contains $g.Name) { Diag-Aviso $linea }
+        else { Write-DiagLog "   - $linea" }
+    }
+    Write-DiagLog "   Si ves 'Bloque defectuoso' o 'Error del controlador' repetidos, el disco o su cable pueden estar fallando."
+}
+
+function Accion-DiscoActividad {
+    Write-DiagLog "=== DISCO: ACTIVIDAD EN VIVO (6 segundos) ==="
+    Write-DiagLog "Midiendo uso, cola y transferencia de cada disco..."
+    $muestras = @{}
+    for ($i = 0; $i -lt 6; $i++) {
+        $d = @()
+        try { $d = @(Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name<>'_Total'" -ErrorAction Stop) }
+        catch { Write-DiagLog "   Los contadores de rendimiento de disco no estan disponibles: $($_.Exception.Message)"; return }
+        foreach ($x in $d) {
+            if (-not $muestras.ContainsKey($x.Name)) { $muestras[$x.Name] = @() }
+            $muestras[$x.Name] += ,@([double]$x.PercentDiskTime, [double]$x.DiskReadBytesPerSec, [double]$x.DiskWriteBytesPerSec, [double]$x.CurrentDiskQueueLength)
+        }
+        Wait-UI -Milisegundos 1000
+    }
+    foreach ($k in $muestras.Keys) {
+        $m = $muestras[$k]
+        $uso = 0.0; $usoMax = 0.0; $lec = 0.0; $esc = 0.0; $colaMax = 0.0
+        foreach ($s in $m) {
+            $uso += $s[0]; if ($s[0] -gt $usoMax) { $usoMax = $s[0] }
+            $lec += $s[1]; $esc += $s[2]
+            if ($s[3] -gt $colaMax) { $colaMax = $s[3] }
+        }
+        $n = [Math]::Max(1, $m.Count)
+        Write-DiagLog (" - Disco {0}: uso medio {1:N0}% (pico {2:N0}%) | lectura {3:N1} MB/s | escritura {4:N1} MB/s | cola maxima {5:N0}" -f $k, ($uso / $n), $usoMax, (($lec / $n) / 1MB), (($esc / $n) / 1MB), $colaMax)
+        if (($uso / $n) -ge 90) { Diag-Aviso "El disco $k esta al 90% o mas de uso de forma sostenida: causa lentitud. Revisa que proceso lo esta usando (Administrador de tareas)." }
+        elseif ($colaMax -ge 8) { Diag-Aviso "El disco $k tiene cola de operaciones alta; puede estar saturado o con problemas." }
+        else { Diag-Ok "Actividad del disco $k normal." }
+    }
+}
+
+function Accion-DiscoLatencia4K {
+    Write-DiagLog "=== DISCO: LATENCIA ALEATORIA 4K (en $($env:SystemDrive)) ==="
+    $arch = $null
+    try {
+        $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
+        $tamMB = 128
+        if ($ld -and ($ld.FreeSpace / 1MB) -lt ($tamMB * 4)) { Write-DiagLog "Hay muy poco espacio libre para esta prueba."; return }
+        $carp = Join-Path $env:TEMP "DragonToolDiskTest"
+        if (-not (Test-Path $carp)) { New-Item -Path $carp -ItemType Directory -Force | Out-Null }
+        $arch = Join-Path $carp "lat4k.tmp"
+        $tam = [int64]$tamMB * 1MB
+        $bloques = [int]($tam / 4096)
+        $buf = New-Object byte[] 4096
+        (New-Object Random).NextBytes($buf)
+        $rnd = New-Object Random
+        $ops = 1000
+        $sw = New-Object System.Diagnostics.Stopwatch
+
+        Write-DiagLog "Escritura aleatoria de $ops bloques de 4 KB (escritura directa a disco)..."
+        $fs = New-Object System.IO.FileStream($arch, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
+        $fs.SetLength($tam)
+        $latE = New-Object 'System.Collections.Generic.List[double]'
+        for ($i = 0; $i -lt $ops; $i++) {
+            $pos = [int64]$rnd.Next(0, $bloques) * 4096
+            $sw.Restart()
+            [void]$fs.Seek($pos, [System.IO.SeekOrigin]::Begin)
+            $fs.Write($buf, 0, 4096)
+            $sw.Stop()
+            $latE.Add($sw.Elapsed.TotalMilliseconds)
+            if ($i % 50 -eq 0) { Wait-UI -Milisegundos 1 }
+        }
+        $fs.Flush($true); $fs.Close()
+
+        Write-DiagLog "Lectura aleatoria de $ops bloques de 4 KB..."
+        $fs = New-Object System.IO.FileStream($arch, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, 4096, [System.IO.FileOptions]::RandomAccess)
+        $latL = New-Object 'System.Collections.Generic.List[double]'
+        for ($i = 0; $i -lt $ops; $i++) {
+            $pos = [int64]$rnd.Next(0, $bloques) * 4096
+            $sw.Restart()
+            [void]$fs.Seek($pos, [System.IO.SeekOrigin]::Begin)
+            [void]$fs.Read($buf, 0, 4096)
+            $sw.Stop()
+            $latL.Add($sw.Elapsed.TotalMilliseconds)
+            if ($i % 50 -eq 0) { Wait-UI -Milisegundos 1 }
+        }
+        $fs.Close()
+
+        $e = Estadistica-Latencias -Lista $latE
+        $l = Estadistica-Latencias -Lista $latL
+        Write-DiagLog (" - Escritura 4K: promedio {0:N2} ms | p95 {1:N2} ms | p99 {2:N2} ms | maximo {3:N1} ms | ~{4:N0} IOPS" -f $e.Prom, $e.P95, $e.P99, $e.Max, (1000 / [Math]::Max(0.001, $e.Prom)))
+        Write-DiagLog (" - Lectura 4K:   promedio {0:N3} ms | p95 {1:N3} ms | p99 {2:N3} ms | maximo {3:N1} ms (puede venir de la cache de Windows)" -f $l.Prom, $l.P95, $l.P99, $l.Max)
+        if ($e.Prom -lt 1) { Write-DiagLog " - Clasificacion: SSD rapido (NVMe o SATA moderno)" }
+        elseif ($e.Prom -lt 5) { Write-DiagLog " - Clasificacion: SSD SATA / unidad con cache" }
+        elseif ($e.Prom -lt 25) { Write-DiagLog " - Clasificacion: disco mecanico (HDD) normal" }
+        else { Write-DiagLog " - Clasificacion: latencia muy alta" }
+        if ($e.Prom -ge 25) { Diag-Aviso "Latencia de escritura muy alta ($([math]::Round($e.Prom,1)) ms). El disco esta lento o con problemas: revisa S.M.A.R.T. y cables." }
+        elseif ($e.Max -ge 500) { Diag-Aviso "Hubo un pico de latencia de $([math]::Round($e.Max,0)) ms. Pueden ser reintentos por sectores debiles." }
+        else { Diag-Ok "Latencia del disco dentro de lo esperado." }
+    } catch {
+        Write-DiagLog "No se pudo medir la latencia del disco: $($_.Exception.Message)"
+    } finally {
+        if ($arch) { Remove-Item $arch -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# Ventanita para elegir una unidad (C:, D:, ...). Devuelve la letra con dos puntos o $null.
+function Global:Pedir-UnidadDiag {
+    param([string]$Titulo = "Elegir unidad", [string]$Texto = "Elige la unidad:")
+    $unidades = @()
+    try { $unidades = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop | Sort-Object DeviceID) } catch {}
+    if ($unidades.Count -eq 0) { Show-Aviso "No se encontraron unidades de disco." "Sin unidades"; return $null }
+    $Global:UnidadElegida = $null
+    [xml]$x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$Titulo" Height="230" Width="440" WindowStartupLocation="CenterScreen" Background="#10141D" ResizeMode="NoResize">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <StackPanel Margin="18">
+    <TextBlock x:Name="TxtPedirUnidad" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,10"/>
+    <ComboBox x:Name="CmbPedirUnidad" Height="34" Margin="0,0,0,16"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="BtnOkUnidad" Content="Aceptar" Width="110" Height="36" Margin="0,0,8,0"/>
+      <Button x:Name="BtnNoUnidad" Content="Cancelar" Width="110" Height="36"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+"@
+    $w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
+    Iniciar-EfectosNeon -Ventana $w
+    $w.FindName("TxtPedirUnidad").Text = $Texto
+    $cmb = $w.FindName("CmbPedirUnidad")
+    foreach ($u in $unidades) {
+        $it = New-Object System.Windows.Controls.ComboBoxItem
+        $it.Content = "$($u.DeviceID)  $($u.VolumeName)  ($(Format-TamanoDisco $u.Size))"
+        $it.Tag = "$($u.DeviceID)"
+        [void]$cmb.Items.Add($it)
+    }
+    $cmb.SelectedIndex = 0
+    $Global:UiPedirUnidad = @{ Win = $w; Cmb = $cmb }
+    $w.FindName("BtnOkUnidad").Add_Click({
+        $sel = $Global:UiPedirUnidad.Cmb.SelectedItem
+        if ($sel) { $Global:UnidadElegida = "$($sel.Tag)" }
+        $Global:UiPedirUnidad.Win.Close()
+    })
+    $w.FindName("BtnNoUnidad").Add_Click({ $Global:UiPedirUnidad.Win.Close() })
+    $w.ShowDialog() | Out-Null
+    return $Global:UnidadElegida
+}
+
+# Ejecuta un programa de consola en segundo plano (sin congelar la ventana) y devuelve sus lineas de salida
+function Global:Invoke-ConsolaDiag {
+    param([string]$Exe, [string]$Argumentos, [string]$Etiqueta)
+    $tmp = Join-Path $env:TEMP ("dragon_" + [guid]::NewGuid().ToString('N') + ".txt")
+    $res = @{ Codigo = -1; Lineas = @() }
+    try {
+        $p = Start-Process -FilePath $Exe -ArgumentList $Argumentos -NoNewWindow -RedirectStandardOutput $tmp -PassThru -ErrorAction Stop
+        $t0 = Get-Date; $ultimo = 0
+        while (-not $p.HasExited) {
+            Wait-UI -Milisegundos 250
+            $seg = [int]((Get-Date) - $t0).TotalSeconds
+            if ($seg -ge $ultimo + 20) { $ultimo = $seg; Write-DiagLog "   ... $Etiqueta sigue en curso ($seg s)" }
+        }
+        $p.WaitForExit()
+        $res.Codigo = $p.ExitCode
+        if (Test-Path $tmp) { $res.Lineas = @(Get-Content -Path $tmp -Encoding OEM -ErrorAction SilentlyContinue | Where-Object { "$_".Trim() }) }
+    } catch {
+        Write-DiagLog "No se pudo ejecutar ${Etiqueta}: $($_.Exception.Message)"
+    } finally {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    return $res
+}
+
+function Accion-DiscoChkdsk {
+    $u = Pedir-UnidadDiag -Titulo "Verificar sectores (CHKDSK)" -Texto "Unidad a verificar. Es una revision de SOLO LECTURA: no repara ni modifica nada."
+    if (-not $u) { return }
+    Write-DiagLog "=== DISCO: VERIFICACION DE ERRORES Y SECTORES (CHKDSK solo lectura) en ${u} ==="
+    if (-not (Test-Admin)) { Diag-Aviso "CHKDSK necesita permisos de administrador. Abre The Dragon Tool como administrador."; return }
+    Write-DiagLog "Verificando la unidad ${u}... puede tardar varios minutos segun su tamano."
+    $r = Invoke-ConsolaDiag -Exe "$env:SystemRoot\System32\chkdsk.exe" -Argumentos $u -Etiqueta "CHKDSK"
+    if ($r.Lineas.Count -gt 0) {
+        $mostrar = @($r.Lineas | Select-Object -Last 16)
+        foreach ($l in $mostrar) { Write-DiagLog "   $("$l".Trim())" }
+    }
+    switch ([int]$r.Codigo) {
+        0 { Diag-Ok "CHKDSK no encontro errores en ${u}." }
+        1 { Diag-Aviso "CHKDSK corrigio errores en ${u}." }
+        2 { Diag-Aviso "CHKDSK encontro problemas en ${u} que requieren reparacion (ejecuta 'chkdsk ${u} /f' o programa la revision al reiniciar)." }
+        3 { Diag-Aviso "CHKDSK no pudo completar la verificacion de ${u} (unidad en uso, bloqueada o con errores graves)." }
+        default { Write-DiagLog "   (Codigo de salida de CHKDSK: $($r.Codigo))" }
+    }
+    Write-DiagLog "   Para buscar sectores danados en la superficie fisica usa 'Escanear superficie (mapa)'."
+}
+
+function Accion-DiscoOptimizacion {
+    $u = Pedir-UnidadDiag -Titulo "Fragmentacion y optimizacion" -Texto "Unidad a analizar (solo analisis, no modifica nada):"
+    if (-not $u) { return }
+    Write-DiagLog "=== DISCO: ANALISIS DE FRAGMENTACION / OPTIMIZACION en ${u} ==="
+    if (-not (Test-Admin)) { Diag-Aviso "El analisis necesita permisos de administrador. Abre The Dragon Tool como administrador."; return }
+    Write-DiagLog "Analizando ${u}..."
+    $r = Invoke-ConsolaDiag -Exe "$env:SystemRoot\System32\defrag.exe" -Argumentos "$u /A /V" -Etiqueta "el analisis"
+    $txt = ($r.Lineas -join ' ')
+    foreach ($l in @($r.Lineas | Select-Object -First 30)) { Write-DiagLog "   $("$l".Trim())" }
+    if ($txt -match '(\d{1,3})\s*%') {
+        $frag = [int]$Matches[1]
+        if ($frag -ge 15) { Diag-Aviso "Fragmentacion elevada (~$frag%). En un disco mecanico conviene desfragmentar; en un SSD usa solo 'Optimizar' (TRIM)." }
+    }
+    if ($r.Lineas.Count -eq 0) { Write-DiagLog "   (La herramienta no devolvio resultados para esta unidad.)" }
+}
+
+function Accion-DiscoCompleto {
+    Write-DiagLog "========================================"
+    Write-DiagLog "   DIAGNOSTICO COMPLETO DE ALMACENAMIENTO"
+    Write-DiagLog "========================================"
+    Accion-DiscoDetalleFisico
+    Accion-DiscoParticiones
+    Accion-DiscoSmartAtributos
+    Accion-DiscoEventos
+    Accion-DiscoActividad
+    Write-DiagLog "========================================"
+    Write-DiagLog "   Para mas detalle usa: Escanear superficie (mapa), Verificar CHKDSK, Latencia 4K y Velocidad de disco."
+    Write-DiagLog "========================================"
+}
+
+# --- Escaneo de superficie con mapa de sectores -------------------------------
+# Lee el disco fisico (solo lectura) por segmentos y colorea un mapa: verde = bien,
+# amarillo = lento (reintentos), rojo = sector ilegible. No escribe ni modifica nada.
+$Global:EscEstado = @{ Corriendo = $false; Cancelar = $false }
+$Global:EscUi = @{}
+
+# Localiza los sectores ilegibles dentro de una zona que fallo al leerse
+function Global:Localizar-SectoresMalos {
+    param([string]$Ruta, [int64]$Pos, [int]$Len, [int]$Sec, $Malos)
+    $cnt = 0
+    $f = $null
+    try {
+        $f = New-Object System.IO.FileStream($Ruta, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 1)
+        $b = New-Object byte[] 65536
+        for ($o = 0; $o -lt $Len; $o += 65536) {
+            if ($Global:EscEstado.Cancelar) { break }
+            $l = [Math]::Min(65536, $Len - $o)
+            $l = $l - ($l % $Sec)
+            if ($l -le 0) { break }
+            $ok = $true
+            try { [void]$f.Seek($Pos + $o, [System.IO.SeekOrigin]::Begin); [void]$f.Read($b, 0, $l) } catch { $ok = $false }
+            if (-not $ok) {
+                for ($so = 0; $so -lt $l; $so += $Sec) {
+                    if ($Global:EscEstado.Cancelar) { break }
+                    try {
+                        if (-not $f) { $f = New-Object System.IO.FileStream($Ruta, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 1) }
+                        [void]$f.Seek($Pos + $o + $so, [System.IO.SeekOrigin]::Begin)
+                        [void]$f.Read($b, 0, $Sec)
+                    } catch {
+                        $cnt++
+                        if ($Malos.Count -lt 200) { $Malos.Add([int64](($Pos + $o + $so) / $Sec)) }
+                        try { $f.Dispose() } catch {}
+                        $f = $null
+                    }
+                }
+            }
+            Wait-UI -Milisegundos 1
+        }
+    } finally { if ($f) { try { $f.Dispose() } catch {} } }
+    return $cnt
+}
+
+function Global:Iniciar-EscaneoSuperficie {
+    $ui = $Global:EscUi; $st = $Global:EscEstado
+    if ($st.Corriendo) { return }
+    if (-not (Test-Admin)) { $ui.Estado.Text = "Se necesitan permisos de administrador para leer el disco directamente. Cierra el programa y abrelo como administrador."; return }
+    $sel = $ui.CmbDisco.SelectedItem
+    if (-not $sel) { $ui.Estado.Text = "No hay discos para analizar."; return }
+    $partes = "$($sel.Tag)".Split('|')
+    $num = [int]$partes[0]; $tam = [int64]$partes[1]; $sec = [int]$partes[2]
+    if ($sec -lt 512) { $sec = 512 }
+    if ($tam -lt 4MB) { $ui.Estado.Text = "El disco seleccionado es demasiado pequeno o no informa su tamano."; return }
+    $modo = $ui.CmbModo.SelectedIndex
+    $ruta = "\\.\PhysicalDrive$num"
+    if ($ui.RutaPrueba) { $ruta = $ui.RutaPrueba }
+    $totalCeldas = $ui.Celdas.Count
+    $seg = [int64][Math]::Ceiling($tam / [double]$totalCeldas)
+    $seg = [int64]([Math]::Ceiling($seg / 1048576.0) * 1048576)
+    $nSeg = [int][Math]::Ceiling($tam / [double]$seg)
+    $bytesSeg = $seg
+    if ($modo -eq 0) { $bytesSeg = 1048576 } elseif ($modo -eq 1) { $bytesSeg = 16777216 }
+    if ($bytesSeg -gt $seg) { $bytesSeg = $seg }
+
+    foreach ($c in $ui.Celdas) { $c.Fill = $ui.Pincel.Sin; $c.ToolTip = $null }
+    $st.Corriendo = $true; $st.Cancelar = $false
+    $ui.Iniciar.IsEnabled = $false; $ui.CmbDisco.IsEnabled = $false; $ui.CmbModo.IsEnabled = $false
+    $ui.Detener.IsEnabled = $true
+    $ui.Resumen.Text = ""
+    $ui.Barra.Value = 0
+    $malos = New-Object 'System.Collections.Generic.List[int64]'
+    $vels = New-Object 'System.Collections.Generic.List[double]'
+    $buf = New-Object byte[] 1048576
+    $total = [int64]0; $segLentos = 0; $segErr = 0; $chunksLentos = 0; $malosTotal = 0; $leidos = 0
+    $velMin = [double]::MaxValue; $velMax = 0.0
+    $relojTotal = [System.Diagnostics.Stopwatch]::StartNew()
+    $relojPump = [System.Diagnostics.Stopwatch]::StartNew()
+    $sw = New-Object System.Diagnostics.Stopwatch
+    $fs = $null
+    $abortado = ''
+    try {
+        $fs = New-Object System.IO.FileStream($ruta, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 1)
+        for ($s = 0; $s -lt $nSeg; $s++) {
+            if ($st.Cancelar) { break }
+            $ini = [int64]$s * $seg
+            $fin = [Math]::Min($ini + $seg, $tam)
+            $lim = [Math]::Min($ini + $bytesSeg, $fin)
+            $pos = $ini
+            $segBytes = [int64]0; $segMs = 0.0; $huboErr = $false; $huboLento = $false
+            while ($pos -lt $lim) {
+                if ($st.Cancelar) { break }
+                $len = [int][Math]::Min(1048576, $lim - $pos)
+                $len = $len - ($len % $sec)
+                if ($len -le 0) { break }
+                $ok = $true
+                $sw.Restart()
+                try {
+                    [void]$fs.Seek($pos, [System.IO.SeekOrigin]::Begin)
+                    $n = $fs.Read($buf, 0, $len)
+                    if ($n -le 0) { $sw.Stop(); break }
+                } catch { $ok = $false }
+                $sw.Stop()
+                $ms = $sw.Elapsed.TotalMilliseconds
+                if ($ok) {
+                    $segBytes += $len; $segMs += $ms
+                    if ($ms -gt 700) { $huboLento = $true; $chunksLentos++ }
+                } else {
+                    $huboErr = $true
+                    try { $fs.Dispose() } catch {}
+                    $fs = $null
+                    $ui.Estado.Text = "Error de lectura cerca del sector $([int64]($pos / $sec)). Localizando sectores danados..."
+                    $malosTotal += (Localizar-SectoresMalos -Ruta $ruta -Pos $pos -Len $len -Sec $sec -Malos $malos)
+                    $fs = New-Object System.IO.FileStream($ruta, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 1)
+                    if ($malosTotal -gt 400) { $abortado = 'Se detuvo el analisis: demasiados sectores ilegibles. Copia tus datos importantes cuanto antes.'; $st.Cancelar = $true }
+                }
+                $pos += $len
+                if ($relojPump.ElapsedMilliseconds -gt 100) { Wait-UI -Milisegundos 1; $relojPump.Restart() }
+            }
+            if ($segBytes -gt 0) {
+                $total += $segBytes; $leidos++
+                $v = ($segBytes / 1MB) / [Math]::Max(0.001, ($segMs / 1000.0))
+                $base = 0.0
+                if ($vels.Count -ge 10) {
+                    $ini2 = [Math]::Max(0, $vels.Count - 40)
+                    $ult = [double[]]$vels.GetRange($ini2, $vels.Count - $ini2).ToArray()
+                    [Array]::Sort($ult)
+                    $base = $ult[[int][Math]::Floor($ult.Length / 2)]
+                }
+                if ($base -gt 0 -and $v -lt ($base * 0.2)) { $huboLento = $true }
+                $vels.Add($v)
+                if ($v -lt $velMin) { $velMin = $v }
+                if ($v -gt $velMax) { $velMax = $v }
+            } else { $v = 0.0 }
+            $celda = $ui.Celdas[$s]
+            if ($huboErr) { $celda.Fill = $ui.Pincel.Error; $segErr++ }
+            elseif ($huboLento) { $celda.Fill = $ui.Pincel.Lento; $segLentos++ }
+            else { $celda.Fill = $ui.Pincel.Ok }
+            $celda.ToolTip = "Segmento $($s + 1) | Desde $(Format-TamanoDisco $ini) | Velocidad: $([math]::Round($v,1)) MB/s"
+            $pct = (($s + 1) / [double]$nSeg) * 100
+            $ui.Barra.Value = $pct
+            $trans = $relojTotal.Elapsed
+            $resta = ''
+            if ($s -gt 2) { $falta = [TimeSpan]::FromSeconds(($trans.TotalSeconds / ($s + 1)) * ($nSeg - $s - 1)); $resta = " | Restante ~ " + $falta.ToString('hh\:mm\:ss') }
+            $ui.Estado.Text = ("Leyendo... {0:N0}%  |  {1} de {2} segmentos  |  {3:N0} MB/s  |  Sectores danados: {4}  |  Transcurrido {5}{6}" -f $pct, ($s + 1), $nSeg, $v, $malosTotal, $trans.ToString('hh\:mm\:ss'), $resta)
+            if ($relojPump.ElapsedMilliseconds -gt 60) { Wait-UI -Milisegundos 1; $relojPump.Restart() }
+        }
+    } catch {
+        $abortado = "No se pudo leer el disco: $($_.Exception.Message)"
+    } finally {
+        if ($fs) { try { $fs.Dispose() } catch {} }
+        $relojTotal.Stop()
+        $st.Corriendo = $false
+        try { $ui.Iniciar.IsEnabled = $true; $ui.CmbDisco.IsEnabled = $true; $ui.CmbModo.IsEnabled = $true; $ui.Detener.IsEnabled = $false } catch {}
+    }
+
+    $cancelado = ($st.Cancelar -and -not $abortado)
+    $vmed = 0.0; if ($vels.Count) { $s2 = 0.0; foreach ($q in $vels) { $s2 += $q }; $vmed = $s2 / $vels.Count }
+    if ($velMin -eq [double]::MaxValue) { $velMin = 0.0 }
+    $lineas = @()
+    $lineas += "RESULTADO DEL ESCANEO DE SUPERFICIE - Disco $num ($($sel.Content))"
+    $lineas += ("Leido: {0} en {1} ({2} segmentos de {3})" -f (Format-TamanoDisco $total), $relojTotal.Elapsed.ToString('hh\:mm\:ss'), $leidos, $nSeg)
+    $lineas += ("Velocidad: media {0:N0} MB/s | minima {1:N0} MB/s | maxima {2:N0} MB/s" -f $vmed, $velMin, $velMax)
+    $lineas += "Segmentos lentos (reintentos): $segLentos | Segmentos con error de lectura: $segErr | Sectores ilegibles: $malosTotal"
+    if ($malos.Count -gt 0) {
+        $primeros = @($malos | Select-Object -First 20)
+        $lineas += "Primeros sectores danados (LBA): $($primeros -join ', ')"
+    }
+    if ($abortado) { $lineas += $abortado }
+    if ($cancelado) { $lineas += "Analisis detenido por el usuario: resultado PARCIAL." }
+    if ($malosTotal -gt 0) { $lineas += "CONCLUSION: el disco tiene sectores que no se pueden leer. Haz copia de seguridad ahora y considera reemplazarlo." }
+    elseif ($segLentos -gt 0) { $lineas += "CONCLUSION: no hay sectores ilegibles, pero hay zonas lentas. Revisa S.M.A.R.T. y repite la prueba; si aumentan, el disco se esta degradando." }
+    elseif (-not $abortado) { $lineas += "CONCLUSION: no se detectaron sectores danados en la zona analizada." }
+    if ($modo -ne 2 -and -not $abortado) { $lineas += "Nota: el modo elegido analiza una muestra; para revisar el 100% de los sectores usa 'Completo'." }
+    $ui.Resumen.Text = ($lineas -join "`r`n")
+    $ui.Estado.Text = if ($cancelado) { "Detenido." } elseif ($abortado) { "Finalizado con avisos." } else { "Escaneo terminado." }
+    foreach ($l in $lineas) { Write-DiagLog $l }
+    if ($malosTotal -gt 0) { Diag-Aviso "El escaneo de superficie encontro $malosTotal sector(es) ilegible(s) en el disco $num." }
+}
+
+function Show-EscaneoSuperficieDisco {
+    Write-DiagLog "=== DISCO: ESCANEO DE SUPERFICIE (mapa de sectores) ==="
+    $discos = @()
+    try { $discos = @(Get-CimInstance Win32_DiskDrive -ErrorAction Stop | Sort-Object Index) } catch {}
+    if ($discos.Count -eq 0) { Write-DiagLog "No se pudo obtener la lista de discos."; return }
+    try {
+        [xml]$xamlEsc = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Escaneo de superficie - The Dragon Tool" Height="660" Width="860" MinHeight="520" MinWidth="640" WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="14">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+    <TextBlock DockPanel.Dock="Top" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8" FontSize="12"
+               Text="Lee el disco fisico por zonas (SOLO LECTURA, no modifica nada) y pinta un mapa: verde = sano, amarillo = lento (reintentos), rojo = sector ilegible. Requiere ejecutar el programa como administrador."/>
+    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <TextBlock Text="Disco:" Foreground="White" VerticalAlignment="Center" Margin="0,0,6,0"/>
+      <ComboBox x:Name="CmbDiscoEsc" Width="330" Margin="0,0,14,0"/>
+      <TextBlock Text="Modo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,6,0"/>
+      <ComboBox x:Name="CmbModoEsc" Width="300">
+        <ComboBoxItem Content="Rapido: muestreo de todo el disco (minutos)" IsSelected="True"/>
+        <ComboBoxItem Content="Medio: 16 MB por zona (decenas de minutos)"/>
+        <ComboBoxItem Content="Completo: todos los sectores (puede tardar horas)"/>
+      </ComboBox>
+    </WrapPanel>
+    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <Button x:Name="BtnIniciarEsc" Content="▶ Iniciar escaneo" Width="170" Height="38"/>
+      <Button x:Name="BtnDetenerEsc" Content="⏹ Detener" Width="130" Height="38" IsEnabled="False"/>
+    </WrapPanel>
+    <ProgressBar x:Name="PbEsc" DockPanel.Dock="Top" Height="14" Minimum="0" Maximum="100" Margin="0,0,0,6"/>
+    <TextBlock x:Name="TxtEstadoEsc" DockPanel.Dock="Top" Foreground="#66AEFF" TextWrapping="Wrap" Margin="0,0,0,6" FontSize="12" Text="Elige un disco y pulsa Iniciar."/>
+    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+      <Border Width="14" Height="14" Background="#29D398" Margin="0,0,5,0"/><TextBlock Text="Sano" Foreground="White" Margin="0,0,14,0" FontSize="12"/>
+      <Border Width="14" Height="14" Background="#FFC857" Margin="0,0,5,0"/><TextBlock Text="Lento" Foreground="White" Margin="0,0,14,0" FontSize="12"/>
+      <Border Width="14" Height="14" Background="#FF4D4D" Margin="0,0,5,0"/><TextBlock Text="Error de lectura" Foreground="White" Margin="0,0,14,0" FontSize="12"/>
+      <Border Width="14" Height="14" Background="#232B3D" Margin="0,0,5,0"/><TextBlock Text="Sin leer" Foreground="White" FontSize="12"/>
+    </WrapPanel>
+    <TextBox x:Name="TxtResumenEsc" DockPanel.Dock="Bottom" Height="140" Margin="0,8,0,0" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+             Background="#070A10" Foreground="#66AEFF" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto"/>
+    <Border BorderBrush="#232B3D" BorderThickness="1" Background="#0A0E14" Padding="4">
+      <UniformGrid x:Name="MapaEsc" Rows="20" Columns="40"/>
+    </Border>
+  </DockPanel>
+</Window>
+"@
+        $winEsc = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xamlEsc))
+        Iniciar-EfectosNeon -Ventana $winEsc
+        $conv = New-Object System.Windows.Media.BrushConverter
+        $mk = {
+            param($hex)
+            $b = $conv.ConvertFromString($hex); $b.Freeze(); return $b
+        }
+        $pincel = @{
+            Sin = (& $mk '#232B3D'); Ok = (& $mk '#29D398'); Lento = (& $mk '#FFC857'); Error = (& $mk '#FF4D4D')
+        }
+        $mapa = $winEsc.FindName("MapaEsc")
+        $celdas = New-Object System.Collections.ArrayList
+        for ($i = 0; $i -lt 800; $i++) {
+            $r = New-Object System.Windows.Shapes.Rectangle
+            $r.Fill = $pincel.Sin
+            $r.Margin = [System.Windows.Thickness]::new(1)
+            [void]$mapa.Children.Add($r)
+            [void]$celdas.Add($r)
+        }
+        $cmbD = $winEsc.FindName("CmbDiscoEsc")
+        foreach ($d in $discos) {
+            $it = New-Object System.Windows.Controls.ComboBoxItem
+            $bs = [int]$d.BytesPerSector; if ($bs -lt 512) { $bs = 512 }
+            $it.Content = "Disco $($d.Index): $($d.Model) ($(Format-TamanoDisco $d.Size))"
+            $it.Tag = "$($d.Index)|$([int64]$d.Size)|$bs"
+            [void]$cmbD.Items.Add($it)
+        }
+        $cmbD.SelectedIndex = 0
+        $Global:EscEstado.Corriendo = $false; $Global:EscEstado.Cancelar = $false
+        $Global:EscUi = @{
+            Win = $winEsc; CmbDisco = $cmbD; CmbModo = $winEsc.FindName("CmbModoEsc")
+            Iniciar = $winEsc.FindName("BtnIniciarEsc"); Detener = $winEsc.FindName("BtnDetenerEsc")
+            Barra = $winEsc.FindName("PbEsc"); Estado = $winEsc.FindName("TxtEstadoEsc"); Resumen = $winEsc.FindName("TxtResumenEsc")
+            Celdas = $celdas; Pincel = $pincel
+        }
+        $winEsc.FindName("BtnIniciarEsc").Add_Click({ Iniciar-EscaneoSuperficie })
+        $winEsc.FindName("BtnDetenerEsc").Add_Click({ $Global:EscEstado.Cancelar = $true; $Global:EscUi.Estado.Text = "Deteniendo..." })
+        $winEsc.Add_Closing({ $Global:EscEstado.Cancelar = $true })
+        $winEsc.ShowDialog() | Out-Null
+    } catch {
+        Write-DiagLog "No se pudo abrir la ventana de escaneo de superficie: $($_.Exception.Message)"
+    }
+}
+
 function Accion-DiagnosticoCompletoEquipo {
     $Script:DiagAdvertencias = 0
     Write-DiagLog "========================================"
@@ -5528,6 +6304,10 @@ function Accion-DiagnosticoCompletoEquipo {
     Accion-ProbarGraficaDiag
     Accion-VerDetallesPantalla
     Accion-ProbarAlmacenamiento
+    Accion-DiscoDetalleFisico
+    Accion-DiscoParticiones
+    Accion-DiscoSmartAtributos
+    Accion-DiscoEventos
     Accion-ProbarVelocidadDisco
     Accion-ProbarVentiladores
     Accion-ProbarTemperaturaCPU
@@ -11756,52 +12536,147 @@ function Buscar-DriverLaptop {
             </TabItem>
 
             <TabItem Header="🩺 Diagnosticar equipo">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                <DockPanel Margin="10">
-                    <TextBlock DockPanel.Dock="Top" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"
-                               Text="Prueba cada componente del equipo. Algunas pruebas requieren tu participacion (escuchar, ver, escribir); otras son automaticas."/>
-                    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
-                        <Button x:Name="BtnProbarCamara" Content="📷 Probar camara (vista previa propia)" Width="230" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarTeclado" Content="⌨️ Probar teclado (virtual)" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarMicrofono" Content="🎙️ Probar microfono (nivel en vivo)" Width="220" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarAudioIzq" Content="🔊 Altavoz izquierdo" Width="170" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarAudioDer" Content="🔊 Altavoz derecho" Width="170" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarAudioAmbos" Content="🔊 Ambos altavoces" Width="170" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarPantalla" Content="🖥️ Probar pantalla (colores)" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnDetallesPantalla" Content="🖥️ Ver detalles de pantalla" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarRAM" Content="🧠 Probar memoria RAM (elegir tipo)" Width="220" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarAlmacenamiento" Content="💽 Verificar almacenamiento" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnVelocidadDisco" Content="💽 Velocidad de disco (lectura/escritura)" Width="240" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarVentiladores" Content="🌀 Verificar ventiladores" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarGrafica" Content="🎮 Ver tarjeta grafica" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarMouse" Content="🖱️ Probar mouse/touchpad" Width="200" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarBateria" Content="🔋 Verificar bateria" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarRed" Content="🌐 Probar red / Internet" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarTemperatura" Content="🌡️ Temperatura del procesador" Width="220" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarArranque" Content="⏱️ Tiempo de arranque" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarBluetooth" Content="📶 Verificar Bluetooth" Width="190" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarUSB" Content="🔌 Dispositivos USB conectados" Width="220" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarCPU" Content="🚀 Rendimiento del procesador (10 s)" Width="240" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnInfoHardware" Content="🧾 Informacion del hardware" Width="210" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarAudioDisp" Content="🎧 Dispositivos de audio" Width="200" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarWifi" Content="📡 Wi-Fi (senal y velocidad)" Width="210" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarInternet" Content="⚡ Velocidad de Internet" Width="200" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarDispProblemas" Content="🧩 Dispositivos con problemas" Width="230" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarEventos" Content="📜 Eventos criticos (7 dias)" Width="220" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnProbarEstadoWin" Content="🛡️ Estado de Windows y seguridad" Width="250" Height="46" FontSize="12"/>
-                        <Button x:Name="BtnDiagCompleto" Content="🧩 Diagnostico completo automatico" Width="240" Height="46" FontSize="12" BorderBrush="{StaticResource Acento}"/>
-                    </WrapPanel>
-                    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
-                        <Button x:Name="BtnDiagCopiar" Content="📋 Copiar resultados" Width="180" Height="38" FontSize="12"/>
-                        <Button x:Name="BtnDiagExportar" Content="💾 Guardar informe" Width="180" Height="38" FontSize="12"/>
-                        <Button x:Name="BtnDiagLimpiar" Content="🧹 Limpiar pantalla" Width="180" Height="38" FontSize="12"/>
-                    </WrapPanel>
-                    <TextBox x:Name="TxtDiagResultados" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" MinHeight="240"
-                             Background="#070A10" Foreground="#66AEFF" FontFamily="Consolas" FontSize="12"
-                             VerticalScrollBarVisibility="Auto"
-                             Text="Los resultados de cada prueba apareceran aqui. Ejecuta una o varias pruebas para ver el diagnostico."/>
-                </DockPanel>
-                </ScrollViewer>
+                <Grid Margin="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="1.45*"/>
+                        <ColumnDefinition Width="12"/>
+                        <ColumnDefinition Width="1*" MinWidth="280"/>
+                    </Grid.ColumnDefinitions>
+                    <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel>
+                            <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"
+                                       Text="Pruebas organizadas por componente. Algunas requieren tu participacion (escuchar, ver, escribir); otras son automaticas. Los resultados aparecen a la derecha."/>
+                            <Button x:Name="BtnDiagCompleto" Content="🧩 Diagnostico completo automatico" Width="300" Height="44" FontSize="13" HorizontalAlignment="Left" Margin="0,0,0,10" BorderBrush="{StaticResource Acento}"/>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🧾 Sistema general" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnInfoHardware" Content="🧾 Informacion del hardware" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarArranque" Content="⏱️ Tiempo de arranque" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarEstadoWin" Content="🛡️ Estado de Windows" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarEventos" Content="📜 Eventos criticos (7 dias)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarDispProblemas" Content="🧩 Dispositivos con problemas" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🚀 Procesador (CPU)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarCPU" Content="🚀 Rendimiento CPU (10 s)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarTemperatura" Content="🌡️ Temperatura del procesador" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🧠 Memoria RAM" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarRAM" Content="🧠 Probar memoria RAM" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="💽 Almacenamiento (disco duro / SSD)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <TextBlock Text="Revisa sectores danados, desgaste, errores y rendimiento. El escaneo de superficie, CHKDSK y el analisis de fragmentacion requieren administrador y son de solo lectura." Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnDiscoCompleto" Content="💽 Diagnostico completo de disco" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarAlmacenamiento" Content="💽 Salud y espacio (resumen)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoDetalle" Content="🔎 Detalle fisico y sectores" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoSmart" Content="📊 Atributos S.M.A.R.T." Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoSuperficie" Content="🗺️ Escanear superficie (mapa)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoChkdsk" Content="🛠️ Verificar errores (CHKDSK)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoParticiones" Content="🧱 Particiones y alineacion" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnVelocidadDisco" Content="⚡ Velocidad lectura/escritura" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoLatencia" Content="⏲️ Latencia aleatoria 4K" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoActividad" Content="📈 Actividad en vivo (6 s)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoEventos" Content="📜 Eventos de error de disco" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDiscoDefrag" Content="🧹 Fragmentacion / optimizacion" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🎮 Graficos y pantalla" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarGrafica" Content="🎮 Ver tarjeta grafica" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarPantalla" Content="🖥️ Probar pantalla (colores)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnDetallesPantalla" Content="🖥️ Detalles de pantalla" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🔊 Audio" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarAudioIzq" Content="🔊 Altavoz izquierdo" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarAudioDer" Content="🔊 Altavoz derecho" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarAudioAmbos" Content="🔊 Ambos altavoces" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarMicrofono" Content="🎙️ Probar microfono" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarAudioDisp" Content="🎧 Dispositivos de audio" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="⌨️ Teclado y mouse" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarTeclado" Content="⌨️ Probar teclado (virtual)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarMouse" Content="🖱️ Probar mouse/touchpad" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="📷 Camara" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarCamara" Content="📷 Probar camara" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🌐 Red y conectividad" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarRed" Content="🌐 Probar red / Internet" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarWifi" Content="📡 Wi-Fi (senal y velocidad)" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarInternet" Content="⚡ Velocidad de Internet" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarBluetooth" Content="📶 Verificar Bluetooth" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🔋 Energia y refrigeracion" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarBateria" Content="🔋 Verificar bateria" Width="212" Height="40" FontSize="12"/>
+                                <Button x:Name="BtnProbarVentiladores" Content="🌀 Verificar ventiladores" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="🔌 Puertos y dispositivos" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                                <WrapPanel>
+                                <Button x:Name="BtnProbarUSB" Content="🔌 Dispositivos USB conectados" Width="212" Height="40" FontSize="12"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <DockPanel Grid.Column="2">
+                        <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                            <Button x:Name="BtnDiagCopiar" Content="📋 Copiar" Width="100" Height="36" FontSize="12"/>
+                            <Button x:Name="BtnDiagExportar" Content="💾 Guardar informe" Width="150" Height="36" FontSize="12"/>
+                            <Button x:Name="BtnDiagLimpiar" Content="🧹 Limpiar" Width="100" Height="36" FontSize="12"/>
+                        </WrapPanel>
+                        <TextBox x:Name="TxtDiagResultados" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+                                 Background="#070A10" Foreground="#66AEFF" FontFamily="Consolas" FontSize="12"
+                                 VerticalScrollBarVisibility="Auto"
+                                 Text="Los resultados de cada prueba apareceran aqui. Ejecuta una o varias pruebas para ver el diagnostico."/>
+                    </DockPanel>
+                </Grid>
             </TabItem>
 
             <TabItem Header="🐞 Registro de errores">
@@ -12875,6 +13750,16 @@ $window.FindName("BtnProbarInternet").Add_Click({ Accion-ProbarVelocidadInternet
 $window.FindName("BtnProbarDispProblemas").Add_Click({ Accion-ProbarDispositivosProblemas })
 $window.FindName("BtnProbarEventos").Add_Click({ Accion-ProbarEventosCriticos })
 $window.FindName("BtnProbarEstadoWin").Add_Click({ Accion-ProbarEstadoWindows })
+$window.FindName("BtnDiscoCompleto").Add_Click({ Accion-DiscoCompleto })
+$window.FindName("BtnDiscoDetalle").Add_Click({ Accion-DiscoDetalleFisico })
+$window.FindName("BtnDiscoParticiones").Add_Click({ Accion-DiscoParticiones })
+$window.FindName("BtnDiscoSmart").Add_Click({ Accion-DiscoSmartAtributos })
+$window.FindName("BtnDiscoSuperficie").Add_Click({ Show-EscaneoSuperficieDisco })
+$window.FindName("BtnDiscoChkdsk").Add_Click({ Accion-DiscoChkdsk })
+$window.FindName("BtnDiscoDefrag").Add_Click({ Accion-DiscoOptimizacion })
+$window.FindName("BtnDiscoLatencia").Add_Click({ Accion-DiscoLatencia4K })
+$window.FindName("BtnDiscoActividad").Add_Click({ Accion-DiscoActividad })
+$window.FindName("BtnDiscoEventos").Add_Click({ Accion-DiscoEventos })
 $window.FindName("BtnDiagCopiar").Add_Click({
     $t = $window.FindName("TxtDiagResultados").Text
     if ([string]::IsNullOrWhiteSpace($t) -or -not $Script:DiagLogIniciado) { Show-Aviso "Todavia no hay resultados para copiar. Ejecuta alguna prueba primero." "Sin resultados"; return }
