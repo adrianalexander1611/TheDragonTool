@@ -13287,42 +13287,6 @@ Marcar-Arranque 'funciones y recursos'
                 </DockPanel>
             </TabItem>
 
-            <TabItem Header="🎨 Personalizacion">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                    <StackPanel Margin="14" MaxWidth="640" HorizontalAlignment="Left">
-                        <Border Style="{StaticResource TarjetaSeccion}">
-                            <StackPanel>
-                                <TextBlock Text="🖼️ Fondo de pantalla" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
-                                <Button x:Name="BtnCambiarFondo" Content="Elegir imagen y aplicar como fondo de pantalla" Height="42"/>
-                            </StackPanel>
-                        </Border>
-
-                        <Border Style="{StaticResource TarjetaSeccion}">
-                            <StackPanel>
-                                <TextBlock Text="🌗 Tema" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
-                                <UniformGrid Columns="2">
-                                    <Button x:Name="BtnTemaOscuro" Content="🌙 Activar tema oscuro" Height="42" Margin="0,0,4,0"/>
-                                    <Button x:Name="BtnTemaClaro" Content="☀️ Activar tema claro" Height="42" Margin="4,0,0,0"/>
-                                </UniformGrid>
-                            </StackPanel>
-                        </Border>
-
-                        <Border Style="{StaticResource TarjetaSeccion}">
-                            <StackPanel>
-                                <TextBlock Text="⚙️ Mas ajustes de personalizacion" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
-                                <Button x:Name="BtnAbrirPersonalizacion" Content="🎨 Colores, temas y fondo (Configuracion de Windows)" Height="42" Margin="0,0,0,8"/>
-                                <Button x:Name="BtnAbrirPantallaBloqueoConfig" Content="🔒 Pantalla de bloqueo" Height="42" Margin="0,0,0,8"/>
-                                <Button x:Name="BtnAbrirSonidos" Content="🔊 Sonidos del sistema" Height="42" Margin="0,0,0,8"/>
-                                <Button x:Name="BtnAbrirCursor" Content="🖱️ Puntero del mouse" Height="42"/>
-                            </StackPanel>
-                        </Border>
-
-                        <TextBlock Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap" Margin="4,4,4,0"
-                                   Text="Nota: la transparencia, animaciones, protector de pantalla y demas efectos visuales estan en Registro de Windows → Edicion del registro."/>
-                    </StackPanel>
-                </ScrollViewer>
-            </TabItem>
-
             <TabItem Header="💀 BSOD">
                 <DockPanel Margin="10">
                     <TextBlock DockPanel.Dock="Top" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"
@@ -13740,6 +13704,7 @@ Marcar-Arranque 'funciones y recursos'
                                 <Button x:Name="BtnInformeLentitud" Content="🐢 Informe de lentitud ahora" Width="210" Height="42" FontSize="12" BorderBrush="#FFC857"/>
                                 <Button x:Name="BtnCopiarErrores" Content="📋 Copiar todo" Width="140" Height="42" FontSize="12"/>
                                 <Button x:Name="BtnExportarErrores" Content="💾 Exportar a archivo" Width="170" Height="42" FontSize="12"/>
+                                <Button x:Name="BtnEnviarCorreoErrores" Content="📧 Enviar por correo informe de errores" Width="290" Height="42" FontSize="12" BorderBrush="#4CD964"/>
                                 <Button x:Name="BtnLimpiarErrores" Content="🗑️ Limpiar registro" Width="160" Height="42" FontSize="12" BorderBrush="#A85050"/>
                             </WrapPanel>
                             <CheckBox x:Name="ChkMonitoreoVivo" Content="📡 Monitoreo en vivo del hardware (revisa cada 3 minutos mientras el programa este abierto)" Foreground="White" Margin="0,12,0,0" FontSize="12"/>
@@ -14007,7 +13972,7 @@ Marcar-Arranque 'funciones y recursos'
                         <Border Style="{StaticResource TarjetaSeccion}">
                             <StackPanel>
                                 <TextBlock Text="📋 Que hace cada pestaña" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
-                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🏠 Inicio: resumen en vivo del equipo y accesos rapidos.&#10;⚙️ Optimizar Windows: perfiles, acelerar CPU, liberar RAM.&#10;🧩 Controladores: buscar e instalar controladores, explorador de instalados, faltantes y obsoletos, respaldo y limpieza.&#10;📦 Programas: instalar apps, desinstalar sin dejar rastros o forzado, ISOs de Windows/Office/Linux, Microsoft Store.&#10;🗂️ Registro de Windows: edicion, optimizacion y reparacion de errores del registro.&#10;💾 Disco y almacenamiento: limpieza de archivos y espacio en disco.&#10;🧠 Memoria y rendimiento: herramientas de RAM y procesos.&#10;🔄 Windows Update: control de actualizaciones.&#10;🌐 Red y seguridad: diagnostico de red y Windows Defender.&#10;🖥️ Sistema: reparacion de Windows, ajustes de Windows 11, activacion.&#10;🎨 Personalizacion: fondo de pantalla, temas.&#10;💀 BSOD: historial y analisis de pantallas azules.&#10;🩺 Diagnosticar equipo: pruebas de hardware independientes.&#10;🛠️ Modificacion: ajustes de camara, pantalla, teclado, parlante y almacenamiento.&#10;🐞 Registro de errores: bitacora de todo lo que falla en el programa."/>
+                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🏠 Inicio: resumen en vivo del equipo y accesos rapidos.&#10;⚙️ Optimizar Windows: perfiles, acelerar CPU, liberar RAM.&#10;🧩 Controladores: buscar e instalar controladores, explorador de instalados, faltantes y obsoletos, respaldo y limpieza.&#10;📦 Programas: instalar apps, desinstalar sin dejar rastros o forzado, ISOs de Windows/Office/Linux, Microsoft Store.&#10;🗂️ Registro de Windows: edicion, optimizacion y reparacion de errores del registro.&#10;💾 Disco y almacenamiento: limpieza de archivos y espacio en disco.&#10;🧠 Memoria y rendimiento: herramientas de RAM y procesos.&#10;🔄 Windows Update: control de actualizaciones.&#10;🌐 Red y seguridad: diagnostico de red y Windows Defender.&#10;🖥️ Sistema: reparacion de Windows, ajustes de Windows 11, activacion.&#10;💀 BSOD: historial y analisis de pantallas azules.&#10;🩺 Diagnosticar equipo: pruebas de hardware independientes.&#10;🛠️ Modificacion: ajustes de camara, pantalla, teclado, parlante y almacenamiento.&#10;🐞 Registro de errores: bitacora de todo lo que falla en el programa."/>
                             </StackPanel>
                         </Border>
 
@@ -14720,13 +14685,6 @@ $window.FindName("BtnSnapOn").Add_Click({ Accion-SnapLayoutsOn })
 $window.FindName("BtnConfigGraficos").Add_Click({ Accion-AbrirConfigGraficos })
 $window.FindName("BtnEstadoActivacion").Add_Click({ Accion-VerEstadoActivacion })
 
-$window.FindName("BtnCambiarFondo").Add_Click({ Accion-CambiarFondoPantalla })
-$window.FindName("BtnTemaOscuro").Add_Click({ Accion-TemaOscuroOn })
-$window.FindName("BtnTemaClaro").Add_Click({ Accion-TemaClaroOn })
-$window.FindName("BtnAbrirPersonalizacion").Add_Click({ Accion-AbrirConfigPersonalizacion })
-$window.FindName("BtnAbrirPantallaBloqueoConfig").Add_Click({ Accion-AbrirConfigPantallaBloqueo })
-$window.FindName("BtnAbrirSonidos").Add_Click({ Accion-AbrirConfigSonidos })
-$window.FindName("BtnAbrirCursor").Add_Click({ Accion-AbrirConfigCursor })
 
 # --- Pestaña BSOD ---
 $window.FindName("BtnActualizarBSODTab").Add_Click({ Cargar-DatosBSODTab })
@@ -14900,6 +14858,57 @@ function Global:Detener-MonitoreoVivo {
     Actualizar-EstadoMonitoreo
 }
 
+function Global:Enviar-InformeErroresCorreo {
+    $destino = "adrianalexander1611@gmail.com"
+    $asunto = "The Dragon Tool - Informe de errores ($env:COMPUTERNAME) $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+    $cab = New-Object System.Collections.Generic.List[string]
+    $cab.Add("INFORME DE ERRORES - The Dragon Tool")
+    $cab.Add("Fecha: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+    $cab.Add("Equipo: $env:COMPUTERNAME   Usuario: $env:USERNAME")
+    try { $so = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $cab.Add("Windows: $($so.Caption) $($so.Version) ($($so.OSArchitecture))") } catch { }
+    $cab.Add("")
+    $entradas = @($Script:RegistroErrores.ToArray()) | Sort-Object Momento
+    if ($entradas.Count -eq 0) { $cab.Add("No hay errores registrados.") }
+    else { $cab.Add("Entradas: $($entradas.Count)"); $cab.Add(""); foreach ($e in $entradas) { $cab.Add((Texto-RegistroError $e)) } }
+    $informe = $cab -join "`r`n"
+    $archivo = Join-Path $env:TEMP "DragonTool_InformeErrores_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+    try { Set-Content -Path $archivo -Value $informe -Encoding UTF8 -ErrorAction Stop } catch {
+        Write-Log "No se pudo crear el informe para enviar: $($_.Exception.Message)" -Tipo ERROR; return
+    }
+    # 1) Outlook instalado: correo nuevo con el informe adjunto
+    try {
+        $ol = New-Object -ComObject Outlook.Application -ErrorAction Stop
+        $m = $ol.CreateItem(0)
+        $m.To = $destino
+        $m.Subject = $asunto
+        $m.Body = "Informe de errores de The Dragon Tool adjunto.`r`n`r`n" + $informe.Substring(0, [Math]::Min(3000, $informe.Length))
+        [void]$m.Attachments.Add($archivo)
+        $m.Display()
+        Write-Log "Correo preparado en Outlook para $destino con el informe adjunto. Revisa y pulsa Enviar." -Tipo OK
+        return
+    } catch { }
+    # 2) Sin Outlook: se copia el informe completo, se muestra el archivo y se abre un correo ya dirigido
+    try { Set-Clipboard -Value $informe -ErrorAction Stop } catch { }
+    $resumen = ""
+    foreach ($l in ($informe -split "`r`n")) {
+        if ([uri]::EscapeDataString($resumen + $l + "`r`n").Length -gt 1400) { $resumen += "..."; break }
+        $resumen += $l + "`r`n"
+    }
+    $cuerpo = "(El informe completo esta adjunto o pegado abajo. Pega aqui con Ctrl+V)`r`n`r`n" + $resumen
+    $q = "to=$destino&su=" + [uri]::EscapeDataString($asunto) + "&body=" + [uri]::EscapeDataString($cuerpo)
+    try { Start-Process "explorer.exe" "/select,`"$archivo`"" } catch { }
+    $tieneMailto = $false
+    try { $tieneMailto = Test-Path "Registry::HKEY_CLASSES_ROOT\mailto\shell\open\command" } catch { }
+    try {
+        if ($tieneMailto) { Start-Process ("mailto:" + $destino + "?subject=" + [uri]::EscapeDataString($asunto) + "&body=" + [uri]::EscapeDataString($cuerpo)) }
+        else { Start-Process ("https://mail.google.com/mail/?view=cm&fs=1&" + $q) }
+        Write-Log "Correo abierto para $destino. El informe completo esta copiado (Ctrl+V) y el archivo se mostro en el Explorador para adjuntarlo: $archivo" -Tipo OK
+        Show-Aviso "Se abrio un correo dirigido a $destino.`n`nEl informe completo esta copiado al portapapeles (pega con Ctrl+V) y el archivo se muestra en el Explorador para que lo adjuntes.`n`nRevisa y pulsa Enviar." "Enviar informe por correo"
+    } catch {
+        Write-Log "No se pudo abrir el correo: $($_.Exception.Message). El informe esta en: $archivo" -Tipo ERROR
+    }
+}
+
 function Global:Texto-RegistroError {
     param($e)
     "$($e.Fecha) [$($e.Tipo)] $($e.Categoria) - $($e.Origen): $($e.Mensaje) (x$($e.Veces))`r`n    Solucion sugerida: $($e.Solucion)"
@@ -14943,6 +14952,8 @@ $window.FindName("BtnCopiarErrores").Add_Click({
         Write-Log "No se pudo copiar al portapapeles (puede estar en uso por otro programa): $($_.Exception.Message)" -Tipo AVISO
     }
 })
+
+$window.FindName("BtnEnviarCorreoErrores").Add_Click({ Enviar-InformeErroresCorreo })
 
 $window.FindName("BtnExportarErrores").Add_Click({
     if ($Script:RegistroErrores.Count -eq 0) { Show-Aviso "No hay errores registrados." "Registro vacio"; return }
