@@ -13704,7 +13704,7 @@ Marcar-Arranque 'funciones y recursos'
                                 <Button x:Name="BtnInformeLentitud" Content="🐢 Informe de lentitud ahora" Width="210" Height="42" FontSize="12" BorderBrush="#FFC857"/>
                                 <Button x:Name="BtnCopiarErrores" Content="📋 Copiar todo" Width="140" Height="42" FontSize="12"/>
                                 <Button x:Name="BtnExportarErrores" Content="💾 Exportar a archivo" Width="170" Height="42" FontSize="12"/>
-                                <Button x:Name="BtnEnviarCorreoErrores" Content="📧 Enviar por correo informe de errores" Width="290" Height="42" FontSize="12" BorderBrush="#4CD964"/>
+                                <Button x:Name="BtnExportarPdfErrores" Content="📄 Exportar en PDF el informe de errores" Width="300" Height="42" FontSize="12" BorderBrush="#4CD964"/>
                                 <Button x:Name="BtnLimpiarErrores" Content="🗑️ Limpiar registro" Width="160" Height="42" FontSize="12" BorderBrush="#A85050"/>
                             </WrapPanel>
                             <CheckBox x:Name="ChkMonitoreoVivo" Content="📡 Monitoreo en vivo del hardware (revisa cada 3 minutos mientras el programa este abierto)" Foreground="White" Margin="0,12,0,0" FontSize="12"/>
@@ -14858,54 +14858,158 @@ function Global:Detener-MonitoreoVivo {
     Actualizar-EstadoMonitoreo
 }
 
-function Global:Enviar-InformeErroresCorreo {
-    $destino = "adrianalexander1611@gmail.com"
-    $asunto = "The Dragon Tool - Informe de errores ($env:COMPUTERNAME) $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
-    $cab = New-Object System.Collections.Generic.List[string]
-    $cab.Add("INFORME DE ERRORES - The Dragon Tool")
-    $cab.Add("Fecha: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-    $cab.Add("Equipo: $env:COMPUTERNAME   Usuario: $env:USERNAME")
-    try { $so = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $cab.Add("Windows: $($so.Caption) $($so.Version) ($($so.OSArchitecture))") } catch { }
-    $cab.Add("")
-    $entradas = @($Script:RegistroErrores.ToArray()) | Sort-Object Momento
-    if ($entradas.Count -eq 0) { $cab.Add("No hay errores registrados.") }
-    else { $cab.Add("Entradas: $($entradas.Count)"); $cab.Add(""); foreach ($e in $entradas) { $cab.Add((Texto-RegistroError $e)) } }
-    $informe = $cab -join "`r`n"
-    $archivo = Join-Path $env:TEMP "DragonTool_InformeErrores_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-    try { Set-Content -Path $archivo -Value $informe -Encoding UTF8 -ErrorAction Stop } catch {
-        Write-Log "No se pudo crear el informe para enviar: $($_.Exception.Message)" -Tipo ERROR; return
-    }
-    # 1) Outlook instalado: correo nuevo con el informe adjunto
+function Global:Exportar-InformeErroresPDF {
+    $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
+    $entradas = @($Script:RegistroErrores.ToArray()) | Sort-Object Momento -Descending
+    if ($entradas.Count -eq 0) { Show-Aviso "No hay errores registrados para exportar." "Registro vacio"; return }
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.SaveFileDialog
+    $dlg.Title = "Guardar informe de errores en PDF"
+    $dlg.Filter = "Documento PDF (*.pdf)|*.pdf"
+    $dlg.FileName = "DragonTool_InformeErrores_$(Get-Date -Format 'yyyyMMdd_HHmmss').pdf"
+    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $pdf = $dlg.FileName
+    Write-Log "Generando informe de errores en PDF..." -Tipo INFO
     try {
-        $ol = New-Object -ComObject Outlook.Application -ErrorAction Stop
-        $m = $ol.CreateItem(0)
-        $m.To = $destino
-        $m.Subject = $asunto
-        $m.Body = "Informe de errores de The Dragon Tool adjunto.`r`n`r`n" + $informe.Substring(0, [Math]::Min(3000, $informe.Length))
-        [void]$m.Attachments.Add($archivo)
-        $m.Display()
-        Write-Log "Correo preparado en Outlook para $destino con el informe adjunto. Revisa y pulsa Enviar." -Tipo OK
-        return
-    } catch { }
-    # 2) Sin Outlook: se copia el informe completo, se muestra el archivo y se abre un correo ya dirigido
-    try { Set-Clipboard -Value $informe -ErrorAction Stop } catch { }
-    $resumen = ""
-    foreach ($l in ($informe -split "`r`n")) {
-        if ([uri]::EscapeDataString($resumen + $l + "`r`n").Length -gt 1400) { $resumen += "..."; break }
-        $resumen += $l + "`r`n"
-    }
-    $cuerpo = "(El informe completo esta adjunto o pegado abajo. Pega aqui con Ctrl+V)`r`n`r`n" + $resumen
-    $q = "to=$destino&su=" + [uri]::EscapeDataString($asunto) + "&body=" + [uri]::EscapeDataString($cuerpo)
-    try { Start-Process "explorer.exe" "/select,`"$archivo`"" } catch { }
-    $tieneMailto = $false
-    try { $tieneMailto = Test-Path "Registry::HKEY_CLASSES_ROOT\mailto\shell\open\command" } catch { }
-    try {
-        if ($tieneMailto) { Start-Process ("mailto:" + $destino + "?subject=" + [uri]::EscapeDataString($asunto) + "&body=" + [uri]::EscapeDataString($cuerpo)) }
-        else { Start-Process ("https://mail.google.com/mail/?view=cm&fs=1&" + $q) }
-        Write-Log "Correo abierto para $destino. El informe completo esta copiado (Ctrl+V) y el archivo se mostro en el Explorador para adjuntarlo: $archivo" -Tipo OK
-        Show-Aviso "Se abrio un correo dirigido a $destino.`n`nEl informe completo esta copiado al portapapeles (pega con Ctrl+V) y el archivo se muestra en el Explorador para que lo adjuntes.`n`nRevisa y pulsa Enviar." "Enviar informe por correo"
+        # --- datos del equipo ---
+        $info = [ordered]@{}
+        $info['Equipo'] = $env:COMPUTERNAME
+        $info['Usuario'] = $env:USERNAME
+        try { $so = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $info['Windows'] = "$($so.Caption) (version $($so.Version), $($so.OSArchitecture))"; $info['Encendido desde'] = $so.LastBootUpTime.ToString('yyyy-MM-dd HH:mm') } catch { }
+        try { $c = @(Get-CimInstance Win32_Processor -ErrorAction Stop)[0]; $info['Procesador'] = "$($c.Name.Trim()) ($($c.NumberOfCores) nucleos / $($c.NumberOfLogicalProcessors) hilos)" } catch { }
+        try { $r = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory; $info['Memoria RAM'] = "{0:N1} GB" -f ($r / 1GB) } catch { }
+        try { $g = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { $_.Name }) -join " / "; if ($g) { $info['Grafica'] = $g } } catch { }
+        try {
+            $d = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop | ForEach-Object {
+                $pct = if ($_.Size) { [math]::Round(100 * $_.FreeSpace / $_.Size, 1) } else { 0 }
+                "$($_.DeviceID) {0:N0} GB libres de {1:N0} GB ($pct%)" -f ($_.FreeSpace / 1GB), ($_.Size / 1GB)
+            })
+            if ($d) { $info['Discos'] = $d -join "<br>" }
+        } catch { }
+        $nErr = @($entradas | Where-Object { $_.Tipo -eq 'ERROR' }).Count
+        $nAv = @($entradas | Where-Object { $_.Tipo -eq 'AVISO' }).Count
+        $nOtros = $entradas.Count - $nErr - $nAv
+        $cats = @($entradas | Group-Object Categoria | Sort-Object Count -Descending)
+        $maxCat = [math]::Max(1, ($cats | Measure-Object Count -Maximum).Maximum)
+        $estado = if ($nErr -gt 0) { "Se detectaron errores que requieren atencion" } elseif ($nAv -gt 0) { "Solo se detectaron avisos" } else { "Sin problemas graves" }
+        $claseEstado = if ($nErr -gt 0) { 'mal' } elseif ($nAv -gt 0) { 'aviso' } else { 'ok' }
+
+        $h = New-Object System.Text.StringBuilder
+        $css = @'
+@page { size: A4; margin: 14mm 12mm; }
+* { box-sizing: border-box; }
+body { font-family: "Segoe UI", Arial, sans-serif; color: #1c2433; font-size: 11px; margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.portada { background: linear-gradient(120deg,#0b1226,#17306b 60%,#1f6bff); color: #fff; padding: 22px 26px; border-radius: 12px; }
+.portada h1 { margin: 0 0 4px 0; font-size: 26px; letter-spacing: .5px; }
+.portada .sub { color: #bcd3ff; font-size: 12px; }
+.portada .meta { margin-top: 12px; font-size: 11px; color: #dbe7ff; }
+.estado { margin: 14px 0; padding: 11px 16px; border-radius: 10px; font-size: 13px; font-weight: 600; }
+.estado.mal { background: #fde8e8; color: #9b1c1c; border-left: 6px solid #e02424; }
+.estado.aviso { background: #fff4d6; color: #8a5a00; border-left: 6px solid #f0a500; }
+.estado.ok { background: #e3f8ea; color: #14683a; border-left: 6px solid #1fa75a; }
+.tarjetas { display: table; width: 100%; border-spacing: 8px 0; margin: 0 -8px 6px -8px; }
+.tarjeta { display: table-cell; width: 25%; background: #f3f6fc; border: 1px solid #dbe3f3; border-radius: 10px; padding: 10px 12px; text-align: center; }
+.tarjeta .n { font-size: 26px; font-weight: 800; color: #17306b; }
+.tarjeta .t { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: #5b6b8c; }
+.tarjeta.e .n { color: #c81e1e; } .tarjeta.a .n { color: #c27803; }
+h2 { font-size: 15px; color: #17306b; border-bottom: 2px solid #1f6bff; padding-bottom: 3px; margin: 18px 0 8px 0; page-break-after: avoid; }
+h3 { font-size: 12.5px; margin: 14px 0 6px 0; color: #17306b; page-break-after: avoid; }
+table { border-collapse: collapse; width: 100%; }
+table.info td { padding: 4px 8px; border-bottom: 1px solid #e3e9f5; vertical-align: top; }
+table.info td:first-child { width: 22%; font-weight: 600; color: #5b6b8c; background: #f7f9fd; }
+.barra { background: #e6ecf8; border-radius: 6px; height: 10px; width: 100%; }
+.barra div { background: linear-gradient(90deg,#1f6bff,#4fa8ff); height: 10px; border-radius: 6px; }
+table.cats td { padding: 4px 8px; border-bottom: 1px solid #eef2fa; }
+.entrada { border: 1px solid #dbe3f3; border-left-width: 6px; border-radius: 8px; padding: 8px 12px; margin: 0 0 8px 0; page-break-inside: avoid; background: #fff; }
+.entrada.ERROR { border-left-color: #e02424; } .entrada.AVISO { border-left-color: #f0a500; } .entrada.OTRO { border-left-color: #6b7a99; }
+.entrada .cab { font-size: 10px; color: #5b6b8c; margin-bottom: 3px; }
+.etq { display: inline-block; padding: 1px 8px; border-radius: 10px; font-weight: 700; font-size: 9.5px; color: #fff; margin-right: 6px; }
+.etq.ERROR { background: #e02424; } .etq.AVISO { background: #d68a00; } .etq.OTRO { background: #6b7a99; }
+.entrada .msg { font-size: 11.5px; font-weight: 600; margin: 2px 0 5px 0; }
+.entrada .sol { background: #eef5ff; border-radius: 6px; padding: 5px 9px; color: #17306b; }
+.entrada .det { margin-top: 5px; color: #4a5875; font-size: 10px; white-space: pre-wrap; font-family: Consolas, monospace; }
+.rec li { margin-bottom: 5px; }
+.pie { margin-top: 18px; padding-top: 8px; border-top: 1px solid #dbe3f3; color: #7a88a6; font-size: 10px; text-align: center; }
+'@
+        [void]$h.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>Informe de errores - The Dragon Tool</title><style>$css</style></head><body>")
+        [void]$h.Append("<div class='portada'><h1>🐉 THE DRAGON TOOL</h1><div class='sub'>Informe detallado de errores y diagnostico del equipo</div><div class='meta'>Generado el $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss') &nbsp;|&nbsp; Equipo: $(& $enc $env:COMPUTERNAME) &nbsp;|&nbsp; Autor: $(& $enc $Script:Autor) - The Dragon Tech</div></div>")
+        [void]$h.Append("<div class='estado $claseEstado'>Estado general: $(& $enc $estado)</div>")
+        [void]$h.Append("<div class='tarjetas'><div class='tarjeta'><div class='n'>$($entradas.Count)</div><div class='t'>Entradas</div></div><div class='tarjeta e'><div class='n'>$nErr</div><div class='t'>Errores</div></div><div class='tarjeta a'><div class='n'>$nAv</div><div class='t'>Avisos</div></div><div class='tarjeta'><div class='n'>$($cats.Count)</div><div class='t'>Categorias</div></div></div>")
+        [void]$h.Append("<h2>1. Datos del equipo</h2><table class='info'>")
+        foreach ($k in $info.Keys) {
+            $v = if ($k -eq 'Discos') { $info[$k] } else { & $enc $info[$k] }
+            [void]$h.Append("<tr><td>$(& $enc $k)</td><td>$v</td></tr>")
+        }
+        [void]$h.Append("</table>")
+        [void]$h.Append("<h2>2. Resumen por categoria</h2><table class='cats'>")
+        foreach ($c in $cats) {
+            $ce = @($c.Group | Where-Object { $_.Tipo -eq 'ERROR' }).Count
+            $w = [int](100 * $c.Count / $maxCat)
+            [void]$h.Append("<tr><td style='width:28%'><b>$(& $enc $c.Name)</b></td><td style='width:50%'><div class='barra'><div style='width:$w%'></div></div></td><td style='width:22%;text-align:right'>$($c.Count) entrada(s)$(if ($ce) { ", <span style='color:#c81e1e'>$ce error(es)</span>" })</td></tr>")
+        }
+        [void]$h.Append("</table>")
+        # recomendaciones prioritarias (soluciones unicas de los errores mas repetidos)
+        $prio = @($entradas | Where-Object { $_.Solucion } | Group-Object Solucion | Sort-Object @{e={ @($_.Group | Where-Object { $_.Tipo -eq 'ERROR' }).Count }; Descending=$true}, Count -Descending | Select-Object -First 6)
+        if ($prio.Count -gt 0) {
+            [void]$h.Append("<h2>3. Recomendaciones prioritarias</h2><ol class='rec'>")
+            foreach ($p in $prio) {
+                $ej = $p.Group[0]
+                [void]$h.Append("<li><b>$(& $enc $ej.Categoria):</b> $(& $enc $p.Name) <span style='color:#7a88a6'>(afecta a $($p.Count) entrada(s))</span></li>")
+            }
+            [void]$h.Append("</ol>")
+        }
+        [void]$h.Append("<h2>4. Detalle de cada entrada</h2>")
+        foreach ($c in $cats) {
+            [void]$h.Append("<h3>$(& $enc $c.Name) ($($c.Count))</h3>")
+            foreach ($e in @($c.Group | Sort-Object Momento -Descending)) {
+                $tipo = if ($e.Tipo -in 'ERROR','AVISO') { $e.Tipo } else { 'OTRO' }
+                [void]$h.Append("<div class='entrada $tipo'><div class='cab'><span class='etq $tipo'>$(& $enc $e.Tipo)</span>$(& $enc $e.Fecha) &nbsp;|&nbsp; Origen: $(& $enc $e.Origen) &nbsp;|&nbsp; Repeticiones: $($e.Veces)</div><div class='msg'>$(& $enc $e.Mensaje)</div>")
+                if ($e.Solucion) { [void]$h.Append("<div class='sol'><b>Solucion sugerida:</b> $(& $enc $e.Solucion)</div>") }
+                if ($e.Detalle) { [void]$h.Append("<div class='det'>$(& $enc $e.Detalle)</div>") }
+                [void]$h.Append("</div>")
+            }
+        }
+        [void]$h.Append("<div class='pie'>The Dragon Tool - The Dragon Tech, Hardware and Software &nbsp;|&nbsp; Informe generado automaticamente; las soluciones son sugerencias orientativas.</div></body></html>")
+
+        $html = Join-Path $env:TEMP "DragonTool_Informe_$(Get-Date -Format 'yyyyMMddHHmmss').html"
+        [System.IO.File]::WriteAllText($html, $h.ToString(), (New-Object System.Text.UTF8Encoding($true)))
+
+        # --- convertir a PDF con Edge o Chrome (sin ventana) ---
+        $navs = @(
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+            "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+        ) | Where-Object { $_ -and (Test-Path $_) }
+        $hecho = $false
+        if ($navs.Count -gt 0) {
+            $uri = ([uri]$html).AbsoluteUri
+            foreach ($modo in @('--headless=new', '--headless')) {
+                $perfil = Join-Path $env:TEMP "DragonTool_PerfilPDF_$([guid]::NewGuid().ToString('N'))"
+                if (Test-Path $pdf) { Remove-Item $pdf -Force -ErrorAction SilentlyContinue }
+                $argsNav = "$modo --disable-gpu --no-first-run --no-pdf-header-footer --user-data-dir=`"$perfil`" --print-to-pdf=`"$pdf`" `"$uri`""
+                try {
+                    $proc = Start-Process -FilePath $navs[0] -ArgumentList $argsNav -PassThru -WindowStyle Hidden
+                    [void]$proc.WaitForExit(60000)
+                    if (-not $proc.HasExited) { try { $proc.Kill() } catch { } }
+                } catch { }
+                Start-Sleep -Milliseconds 400
+                try { Remove-Item $perfil -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+                if ((Test-Path $pdf) -and ((Get-Item $pdf).Length -gt 1000)) { $hecho = $true; break }
+            }
+        }
+        if ($hecho) {
+            try { Remove-Item $html -Force -ErrorAction SilentlyContinue } catch { }
+            Write-Log "Informe de errores exportado a PDF: $pdf" -Tipo OK
+            try { Start-Process $pdf } catch { }
+        } else {
+            $htmlFinal = [System.IO.Path]::ChangeExtension($pdf, '.html')
+            Copy-Item $html $htmlFinal -Force
+            Write-Log "No se encontro Edge/Chrome para crear el PDF; se guardo el informe como pagina web: $htmlFinal" -Tipo AVISO
+            Show-Aviso "No se pudo crear el PDF automaticamente (no se encontro Microsoft Edge o Chrome).`n`nSe guardo el informe como pagina web y se abrira ahora: pulsa Ctrl+P y elige 'Guardar como PDF'." "Informe"
+            try { Start-Process $htmlFinal } catch { }
+        }
     } catch {
-        Write-Log "No se pudo abrir el correo: $($_.Exception.Message). El informe esta en: $archivo" -Tipo ERROR
+        Write-Log "No se pudo generar el informe PDF: $($_.Exception.Message)" -Tipo ERROR
     }
 }
 
@@ -14953,7 +15057,7 @@ $window.FindName("BtnCopiarErrores").Add_Click({
     }
 })
 
-$window.FindName("BtnEnviarCorreoErrores").Add_Click({ Enviar-InformeErroresCorreo })
+$window.FindName("BtnExportarPdfErrores").Add_Click({ Exportar-InformeErroresPDF })
 
 $window.FindName("BtnExportarErrores").Add_Click({
     if ($Script:RegistroErrores.Count -eq 0) { Show-Aviso "No hay errores registrados." "Registro vacio"; return }
