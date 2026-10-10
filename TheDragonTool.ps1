@@ -7614,6 +7614,104 @@ function Global:Escribir-VidaSSD {
 #  INFORMACION DEL DISCO ELEGIDO Y ESTADO DE SALUD DE LOS DISCOS DUROS (HDD)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+#  IDENTIFY DEVICE (ATA): rpm real, modo de transferencia SATA y estandar, igual que CrystalDiskInfo
+# ---------------------------------------------------------------------------
+function Global:Ensure-TipoAta {
+    if ('DragonAta' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class DragonAta {
+    [StructLayout(LayoutKind.Sequential)]
+    struct ATA_PASS_THROUGH_EX {
+        public ushort Length; public ushort AtaFlags; public byte PathId; public byte TargetId; public byte Lun; public byte ReservedAsUchar;
+        public uint DataTransferLength; public uint TimeOutValue; public uint ReservedAsUlong; public IntPtr DataBufferOffset;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public byte[] PreviousTaskFile;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)] public byte[] CurrentTaskFile;
+    }
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFile(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(IntPtr h, uint code, IntPtr inBuf, uint inSize, IntPtr outBuf, uint outSize, out uint ret, IntPtr ov);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr h);
+    public static ushort[] Identify(int disk) {
+        IntPtr h = CreateFile("\\\\.\\PhysicalDrive" + disk, 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (h == new IntPtr(-1)) return null;
+        try {
+            int hdr = Marshal.SizeOf(typeof(ATA_PASS_THROUGH_EX));
+            int total = hdr + 512;
+            IntPtr buf = Marshal.AllocHGlobal(total);
+            try {
+                for (int i = 0; i < total; i++) Marshal.WriteByte(buf, i, 0);
+                ATA_PASS_THROUGH_EX p = new ATA_PASS_THROUGH_EX();
+                p.Length = (ushort)hdr; p.AtaFlags = 0x02; p.DataTransferLength = 512; p.TimeOutValue = 5;
+                p.DataBufferOffset = new IntPtr(hdr);
+                p.PreviousTaskFile = new byte[8]; p.CurrentTaskFile = new byte[8];
+                p.CurrentTaskFile[6] = 0xEC;
+                Marshal.StructureToPtr(p, buf, false);
+                uint ret;
+                if (!DeviceIoControl(h, 0x4D02C, buf, (uint)total, buf, (uint)total, out ret, IntPtr.Zero)) return null;
+                ushort[] w = new ushort[256];
+                bool alguno = false;
+                for (int i = 0; i < 256; i++) {
+                    w[i] = (ushort)(Marshal.ReadByte(buf, hdr + 2 * i) | (Marshal.ReadByte(buf, hdr + 2 * i + 1) << 8));
+                    if (w[i] != 0) alguno = true;
+                }
+                return alguno ? w : null;
+            } finally { Marshal.FreeHGlobal(buf); }
+        } finally { CloseHandle(h); }
+    }
+}
+"@
+}
+
+# Interpreta las 256 palabras del comando IDENTIFY DEVICE
+function Global:Analizar-IdentifyAta {
+    param([uint16[]]$W)
+    $txt = {
+        param($ini, $fin)
+        $sb = New-Object System.Text.StringBuilder
+        for ($i = $ini; $i -le $fin; $i++) { [void]$sb.Append([char](([int]$W[$i]) -shr 8)); [void]$sb.Append([char](([int]$W[$i]) -band 0xFF)) }
+        return ($sb.ToString() -replace '[^\x20-\x7E]', '').Trim()
+    }
+    $r = [PSCustomObject]@{ Modelo = (& $txt 27 46); Serie = (& $txt 10 19); Firmware = (& $txt 23 26); Rpm = 0; Rotativo = $null; Actual = ''; Maximo = ''; Modo = ''; Estandar = ''; Serial = $false }
+    $rot = [int]$W[217]
+    if ($rot -eq 1) { $r.Rotativo = $false }
+    elseif ($rot -ge 1025 -and $rot -le 65534) { $r.Rotativo = $true; $r.Rpm = $rot }
+    $nombres = @{ 1 = 'SATA/150'; 2 = 'SATA/300'; 3 = 'SATA/600' }
+    $w76 = [int]$W[76]; $w77 = [int]$W[77]
+    if ($w76 -ne 0 -and $w76 -ne 65535) {
+        $max = 0
+        foreach ($g in 3, 2, 1) { if (($w76 -band (1 -shl $g)) -ne 0) { $max = $g; break } }
+        $cur = ($w77 -shr 1) -band 7
+        if ($max -gt 0) { $r.Maximo = $nombres[$max] }
+        if ($cur -gt 0 -and $nombres.ContainsKey($cur)) { $r.Actual = $nombres[$cur] } elseif ($max -gt 0) { $r.Actual = $nombres[$max] }
+        if ($r.Actual -or $r.Maximo) { $r.Modo = ("{0} | {1}" -f $(if ($r.Actual) { $r.Actual } else { '-' }), $(if ($r.Maximo) { $r.Maximo } else { '-' })); $r.Serial = $true }
+    }
+    $std = @{ 4 = 'ATA/ATAPI-4'; 5 = 'ATA/ATAPI-5'; 6 = 'ATA/ATAPI-6'; 7 = 'ATA/ATAPI-7'; 8 = 'ATA8-ACS'; 9 = 'ACS-2'; 10 = 'ACS-3'; 11 = 'ACS-4' }
+    $w80 = [int]$W[80]
+    if ($w80 -ne 0 -and $w80 -ne 65535) {
+        foreach ($b in 11..4) { if (($w80 -band (1 -shl $b)) -ne 0) { $r.Estandar = $std[$b]; break } }
+    }
+    return $r
+}
+
+$Global:IdentCache = @{}
+function Global:Obtener-IdentifyAta {
+    param([int]$Numero)
+    if ($Global:IdentCache.ContainsKey($Numero)) { return $Global:IdentCache[$Numero] }
+    $res = $null
+    try {
+        Ensure-TipoAta
+        $w = [DragonAta]::Identify($Numero)
+        if ($w) { $res = Analizar-IdentifyAta -W $w }
+    } catch { }
+    $Global:IdentCache[$Numero] = $res
+    return $res
+}
+
 # Atributos S.M.A.R.T. del disco indicado (objeto de Get-PhysicalDisk) y bandera de "fallo previsto"
 function Global:Obtener-SmartDeDisco {
     param($Disco)
@@ -7650,7 +7748,7 @@ function Global:Obtener-InfoDisco {
     try { $pd = Get-PhysicalDisk -ErrorAction Stop | Where-Object { "$($_.DeviceId)" -eq "$num" } | Select-Object -First 1 } catch { }
     try { $wd = Get-CimInstance Win32_DiskDrive -ErrorAction Stop | Where-Object { "$($_.Index)" -eq "$num" } | Select-Object -First 1 } catch { }
     if (-not $pd -and -not $wd) { return $null }
-    $o = [ordered]@{ Numero = $num; Modelo = ''; Serie = ''; Firmware = ''; Tipo = 'Desconocido'; Interfaz = ''; Rpm = 0; Horas = $null; Temp = $null; Capacidad = 0; LecHostGB = $null; EscHostGB = $null; EscNandGB = $null; Smart = $null; Disco = $pd }
+    $o = [ordered]@{ Numero = $num; Modelo = ''; Serie = ''; Firmware = ''; Tipo = 'Desconocido'; Interfaz = ''; Rpm = 0; Horas = $null; Encendidos = $null; Modo = ''; Estandar = ''; Temp = $null; Capacidad = 0; LecHostGB = $null; EscHostGB = $null; EscNandGB = $null; Smart = $null; Disco = $pd }
     $o.Modelo = if ($pd -and $pd.FriendlyName) { "$($pd.FriendlyName)".Trim() } elseif ($wd) { "$($wd.Model)".Trim() } else { '' }
     $serie = ''
     if ($pd -and $pd.SerialNumber) { $serie = "$($pd.SerialNumber)".Trim(" ", "_", ".") }
@@ -7659,7 +7757,7 @@ function Global:Obtener-InfoDisco {
     if ($wd -and $wd.FirmwareRevision) { $o.Firmware = "$($wd.FirmwareRevision)".Trim() }
     $o.Capacidad = if ($pd -and $pd.Size) { [double]$pd.Size } elseif ($wd) { [double]$wd.Size } else { 0 }
     $bus = if ($pd) { "$($pd.BusType)" } elseif ($wd) { "$($wd.InterfaceType)" } else { '' }
-    $o.Interfaz = $bus
+    $o.Interfaz = switch -Regex ($bus) { '^SATA$' { 'Serial ATA' } '^NVMe$' { 'NVM Express (PCIe)' } '^USB$' { 'USB' } '^SAS$' { 'SAS' } '^ATA$' { 'ATA (IDE)' } '^SCSI$' { 'SCSI' } default { $bus } }
     $media = if ($pd) { "$($pd.MediaType)" } else { '' }
     $rpm = 0; if ($pd) { $rpm = [int](Numero-Seguro $pd.SpindleSpeed); if ($rpm -le 0 -or $rpm -ge 100000) { $rpm = 0 } }
     $o.Rpm = $rpm
@@ -7667,6 +7765,18 @@ function Global:Obtener-InfoDisco {
     elseif ($media -eq 'SSD') { $o.Tipo = 'SSD' }
     elseif ($media -eq 'HDD' -or $rpm -gt 0) { $o.Tipo = 'HDD' }
     elseif ($o.Modelo -match '(?i)\bSSD\b|NVMe|M\.2') { $o.Tipo = 'SSD' }
+    # IDENTIFY DEVICE del propio disco: rpm real, modo de transferencia y estandar ATA (necesita administrador)
+    if ($bus -ne 'NVMe') {
+        $idt = Obtener-IdentifyAta -Numero $num
+        if ($idt) {
+            if ($idt.Rotativo -eq $true) { $o.Tipo = 'HDD'; if ($idt.Rpm -gt 0) { $o.Rpm = [int]$idt.Rpm } }
+            elseif ($idt.Rotativo -eq $false -and $o.Tipo -eq 'Desconocido') { $o.Tipo = 'SSD' }
+            if ($idt.Modo) { $o.Modo = $idt.Modo }
+            if ($idt.Estandar) { $o.Estandar = $idt.Estandar }
+            if ($o.Serie -eq 'No informado' -and $idt.Serie) { $o.Serie = $idt.Serie }
+            if (-not $o.Firmware -and $idt.Firmware) { $o.Firmware = $idt.Firmware }
+        }
+    }
     # contadores de Windows
     if ($pd) {
         try {
@@ -7683,6 +7793,7 @@ function Global:Obtener-InfoDisco {
         $o.Smart = $sm
         $at = @($sm.Attrs)
         $g = { param($id) $at | Where-Object { $_.Id -eq $id } | Select-Object -First 1 }
+        $a12 = & $g 12; if ($a12 -and $a12.Raw -gt 0) { $o.Encendidos = [int64]([int64]$a12.Raw -band [int64]4294967295) }
         if ($null -eq $o.Horas) { $a9 = & $g 9; if ($a9 -and $a9.Raw -gt 0) { $o.Horas = [int64]($a9.Raw -band 0xFFFFFF) } }
         if ($null -eq $o.Temp) { $c2 = & $g 194; if ($c2) { $t = [int]($c2.Raw -band 0xFF); if ($t -gt 0 -and $t -lt 120) { $o.Temp = $t } } }
         if ($o.Tipo -like 'SSD*') {
@@ -7707,13 +7818,18 @@ function Global:Texto-InfoDisco {
     param($i)
     if (-not $i) { return "No se pudo identificar el disco fisico de esta unidad (puede ser una unidad virtual o de red)." }
     $l = New-Object System.Collections.Generic.List[string]
-    $l.Add("$($i.Modelo)  |  $($i.Tipo)  |  $(Format-TamanoDisco $i.Capacidad)  |  Interfaz: $($i.Interfaz)")
+    $l.Add("$($i.Modelo)  |  $($i.Tipo)  |  $(Format-TamanoDisco $i.Capacidad)")
     $fw = if ($i.Firmware) { "  |  Firmware: $($i.Firmware)" } else { '' }
     $l.Add("N° de serie: $($i.Serie)$fw")
-    $h = if ($null -ne $i.Horas) { "{0:N0} h (~{1:N0} dias encendido)" -f $i.Horas, ($i.Horas / 24) } else { 'no informado' }
-    $v = if ($i.Tipo -eq 'HDD') { if ($i.Rpm -gt 0) { "$($i.Rpm) RPM" } else { 'no informada' } } elseif ($i.Tipo -like 'SSD*') { 'SSD (sin partes moviles)' } else { 'no informada' }
+    $modo = if ($i.Modo) { $i.Modo } elseif ($i.Interfaz -eq 'NVM Express (PCIe)') { 'enlace PCIe (no informado por Windows)' } else { 'no informado' }
+    $std = if ($i.Estandar) { "  |  Estandar: $($i.Estandar)" } else { '' }
+    $l.Add("Interfaz: $($i.Interfaz)  |  Modo de transferencia: $modo$std")
+    $h = if ($null -ne $i.Horas) { "{0:N0} h (~{1:N0} dias)" -f $i.Horas, ($i.Horas / 24) } else { 'no informado' }
+    $enc = if ($null -ne $i.Encendidos) { "{0:N0} veces" -f $i.Encendidos } else { 'no informado' }
+    $l.Add("Horas de uso: $h  |  Veces encendido: $enc")
+    $v = if ($i.Tipo -eq 'HDD') { if ($i.Rpm -gt 0) { "$($i.Rpm) RPM" } else { 'no informada por el disco' } } elseif ($i.Tipo -like 'SSD*') { 'no aplica (SSD, sin partes moviles)' } else { 'no informada' }
     $t = if ($null -ne $i.Temp) { "  |  Temperatura: $($i.Temp) °C" } else { '' }
-    $l.Add("Horas de uso: $h  |  Velocidad: $v$t")
+    $l.Add("Velocidad de rotacion: $v$t")
     if ($i.Tipo -like 'SSD*') {
         $f = { param($x) if ($null -ne $x) { "{0:N0} GB" -f $x } else { 'no disponible' } }
         $l.Add("Lecturas del host: $(& $f $i.LecHostGB)  |  Escrituras del host: $(& $f $i.EscHostGB)  |  Escrituras a NAND: $(& $f $i.EscNandGB)")
@@ -7787,6 +7903,9 @@ function Global:Escribir-EstadoHDD {
     $nombre = "$($Disco.FriendlyName)".Trim()
     $rpm = [int](Numero-Seguro $Disco.SpindleSpeed)
     $esHdd = ("$($Disco.MediaType)" -eq 'HDD') -or ($rpm -gt 0 -and $rpm -lt 100000)
+    if (-not $esHdd -and "$($Disco.MediaType)" -ne 'SSD' -and "$($Disco.BusType)" -ne 'NVMe') {
+        try { $idt = Obtener-IdentifyAta -Numero ([int]$Disco.DeviceId); if ($idt -and $idt.Rotativo -eq $true) { $esHdd = $true } } catch { }
+    }
     if (-not $esHdd) { return }
     if (-not $Global:VidaSsdImpresa) { $Global:VidaSsdImpresa = @{} }
     $clave = "HDD:$nombre"
