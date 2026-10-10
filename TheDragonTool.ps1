@@ -369,14 +369,14 @@ $Global:RecursosGridXaml = @'
 function Global:Obtener-PincelNeon {
     param($Elemento, [string]$Clave = "NeonBrush")
     $p = $Elemento.FindResource($Clave)
-    # Se comprueba que el pincel y su transformacion sean modificables; si no lo son (o no se puede
-    # saber), se construye un pincel nuevo identico, 100% animable, y se instala en lugar del original.
-    $ok = $false
-    try {
-        $t = $p.RelativeTransform
-        $ok = (-not $p.IsFrozen) -and ($t -is [System.Windows.Media.TranslateTransform]) -and (-not $t.IsFrozen) -and (-not $t.IsSealed)
-    } catch { $ok = $false }
-    if (-not $ok -and $p -is [System.Windows.Media.LinearGradientBrush]) {
+    # Si ya se creo el pincel animable de este elemento, se reutiliza (para poder detener la misma animacion).
+    if (-not $Global:NeonPorElemento) { $Global:NeonPorElemento = @{} }
+    $claveReg = $Clave + "|" + [string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Elemento)
+    $previo = $Global:NeonPorElemento[$claveReg]
+    if ($previo -and ([object]::ReferenceEquals($previo, $p.PSObject.BaseObject))) { return $previo }
+    # Siempre se construye un pincel NUEVO (y su transformacion propia, guardada aparte) para tener la
+    # certeza de que nada esta sellado/inmovilizado; la animacion se aplica a ESA transformacion directamente.
+    if ($p -is [System.Windows.Media.LinearGradientBrush]) {
         $n = New-Object System.Windows.Media.LinearGradientBrush
         $n.MappingMode = $p.MappingMode
         $n.StartPoint = $p.StartPoint
@@ -385,9 +385,13 @@ function Global:Obtener-PincelNeon {
         foreach ($gs in @($p.GradientStops)) {
             [void]$n.GradientStops.Add((New-Object System.Windows.Media.GradientStop($gs.Color, $gs.Offset)))
         }
-        $n.RelativeTransform = New-Object System.Windows.Media.TranslateTransform(0, 0)
+        $tr = New-Object System.Windows.Media.TranslateTransform(0, 0)
+        $n.RelativeTransform = $tr
+        if (-not $Global:NeonTransformes) { $Global:NeonTransformes = @{} }
+        $Global:NeonTransformes[[string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($n)] = $tr
         $Elemento.Resources[$Clave] = $n.PSObject.BaseObject
-        $p = $n
+        $Global:NeonPorElemento[$claveReg] = $n.PSObject.BaseObject
+        return $n
     }
     return $p
 }
@@ -396,7 +400,11 @@ function Global:Animar-PincelNeon {
     param($Pincel, [switch]$Detener)
     if (-not $Pincel) { return $false }
     try {
-        $mov = $Pincel.RelativeTransform
+        $mov = $null
+        if ($Global:NeonTransformes) {
+            $mov = $Global:NeonTransformes[[string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Pincel.PSObject.BaseObject)]
+        }
+        if (-not $mov) { $mov = $Pincel.RelativeTransform }
         if ($Detener) {
             $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null)
             $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null)
