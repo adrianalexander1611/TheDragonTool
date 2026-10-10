@@ -6277,6 +6277,13 @@ function Accion-ProbarEstadoWindows {
 #  ALMACENAMIENTO AVANZADO (disco duro / SSD): detalle fisico, particiones,
 #  atributos S.M.A.R.T., sectores danados, latencia, actividad y eventos
 # ---------------------------------------------------------------------------
+# Convierte a numero entero sin fallar con valores como "Unknown" o vacios (devuelve 0)
+function Global:Numero-Seguro {
+    param($Valor)
+    try { if ($null -eq $Valor) { return [int64]0 }; $r = [int64]0; if ([int64]::TryParse("$Valor", [ref]$r)) { return $r } } catch { }
+    return [int64]0
+}
+
 function Global:Format-TamanoDisco {
     param([double]$Bytes)
     if ($Bytes -ge 1TB) { return ("{0:N2} TB" -f ($Bytes / 1TB)) }
@@ -6353,14 +6360,14 @@ function Global:Escribir-ContadoresDisco {
     $p3 = @()
     if ($null -ne $rc.StartStopCycleCount) { $p3 += "Ciclos de arranque/parada: $($rc.StartStopCycleCount)" }
     if ($null -ne $rc.LoadUnloadCycleCount) { $p3 += "Ciclos de carga de cabezales: $($rc.LoadUnloadCycleCount)" }
-    if ($null -ne $rc.ReadLatencyMax -and [int64]$rc.ReadLatencyMax -gt 0) { $p3 += "Latencia max. lectura: $($rc.ReadLatencyMax) ms" }
-    if ($null -ne $rc.WriteLatencyMax -and [int64]$rc.WriteLatencyMax -gt 0) { $p3 += "Latencia max. escritura: $($rc.WriteLatencyMax) ms" }
+    if ($null -ne $rc.ReadLatencyMax -and (Numero-Seguro $rc.ReadLatencyMax) -gt 0) { $p3 += "Latencia max. lectura: $($rc.ReadLatencyMax) ms" }
+    if ($null -ne $rc.WriteLatencyMax -and (Numero-Seguro $rc.WriteLatencyMax) -gt 0) { $p3 += "Latencia max. escritura: $($rc.WriteLatencyMax) ms" }
     if ($p3.Count) { Write-DiagLog "     $($p3 -join ' | ')" }
     if ($null -ne $rc.Temperature -and [int]$rc.Temperature -gt 60) { Diag-Aviso "Temperatura alta del disco ($($rc.Temperature) °C). Mejora la ventilacion." }
     if ($null -ne $rc.Wear -and [int]$rc.Wear -gt 85) { Diag-Aviso "El SSD tiene mas del 85% de desgaste. Planea reemplazarlo." }
     $sinCorregir = 0
-    if ($null -ne $rc.ReadErrorsUncorrected) { $sinCorregir += [int64]$rc.ReadErrorsUncorrected }
-    if ($null -ne $rc.WriteErrorsUncorrected) { $sinCorregir += [int64]$rc.WriteErrorsUncorrected }
+    if ($null -ne $rc.ReadErrorsUncorrected) { $sinCorregir += (Numero-Seguro $rc.ReadErrorsUncorrected) }
+    if ($null -ne $rc.WriteErrorsUncorrected) { $sinCorregir += (Numero-Seguro $rc.WriteErrorsUncorrected) }
     if ($sinCorregir -gt 0) { Diag-Aviso "El disco acumula $sinCorregir error(es) de lectura/escritura sin corregir (posibles sectores danados)." }
     return $true
 }
@@ -6385,11 +6392,11 @@ function Accion-DiscoDetalleFisico {
         if ($w.FirmwareRevision) { $linea += "Firmware: $($w.FirmwareRevision)" }
         if ($d) { $linea += "Estilo de particion: $($d.PartitionStyle)"; $linea += "Particiones: $($d.NumberOfPartitions)" }
         if ($linea.Count) { Write-DiagLog "     $($linea -join ' | ')" }
-        $ls = [int]$w.BytesPerSector
+        $ls = [int](Numero-Seguro $w.BytesPerSector)
         $ps = 0
         if ($p) {
-            if ($p.LogicalSectorSize) { $ls = [int]$p.LogicalSectorSize }
-            if ($p.PhysicalSectorSize) { $ps = [int]$p.PhysicalSectorSize }
+            if ((Numero-Seguro $p.LogicalSectorSize) -gt 0) { $ls = [int](Numero-Seguro $p.LogicalSectorSize) }
+            if ((Numero-Seguro $p.PhysicalSectorSize) -gt 0) { $ps = [int](Numero-Seguro $p.PhysicalSectorSize) }
         }
         $fmt = ''
         if ($ls -eq 512 -and $ps -eq 4096) { $fmt = ' (formato 512e / Advanced Format)' }
@@ -6397,12 +6404,12 @@ function Accion-DiscoDetalleFisico {
         $sec = "Sector logico: $ls bytes"
         if ($ps -gt 0) { $sec += " | Sector fisico: $ps bytes" }
         Write-DiagLog "     $sec$fmt"
-        if ($w.TotalSectors) {
+        if ((Numero-Seguro $w.TotalSectors) -gt 0) {
             $g = ''
             if ($w.TotalCylinders) { $g = " | Geometria: $($w.TotalCylinders) cilindros x $($w.TotalHeads) cabezas x $($w.SectorsPerTrack) sectores/pista" }
-            Write-DiagLog "     Sectores totales: $('{0:N0}' -f [int64]$w.TotalSectors)$g"
+            Write-DiagLog "     Sectores totales: $('{0:N0}' -f (Numero-Seguro $w.TotalSectors))$g"
         }
-        if ($p -and $p.SpindleSpeed -and [int64]$p.SpindleSpeed -gt 0 -and [int64]$p.SpindleSpeed -lt 100000) { Write-DiagLog "     Velocidad de giro: $($p.SpindleSpeed) RPM (disco mecanico)" }
+        if ($p -and (Numero-Seguro $p.SpindleSpeed) -gt 0 -and (Numero-Seguro $p.SpindleSpeed) -lt 100000) { Write-DiagLog "     Velocidad de giro: $($p.SpindleSpeed) RPM (disco mecanico)" }
         if ($d) {
             if ($d.IsOffline) { Diag-Aviso "El disco $num esta sin conexion (offline) en Administracion de discos." }
             if ($d.IsReadOnly) { Diag-Aviso "El disco $num esta en modo solo lectura." }
@@ -6432,7 +6439,7 @@ function Accion-DiscoParticiones {
         if ($pt.DriveLetter) { $letra = "$($pt.DriveLetter):" }
         $tipo = "$($pt.Type)"
         Write-DiagLog " - Disco $($pt.DiskNumber) / Particion $($pt.PartitionNumber) $letra | $tipo | $(Format-TamanoDisco $pt.Size)"
-        $off = [int64]$pt.Offset
+        $off = Numero-Seguro $pt.Offset
         $alin = 'sin alinear a 4 KB'
         if (($off % 1048576) -eq 0) { $alin = 'alineada a 1 MB (optima)' }
         elseif (($off % 4096) -eq 0) { $alin = 'alineada a 4 KB (correcta)' }
@@ -7056,53 +7063,63 @@ function Show-EscaneoSuperficieDisco {
     }
 }
 
+# Ejecuta un paso del diagnostico completo sin que un fallo en uno detenga todos los demas
+function Global:Diag-Paso {
+    param([string]$Nombre, [scriptblock]$Bloque)
+    try { & $Bloque } catch {
+        Write-DiagLog "   ⚠ ATENCION: no se pudo completar el paso '$Nombre': $($_.Exception.Message)"
+        $Script:DiagAdvertencias++
+        if ($Global:DiagStats) { $Global:DiagStats.Aviso++ }
+    }
+}
+
 function Accion-DiagnosticoCompletoEquipo {
     $Script:DiagAdvertencias = 0
     Write-DiagLog "========================================"
     Write-DiagLog "   DIAGNOSTICO COMPLETO DEL EQUIPO"
     Write-DiagLog "========================================"
     Diag-Progreso -Pct 0 -Texto 'Paso 1 de 21: Informacion del hardware'
-    Accion-InfoHardwareCompleta
+    Diag-Paso -Nombre 'Accion-InfoHardwareCompleta' -Bloque { Accion-InfoHardwareCompleta }
     Diag-Progreso -Pct 5 -Texto 'Paso 2 de 21: Tarjeta grafica'
-    Accion-ProbarGraficaDiag
+    Diag-Paso -Nombre 'Accion-ProbarGraficaDiag' -Bloque { Accion-ProbarGraficaDiag }
     Diag-Progreso -Pct 10 -Texto 'Paso 3 de 21: Detalles de pantalla'
-    Accion-VerDetallesPantalla
+    Diag-Paso -Nombre 'Accion-VerDetallesPantalla' -Bloque { Accion-VerDetallesPantalla }
     Diag-Progreso -Pct 14 -Texto 'Paso 4 de 21: Salud del almacenamiento'
-    Accion-ProbarAlmacenamiento
+    Diag-Paso -Nombre 'Accion-ProbarAlmacenamiento' -Bloque { Accion-ProbarAlmacenamiento }
     Diag-Progreso -Pct 19 -Texto 'Paso 5 de 21: Detalle fisico del disco'
-    Accion-DiscoDetalleFisico
+    Diag-Paso -Nombre 'Accion-DiscoDetalleFisico' -Bloque { Accion-DiscoDetalleFisico }
     Diag-Progreso -Pct 24 -Texto 'Paso 6 de 21: Particiones'
-    Accion-DiscoParticiones
+    Diag-Paso -Nombre 'Accion-DiscoParticiones' -Bloque { Accion-DiscoParticiones }
     Diag-Progreso -Pct 29 -Texto 'Paso 7 de 21: Atributos S.M.A.R.T.'
-    Accion-DiscoSmartAtributos
+    Diag-Paso -Nombre 'Accion-DiscoSmartAtributos' -Bloque { Accion-DiscoSmartAtributos }
     Diag-Progreso -Pct 33 -Texto 'Paso 8 de 21: Eventos de disco'
-    Accion-DiscoEventos
+    Diag-Paso -Nombre 'Accion-DiscoEventos' -Bloque { Accion-DiscoEventos }
     Diag-Progreso -Pct 38 -Texto 'Paso 9 de 21: Velocidad de disco'
-    Accion-ProbarVelocidadDisco
+    Diag-Paso -Nombre 'Accion-ProbarVelocidadDisco' -Bloque { Accion-ProbarVelocidadDisco }
     Diag-Progreso -Pct 43 -Texto 'Paso 10 de 21: Ventiladores'
-    Accion-ProbarVentiladores
+    Diag-Paso -Nombre 'Accion-ProbarVentiladores' -Bloque { Accion-ProbarVentiladores }
     Diag-Progreso -Pct 48 -Texto 'Paso 11 de 21: Temperatura'
-    Accion-ProbarTemperaturaCPU
+    Diag-Paso -Nombre 'Accion-ProbarTemperaturaCPU' -Bloque { Accion-ProbarTemperaturaCPU }
     Diag-Progreso -Pct 52 -Texto 'Paso 12 de 21: Bateria'
-    Accion-ProbarBateria
+    Diag-Paso -Nombre 'Accion-ProbarBateria' -Bloque { Accion-ProbarBateria }
     Diag-Progreso -Pct 57 -Texto 'Paso 13 de 21: Dispositivos de audio'
-    Accion-ProbarDispositivosAudio
+    Diag-Paso -Nombre 'Accion-ProbarDispositivosAudio' -Bloque { Accion-ProbarDispositivosAudio }
     Diag-Progreso -Pct 62 -Texto 'Paso 14 de 21: Bluetooth'
-    Accion-ProbarBluetooth
+    Diag-Paso -Nombre 'Accion-ProbarBluetooth' -Bloque { Accion-ProbarBluetooth }
     Diag-Progreso -Pct 67 -Texto 'Paso 15 de 21: Puertos USB'
-    Accion-ProbarPuertosUSB
+    Diag-Paso -Nombre 'Accion-ProbarPuertosUSB' -Bloque { Accion-ProbarPuertosUSB }
     Diag-Progreso -Pct 71 -Texto 'Paso 16 de 21: Red'
-    Accion-ProbarRed
+    Diag-Paso -Nombre 'Accion-ProbarRed' -Bloque { Accion-ProbarRed }
     Diag-Progreso -Pct 76 -Texto 'Paso 17 de 21: Wi-Fi'
-    Accion-ProbarWifi
+    Diag-Paso -Nombre 'Accion-ProbarWifi' -Bloque { Accion-ProbarWifi }
     Diag-Progreso -Pct 81 -Texto 'Paso 18 de 21: Tiempo de arranque'
-    Accion-ProbarTiempoArranque
+    Diag-Paso -Nombre 'Accion-ProbarTiempoArranque' -Bloque { Accion-ProbarTiempoArranque }
     Diag-Progreso -Pct 86 -Texto 'Paso 19 de 21: Dispositivos con problemas'
-    Accion-ProbarDispositivosProblemas
+    Diag-Paso -Nombre 'Accion-ProbarDispositivosProblemas' -Bloque { Accion-ProbarDispositivosProblemas }
     Diag-Progreso -Pct 90 -Texto 'Paso 20 de 21: Estado de Windows'
-    Accion-ProbarEstadoWindows
+    Diag-Paso -Nombre 'Accion-ProbarEstadoWindows' -Bloque { Accion-ProbarEstadoWindows }
     Diag-Progreso -Pct 95 -Texto 'Paso 21 de 21: Eventos criticos'
-    Accion-ProbarEventosCriticos
+    Diag-Paso -Nombre 'Accion-ProbarEventosCriticos' -Bloque { Accion-ProbarEventosCriticos }
     Write-DiagLog "========================================"
     if ($Script:DiagAdvertencias -eq 0) { Write-DiagLog "   RESULTADO: todo en orden, sin advertencias." }
     else { Write-DiagLog "   RESULTADO: $($Script:DiagAdvertencias) advertencia(s) para revisar (lineas con ⚠ ATENCION)." }
@@ -15075,8 +15092,11 @@ function Global:Registrar-LineaInforme {
     if (-not $Global:DiagInforme) {
         $Global:DiagInforme = @{ Secciones = (New-Object System.Collections.Generic.List[object]); Pruebas = (New-Object System.Collections.Generic.List[object]) }
     }
-    if ($Mensaje -match '^\s*=+\s*(.+?)\s*=+\s*$') {
-        $Global:DiagInforme.Secciones.Add([PSCustomObject]@{ Titulo = $Matches[1]; Hora = (Get-Date); Lineas = (New-Object System.Collections.Generic.List[string]) })
+    if ($Mensaje -match '^\s*=+\s*$') { return }
+    $tituloSec = $null
+    if ($Mensaje -match '^\s*=+\s*(\S.*?\S|\S)\s*=+\s*$') { $tituloSec = $Matches[1]; if ($tituloSec -notmatch '[\p{L}\p{N}]') { $tituloSec = $null } }
+    if ($tituloSec) {
+        $Global:DiagInforme.Secciones.Add([PSCustomObject]@{ Titulo = $tituloSec; Hora = (Get-Date); Lineas = (New-Object System.Collections.Generic.List[string]) })
         return
     }
     if ($Global:DiagInforme.Secciones.Count -eq 0) {
@@ -15092,7 +15112,7 @@ function Global:Pedir-DatosCliente {
     [xml]$xamlCli = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Datos del cliente" Height="500" Width="470"
+        Title="Datos del cliente" Height="520" Width="480"
         WindowStartupLocation="CenterScreen" Background="#10141D">
   <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
   <StackPanel Margin="16">
@@ -15100,9 +15120,9 @@ function Global:Pedir-DatosCliente {
     <TextBlock Text="📄 Informe de diagnóstico" Foreground="White" FontWeight="Bold" FontSize="16" Margin="0,0,0,4"/>
     <TextBlock Text="Estos datos se incluirán en el informe PDF." Foreground="#8FA3C7" Margin="0,0,0,12" TextWrapping="Wrap"/>
     <TextBlock Text="Nombre del usuario / cliente:" Foreground="White"/>
-    <TextBox x:Name="TxtCliente" Margin="0,2,0,10" Height="40" FontSize="14" VerticalContentAlignment="Center"/>
+    <TextBox x:Name="TxtCliente" Margin="0,3,0,12" Height="46" FontSize="15" Padding="10,8,10,8"/>
     <TextBlock Text="Fecha de ingreso o visita al taller (dd/mm/aaaa):" Foreground="White"/>
-    <TextBox x:Name="TxtFechaIngreso" Margin="0,2,0,10" Height="40" FontSize="14" VerticalContentAlignment="Center"/>
+    <TextBox x:Name="TxtFechaIngreso" Margin="0,3,0,12" Height="46" FontSize="15" Padding="10,8,10,8"/>
     <TextBlock Text="Problema reportado / observaciones (opcional):" Foreground="White"/>
     <TextBox x:Name="TxtObs" Margin="0,2,0,6" Height="80" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
     <TextBlock x:Name="TxtErrorCli" Foreground="#FF6B6B" FontWeight="Bold" Margin="0,0,0,8" TextWrapping="Wrap"/>
