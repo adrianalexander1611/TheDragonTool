@@ -7108,19 +7108,20 @@ function Global:Obtener-IdentidadEquipo {
     return $r
 }
 
-# Porcentaje de vida util restante de un SSD (contadores de Windows o atributos S.M.A.R.T.)
+# Porcentaje de vida util restante de un SSD. Prioridad: atributos S.M.A.R.T. de vida (como CrystalDiskInfo);
+# el contador "Wear" de Windows solo se usa si es mayor que 0 o si no hay otra fuente (muchos SSD SATA devuelven 0 aunque no sea cierto).
 function Global:Obtener-VidaSSD {
     param($Disco)
+    $nombreDisco = "$($Disco.FriendlyName)".Trim()
+    $esWdSandisk = $nombreDisco -match '(?i)\bWDC?\b|WD |SanDisk|WDS\d'
+    $orden = if ($esWdSandisk) { @(230, 231, 233, 177, 202) } else { @(231, 233, 177, 202, 169, 230) }
+    $leidos = New-Object System.Collections.Generic.List[string]
+    $porSmart = $null
     try {
-        $rc = $Disco | Get-StorageReliabilityCounter -ErrorAction Stop
-        if ($rc -and $null -ne $rc.Wear -and "$($rc.Wear)" -match '^\d+$') {
-            $w = [int]$rc.Wear
-            if ($w -ge 0 -and $w -le 100) { return [PSCustomObject]@{ Pct = (100 - $w); Fuente = 'contadores de confiabilidad de Windows' } }
-        }
-    } catch { }
-    try {
-        $token = ("$($Disco.FriendlyName)".Trim() -split '\s+' | Select-Object -Last 1) -replace '[^A-Za-z0-9]', ''
+        $partes = @($nombreDisco -split '\s+')
+        $token = ($partes | Select-Object -Last 1) -replace '[^A-Za-z0-9]', ''
         $token = $token.ToUpper()
+        if ($token.Length -gt 12) { $token = $token.Substring(0, 12) }
         $datos = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_ATAPISmartData -ErrorAction Stop)
         $umbr = @()
         try { $umbr = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictThresholds -ErrorAction Stop) } catch { }
@@ -7130,12 +7131,23 @@ function Global:Obtener-VidaSSD {
             $u = $umbr | Where-Object { $_.InstanceName -eq $d.InstanceName } | Select-Object -First 1
             $ub = $null; if ($u) { $ub = $u.VendorSpecific }
             $attrs = @(Convertir-AtributosSmart -Datos $d.VendorSpecific -Umbrales $ub)
-            foreach ($id in @(231, 233, 177, 202, 169)) {
-                $a = $attrs | Where-Object { $_.Id -eq $id } | Select-Object -First 1
-                if ($a -and $a.Valor -gt 0 -and $a.Valor -le 100) {
-                    return [PSCustomObject]@{ Pct = [int]$a.Valor; Fuente = "atributo S.M.A.R.T. $id ($($Global:SmartNombres[$id]))" }
+            foreach ($id in $orden) {
+                $at = $attrs | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+                if ($at) { [void]$leidos.Add(("{0:X2}={1}" -f $id, $at.Valor)) }
+                if (-not $porSmart -and $at -and $at.Valor -gt 0 -and $at.Valor -le 100) {
+                    $porSmart = [PSCustomObject]@{ Pct = [int]$at.Valor; Fuente = ("atributo S.M.A.R.T. {0:X2}h ({1})" -f $id, $Global:SmartNombres[$id]); Leidos = '' }
                 }
             }
+            if ($porSmart) { break }
+        }
+    } catch { }
+    if ($porSmart) { $porSmart.Leidos = ($leidos -join ', '); return $porSmart }
+    try {
+        $rc = $Disco | Get-StorageReliabilityCounter -ErrorAction Stop
+        if ($rc -and $null -ne $rc.Wear -and "$($rc.Wear)" -match '^\d+$') {
+            $w = [int]$rc.Wear
+            if ($w -gt 0 -and $w -le 100) { return [PSCustomObject]@{ Pct = (100 - $w); Fuente = 'contadores de confiabilidad de Windows'; Leidos = '' } }
+            if ($w -eq 0) { return [PSCustomObject]@{ Pct = 100; Fuente = 'contador de Windows = 0 % de desgaste (NO CONFIRMADO: este SSD no entrega un indicador de vida por S.M.A.R.T.; contrastalo con CrystalDiskInfo o la herramienta del fabricante)'; Leidos = ($leidos -join ', '); Dudoso = $true } }
         }
     } catch { }
     return $null
@@ -7155,15 +7167,18 @@ function Global:Escribir-VidaSSD {
         Write-DiagLog "     💽 Vida util del SSD: no disponible (el SSD o su controlador no entrega el dato; usa la herramienta del fabricante)."
         return
     }
-    $pct = [int]$v.Pct; $uso = 100 - $pct
+    $pct = [int]$v.Pct; $uso = 100 - $pct; $dudoso = $false
     $llenos = [int][math]::Round($pct / 10)
     $barra = ('█' * $llenos) + ('░' * (10 - $llenos))
-    Write-DiagLog "     💽 VIDA UTIL DEL SSD: $pct % restante  [$barra]  (desgaste $uso %) - fuente: $($v.Fuente)"
-    if ($pct -lt 10) { Diag-Aviso "Vida util del SSD critica ($pct %). Haz copia de seguridad y reemplazalo cuanto antes." }
+    if ($v.Dudoso) { Write-DiagLog "     💽 VIDA UTIL DEL SSD: NO CONFIRMADA - $($v.Fuente)" }
+    else { Write-DiagLog "     💽 VIDA UTIL DEL SSD: $pct % restante  [$barra]  (desgaste $uso %) - fuente: $($v.Fuente)" }
+    if ($v.Leidos) { Write-DiagLog "     Indicadores S.M.A.R.T. de vida leidos (valor normalizado): $($v.Leidos)" }
+    if ($v.Dudoso) { Diag-Aviso "No se pudo confirmar la vida util real del SSD (Windows informa 0 % de desgaste, pero este modelo suele reportarlo mal). Compara con CrystalDiskInfo."; $dudoso = $true }
+    elseif ($pct -lt 10) { Diag-Aviso "Vida util del SSD critica ($pct %). Haz copia de seguridad y reemplazalo cuanto antes." }
     elseif ($pct -lt 30) { Diag-Aviso "Vida util del SSD baja ($pct %). Planea reemplazarlo pronto y mantén copias de seguridad." }
     elseif ($pct -ge 70) { Diag-Ok "Vida util del SSD en buen estado ($pct % restante)." }
     else { Write-DiagLog "     Desgaste moderado ($uso %): el SSD aun tiene vida util, pero conviene vigilarlo." }
-    try { if ($Global:DiagInforme -and $Global:DiagInforme.Ssd) { $Global:DiagInforme.Ssd[$nombre] = @{ Pct = $pct; Fuente = $v.Fuente; Tam = [math]::Round($Disco.Size / 1GB, 0) } } } catch { }
+    try { if ($Global:DiagInforme -and $Global:DiagInforme.Ssd) { $Global:DiagInforme.Ssd[$nombre] = @{ Pct = $pct; Fuente = $v.Fuente; Dudoso = $dudoso; Tam = [math]::Round($Disco.Size / 1GB, 0) } } } catch { }
 }
 
 function Accion-DiscoVidaSSD {
@@ -15856,17 +15871,43 @@ function Global:Pedir-DatosCliente {
     [xml]$xamlCli = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Datos del cliente" Height="520" Width="480"
+        Title="Datos del cliente" Height="560" Width="480"
         WindowStartupLocation="CenterScreen" Background="#10141D">
-  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <Window.Resources>$($Global:RecursosNeonXaml)
+    <Style x:Key="CampoCliente" TargetType="TextBox">
+      <Setter Property="Background" Value="#99151B27"/>
+      <Setter Property="Foreground" Value="#EAF0FA"/>
+      <Setter Property="BorderBrush" Value="#44509BFF"/>
+      <Setter Property="BorderThickness" Value="1.5"/>
+      <Setter Property="CaretBrush" Value="#5B9CFF"/>
+      <Setter Property="SelectionBrush" Value="#552F7CF6"/>
+      <Setter Property="FontSize" Value="16"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TextBox">
+            <Border x:Name="Bd" CornerRadius="10" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" SnapsToDevicePixels="True">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="12,0,12,0" VerticalAlignment="Center" Focusable="False"
+                            VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Disabled"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource NeonBrush}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
   <StackPanel Margin="16">
     <Button x:Name="BtnVolverVentana" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
     <TextBlock Text="📄 Informe de diagnóstico" Foreground="White" FontWeight="Bold" FontSize="16" Margin="0,0,0,4"/>
     <TextBlock Text="Estos datos se incluirán en el informe PDF." Foreground="#8FA3C7" Margin="0,0,0,12" TextWrapping="Wrap"/>
     <TextBlock Text="Nombre del usuario / cliente:" Foreground="White"/>
-    <TextBox x:Name="TxtCliente" Margin="0,3,0,12" Height="46" FontSize="15" Padding="10,8,10,8"/>
+    <TextBox x:Name="TxtCliente" Style="{StaticResource CampoCliente}" Margin="0,3,0,12" Height="54"/>
     <TextBlock Text="Fecha de ingreso o visita al taller (dd/mm/aaaa):" Foreground="White"/>
-    <TextBox x:Name="TxtFechaIngreso" Margin="0,3,0,12" Height="46" FontSize="15" Padding="10,8,10,8"/>
+    <TextBox x:Name="TxtFechaIngreso" Style="{StaticResource CampoCliente}" Margin="0,3,0,12" Height="54"/>
     <TextBlock Text="Problema reportado / observaciones (opcional):" Foreground="White"/>
     <TextBox x:Name="TxtObs" Margin="0,2,0,6" Height="80" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
     <TextBlock x:Name="TxtErrorCli" Foreground="#FF6B6B" FontWeight="Bold" Margin="0,0,0,8" TextWrapping="Wrap"/>
@@ -15995,6 +16036,10 @@ table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
             [void]$h.Append("<h2>2. Vida útil del SSD</h2>")
             foreach ($kv in @($inf.Ssd.GetEnumerator() | Sort-Object Name)) {
                 $p = [int]$kv.Value.Pct
+                if ($kv.Value.Dudoso) {
+                    [void]$h.Append("<div class='ssd'><div class='n'>$(& $enc $kv.Key) &nbsp;<span style='color:#7a88a6'>No confirmada</span></div><div class='bar'><div style='width:0%'></div></div><div class='f'>El SSD no entrega un indicador de vida confiable por S.M.A.R.T.; verificar con la herramienta del fabricante · Capacidad $($kv.Value.Tam) GB</div></div>")
+                    continue
+                }
                 $col = if ($p -ge 70) { '#1fa75a' } elseif ($p -ge 30) { '#e0a100' } else { '#d62c2c' }
                 $est = if ($p -ge 70) { 'Buen estado' } elseif ($p -ge 30) { 'Desgaste moderado' } elseif ($p -ge 10) { 'Vida baja: planear reemplazo' } else { 'Crítico: reemplazar' }
                 [void]$h.Append("<div class='ssd'><div class='n'>$(& $enc $kv.Key) &nbsp;<span style='color:$col'>$p % restante</span></div><div class='bar'><div style='width:$p%;background:$col'></div></div><div class='f'>$(& $enc $est) · Desgaste $(100 - $p) % · Capacidad $($kv.Value.Tam) GB · Fuente: $(& $enc $kv.Value.Fuente)</div></div>")
