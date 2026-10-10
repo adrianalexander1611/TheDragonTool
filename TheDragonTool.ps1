@@ -7131,12 +7131,25 @@ function Global:Obtener-VidaSSD {
             $u = $umbr | Where-Object { $_.InstanceName -eq $d.InstanceName } | Select-Object -First 1
             $ub = $null; if ($u) { $ub = $u.VendorSpecific }
             $attrs = @(Convertir-AtributosSmart -Datos $d.VendorSpecific -Umbrales $ub)
+            if ($esWdSandisk) {
+                # WD/SanDisk: el atributo E6 (indicador de desgaste del soporte) guarda el % de desgaste en el 2.o byte del dato crudo (asi lo calcula CrystalDiskInfo)
+                $e6 = $attrs | Where-Object { $_.Id -eq 230 } | Select-Object -First 1
+                if ($e6 -and $e6.Raw -gt 0) {
+                    $des = [int](([int64]$e6.Raw -shr 8) -band 0xFF)
+                    [void]$leidos.Add(("E6 crudo=0x{0:X12} -> desgaste {1} %" -f [int64]$e6.Raw, $des))
+                    if ($des -ge 0 -and $des -le 100) {
+                        $porSmart = [PSCustomObject]@{ Pct = (100 - $des); Fuente = 'atributo S.M.A.R.T. E6h (indicador de desgaste del soporte, dato crudo; mismo calculo que CrystalDiskInfo)'; Leidos = '' }
+                    }
+                }
+            }
+            if (-not $porSmart) {
             foreach ($id in $orden) {
                 $at = $attrs | Where-Object { $_.Id -eq $id } | Select-Object -First 1
                 if ($at) { [void]$leidos.Add(("{0:X2}={1}" -f $id, $at.Valor)) }
                 if (-not $porSmart -and $at -and $at.Valor -gt 0 -and $at.Valor -le 100) {
                     $porSmart = [PSCustomObject]@{ Pct = [int]$at.Valor; Fuente = ("atributo S.M.A.R.T. {0:X2}h ({1})" -f $id, $Global:SmartNombres[$id]); Leidos = '' }
                 }
+            }
             }
             if ($porSmart) { break }
         }
