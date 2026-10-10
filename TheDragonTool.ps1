@@ -12691,13 +12691,13 @@ Marcar-Arranque 'funciones y recursos'
 
         <!-- Log inferior -->
         <Border DockPanel.Dock="Bottom" Background="#55101420" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="0,1.5,0,0" Padding="10">
-            <DockPanel x:Name="DockLog" Height="170">
+            <DockPanel x:Name="DockLog" Height="46">
                 <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
-                    <Button x:Name="BtnMinLog" DockPanel.Dock="Right" Content="▾ Minimizar" Width="120" Margin="6,0,0,0" ToolTip="Minimiza o muestra el registro de actividad para tener mas espacio"/>
+                    <Button x:Name="BtnMinLog" DockPanel.Dock="Right" Content="▴ Mostrar" Width="120" Margin="6,0,0,0" ToolTip="Minimiza o muestra el registro de actividad para tener mas espacio"/>
                     <Button x:Name="BtnLimpiarLog" DockPanel.Dock="Right" Content="Limpiar" Width="80" Margin="0"/>
                     <TextBlock Text="Registro de actividad" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" VerticalAlignment="Center"/>
                 </DockPanel>
-                <TextBox x:Name="LogBox" IsReadOnly="True" Background="#AA070A10" Foreground="#66AEFF" BorderBrush="{DynamicResource NeonBrush}"
+                <TextBox x:Name="LogBox" Visibility="Collapsed" IsReadOnly="True" Background="#AA070A10" Foreground="#66AEFF" BorderBrush="{DynamicResource NeonBrush}"
                          FontFamily="Consolas" FontSize="12" TextWrapping="Wrap"
                          VerticalScrollBarVisibility="Auto" AcceptsReturn="True"/>
             </DockPanel>
@@ -14066,7 +14066,7 @@ if ($btnAbrirAdmin) { $btnAbrirAdmin.Add_Click({ Accion-AbrirComoAdministrador }
 # --- Enlace de botones a acciones ---
 $window.FindName("BtnLimpiarLog").Add_Click({ $Script:LogBox.Clear() })
 # Minimizar / mostrar el registro de actividad (da mas espacio a las pestañas)
-$Global:LogMinimizado = $false
+$Global:LogMinimizado = $true   # el registro de actividad arranca minimizado
 $window.FindName("BtnMinLog").Add_Click({
     try {
         $dock = $window.FindName("DockLog"); $caja = $window.FindName("LogBox"); $btn = $window.FindName("BtnMinLog")
@@ -14899,7 +14899,9 @@ function Global:Exportar-InformeErroresPDF {
 @page { size: A4; margin: 14mm 12mm; }
 * { box-sizing: border-box; }
 body { font-family: "Segoe UI", Arial, sans-serif; color: #1c2433; font-size: 11px; margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-.portada { background: linear-gradient(120deg,#0b1226,#17306b 60%,#1f6bff); color: #fff; padding: 22px 26px; border-radius: 12px; }
+.portada { background: linear-gradient(120deg,#0b1226,#17306b 60%,#1f6bff); color: #fff; padding: 22px 26px; border-radius: 12px;  display: flex; align-items: center; justify-content: space-between; }
+.portada .logo { background: #fff; border-radius: 12px; padding: 6px 12px; margin-left: 18px; }
+.portada .logo img { height: 92px; display: block; }
 .portada h1 { margin: 0 0 4px 0; font-size: 26px; letter-spacing: .5px; }
 .portada .sub { color: #bcd3ff; font-size: 12px; }
 .portada .meta { margin-top: 12px; font-size: 11px; color: #dbe7ff; }
@@ -14932,7 +14934,19 @@ table.cats td { padding: 4px 8px; border-bottom: 1px solid #eef2fa; }
 .pie { margin-top: 18px; padding-top: 8px; border-top: 1px solid #dbe3f3; color: #7a88a6; font-size: 10px; text-align: center; }
 '@
         [void]$h.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>Informe de errores - The Dragon Tool</title><style>$css</style></head><body>")
-        [void]$h.Append("<div class='portada'><h1>🐉 THE DRAGON TOOL</h1><div class='sub'>Informe detallado de errores y diagnostico del equipo</div><div class='meta'>Generado el $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss') &nbsp;|&nbsp; Equipo: $(& $enc $env:COMPUTERNAME) &nbsp;|&nbsp; Autor: $(& $enc $Script:Autor) - The Dragon Tech</div></div>")
+        # logo del usuario (logo.png junto al script) incrustado en la portada
+        $logoHtml = ""
+        try {
+            $rutaLogo = Join-Path $Script:ScriptDir "logo.png"
+            if (-not (Test-Path $rutaLogo)) {
+                try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 -Uri "https://raw.githubusercontent.com/adrianalexander1611/TheDragonTool/main/logo.png" -OutFile $rutaLogo -ErrorAction Stop } catch { }
+            }
+            if (Test-Path $rutaLogo) {
+                $b64 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($rutaLogo))
+                $logoHtml = "<div class='logo'><img alt='The Dragon Tech' src='data:image/png;base64,$b64'></div>"
+            }
+        } catch { }
+        [void]$h.Append("<div class='portada'><div><h1>THE DRAGON TOOL</h1><div class='sub'>Informe detallado de errores y diagnostico del equipo</div><div class='meta'>Generado el $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss') &nbsp;|&nbsp; Equipo: $(& $enc $env:COMPUTERNAME) &nbsp;|&nbsp; Autor: $(& $enc $Script:Autor) - The Dragon Tech</div></div>$logoHtml</div>")
         [void]$h.Append("<div class='estado $claseEstado'>Estado general: $(& $enc $estado)</div>")
         [void]$h.Append("<div class='tarjetas'><div class='tarjeta'><div class='n'>$($entradas.Count)</div><div class='t'>Entradas</div></div><div class='tarjeta e'><div class='n'>$nErr</div><div class='t'>Errores</div></div><div class='tarjeta a'><div class='n'>$nAv</div><div class='t'>Avisos</div></div><div class='tarjeta'><div class='n'>$($cats.Count)</div><div class='t'>Categorias</div></div></div>")
         [void]$h.Append("<h2>1. Datos del equipo</h2><table class='info'>")
