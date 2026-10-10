@@ -11805,8 +11805,9 @@ function Buscar-DriverLaptop {
             </TabItem>
 
             <TabItem Header="🐞 Registro de errores">
-                <DockPanel Margin="14">
-                    <Border DockPanel.Dock="Top" Style="{StaticResource TarjetaSeccion}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Margin="14">
+                    <Border Style="{StaticResource TarjetaSeccion}">
                         <StackPanel>
                             <TextBlock Text="🐞 Monitoreo de errores (programa y hardware)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,8"/>
                             <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,10" FontSize="12"
@@ -11863,10 +11864,7 @@ function Buscar-DriverLaptop {
                             <TextBlock x:Name="TxtResumenErrores" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" Margin="0,8,0,0"/>
                         </StackPanel>
                     </Border>
-                    <TextBox x:Name="TxtDetalleError" DockPanel.Dock="Bottom" Height="170" Margin="0,10,0,0" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
-                             Background="#070A10" Foreground="#66AEFF" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto"
-                             Text="Selecciona un registro de la lista para ver que paso y como solucionarlo."/>
-                    <DataGrid x:Name="GridRegistroErrores" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
+                    <DataGrid x:Name="GridRegistroErrores" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" Height="380" Margin="0,10,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Hora" Binding="{Binding Hora}" Width="0.8*"/>
                             <DataGridTextColumn Header="Tipo" Binding="{Binding Tipo}" Width="0.55*">
@@ -11885,7 +11883,11 @@ function Buscar-DriverLaptop {
                             <DataGridTextColumn Header="Mensaje" Binding="{Binding Mensaje}" Width="3*"/>
                         </DataGrid.Columns>
                     </DataGrid>
-                </DockPanel>
+                    <TextBox x:Name="TxtDetalleError" Height="170" Margin="0,10,0,0" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+                             Background="#070A10" Foreground="#66AEFF" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto"
+                             Text="Selecciona un registro de la lista para ver que paso y como solucionarlo."/>
+                </StackPanel>
+            </ScrollViewer>
             </TabItem>
 
             <TabItem Header="🛠️ Modificacion">
