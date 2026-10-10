@@ -14,6 +14,14 @@
          .\TheDragonTool.ps1
 #>
 
+# Cronometro de arranque (para detectar un inicio lento)
+$Global:RelojArranque = [System.Diagnostics.Stopwatch]::StartNew()
+$Global:FasesArranque = New-Object System.Collections.ArrayList
+function Global:Marcar-Arranque {
+    param([string]$Fase)
+    [void]$Global:FasesArranque.Add(@{ Fase = $Fase; T = $Global:RelojArranque.Elapsed.TotalSeconds })
+}
+
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
@@ -25,6 +33,7 @@ Add-Type -AssemblyName System.Drawing
 # PowerShell 5.1 puede usar TLS antiguo por defecto y las descargas (NuGet, GitHub, Microsoft) fallan: se fuerza TLS 1.2
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
+Marcar-Arranque 'carga de librerias WPF'
 $Script:Autor = "Adrian Barrientos"
 $Script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $Script:ScriptDir) { $Script:ScriptDir = (Get-Location).Path }
@@ -1339,11 +1348,19 @@ function Global:Iniciar-EscaneoHardware {
 function Global:Write-Log {
     param(
         [string]$Mensaje,
-        [ValidateSet('INFO','OK','AVISO','ERROR')] [string]$Tipo = 'INFO'
+        [ValidateSet('INFO','OK','AVISO','ERROR')] [string]$Tipo = 'INFO',
+        [switch]$SinRegistro
     )
     $hora = (Get-Date).ToString('HH:mm:ss')
 
-    if ($Tipo -eq 'ERROR' -or $Tipo -eq 'AVISO') {
+    # Se recuerdan los dos ultimos mensajes: si la interfaz se bloquea entre ellos, el monitor de lentitud sabe que estaba pasando
+    if (-not $SinRegistro) {
+        $Global:ActividadPrev = $Global:Actividad
+        $txtAct = if ($Mensaje.Length -gt 90) { $Mensaje.Substring(0, 90) + '...' } else { $Mensaje }
+        $Global:Actividad = @{ Texto = $txtAct; Hora = Get-Date }
+    }
+
+    if (($Tipo -eq 'ERROR' -or $Tipo -eq 'AVISO') -and -not $SinRegistro) {
         try {
             $callStack = Get-PSCallStack
             $origen = if ($callStack.Count -gt 1 -and $callStack[1].FunctionName) { $callStack[1].FunctionName } else { "Desconocido" }
@@ -1364,6 +1381,342 @@ function Global:Write-Log {
     $Script:LogBox.ScrollToEnd()
     Wait-UI -Milisegundos 1
 }
+
+# ---------------------------------------------------------------------------
+#  MONITOR DE LENTITUD (programa y pruebas)
+#  Un hilo aparte mide cada pocos segundos CPU, RAM, disco y los procesos que mas
+#  consumen. Si la interfaz se congela, el arranque tarda demasiado o una prueba se
+#  alarga, se registra el aviso indicando la causa mas probable y que lo provoco.
+# ---------------------------------------------------------------------------
+$Global:Mon = [hashtable]::Synchronized(@{
+    Parar = $false; Ultimo = $null; ForzarProcesos = $false
+    Hist = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+})
+$Global:MonActivo = $false
+$Global:MonPS = $null
+$Global:MonRS = $null
+$Global:MonTimer = $null
+$Global:MonUltTick = [DateTime]::UtcNow
+$Global:MonUltReporte = [DateTime]::MinValue
+$Global:MonLagTotalMs = 0.0
+$Global:MonLagCuenta = 0
+$Global:MonLagOmitidos = 0
+$Global:EventosLentitud = New-Object System.Collections.ArrayList
+$Global:HistPruebas = New-Object System.Collections.ArrayList
+$Global:Actividad = $null
+$Global:ActividadPrev = $null
+
+# Bloque que corre en el hilo muestreador (no toca la interfaz)
+$Global:MonSamplerSB = {
+    param($Sync, [int]$MiPid, [int]$Nucleos)
+    try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}
+    if ($Nucleos -lt 1) { $Nucleos = 1 }
+    while (-not $Sync.Parar) {
+        $t0 = Get-Date
+        $m = @{ Hora = $t0; Cpu = $null; RamPct = $null; RamLibreMB = $null; DiscoPct = $null; Cola = $null; Top = @(); TopRam = @() }
+        try { $c = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction Stop; $m.Cpu = [double]$c.PercentProcessorTime } catch {}
+        try {
+            $o = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+            $m.RamPct = [math]::Round((($o.TotalVisibleMemorySize - $o.FreePhysicalMemory) / $o.TotalVisibleMemorySize) * 100, 0)
+            $m.RamLibreMB = [math]::Round($o.FreePhysicalMemory / 1024, 0)
+        } catch {}
+        try {
+            $d = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction Stop
+            $m.DiscoPct = [double]$d.PercentDiskTime; $m.Cola = [double]$d.CurrentDiskQueueLength
+        } catch {}
+        $carga = (($m.Cpu -ge 60) -or ($m.RamPct -ge 85) -or ($m.DiscoPct -ge 80) -or $Sync.ForzarProcesos)
+        if ($carga) {
+            try {
+                $pr = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Filter "PercentProcessorTime > 0" -ErrorAction Stop |
+                    Where-Object { $_.Name -ne '_Total' -and $_.Name -ne 'Idle' } |
+                    Sort-Object PercentProcessorTime -Descending | Select-Object -First 5)
+                $m.Top = @($pr | ForEach-Object { @{ Nombre = ($_.Name -replace '#\d+$', ''); Pid = [int]$_.IDProcess; Cpu = [math]::Round([double]$_.PercentProcessorTime / $Nucleos, 0) } })
+            } catch {}
+            try {
+                $m.TopRam = @(Get-Process -ErrorAction Stop | Sort-Object WorkingSet64 -Descending | Select-Object -First 4 |
+                    ForEach-Object { @{ Nombre = $_.ProcessName; Pid = [int]$_.Id; MB = [math]::Round($_.WorkingSet64 / 1MB, 0) } })
+            } catch {}
+            $Sync.ForzarProcesos = $false
+        }
+        [void]$Sync.Hist.Add($m)
+        while ($Sync.Hist.Count -gt 60) { $Sync.Hist.RemoveAt(0) }
+        $Sync.Ultimo = $m
+        $dur = ((Get-Date) - $t0).TotalMilliseconds
+        Start-Sleep -Milliseconds ([int][Math]::Max(500, 2500 - $dur))
+    }
+}
+
+function Global:Iniciar-MonitorLentitud {
+    if ($Global:MonPS) { return }
+    try {
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = 'MTA'
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript($Global:MonSamplerSB.ToString()).AddArgument($Global:Mon).AddArgument([int]$PID).AddArgument([int][Environment]::ProcessorCount)
+        [void]$ps.BeginInvoke()
+        $Global:MonPS = $ps; $Global:MonRS = $rs
+    } catch {
+        Write-Log "No se pudo iniciar el monitor de lentitud: $($_.Exception.Message)" -Tipo AVISO
+    }
+}
+
+function Global:Detener-MonitorLentitud {
+    try { $Global:Mon.Parar = $true } catch {}
+    try { if ($Global:MonTimer) { $Global:MonTimer.Stop() } } catch {}
+    try { if ($Global:MonPS) { $Global:MonPS.Stop() | Out-Null; $Global:MonPS.Dispose() } } catch {}
+    try { if ($Global:MonRS) { $Global:MonRS.Close() } } catch {}
+}
+
+# Empieza a vigilar la interfaz: un temporizador de 0,5 s; si tarda mucho mas en ejecutarse, la interfaz estuvo bloqueada
+function Global:Iniciar-VigilanciaInterfaz {
+    $Global:MonUltTick = [DateTime]::UtcNow
+    $Global:MonActivo = $true
+    if (-not $Global:MonTimer) {
+        $Global:MonTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $Global:MonTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $Global:MonTimer.Add_Tick({ Revisar-LagInterfaz })
+    }
+    $Global:MonTimer.Start()
+}
+
+function Global:Revisar-LagInterfaz {
+    $ahora = [DateTime]::UtcNow
+    $lag = ($ahora - $Global:MonUltTick).TotalMilliseconds - 500
+    $Global:MonUltTick = $ahora
+    if (-not $Global:MonActivo) { return }
+    if ($lag -lt 900 -or $lag -gt 180000) { return }
+    $Global:MonLagCuenta++
+    $Global:MonLagTotalMs += $lag
+    Registrar-Lentitud -Tipo 'Interfaz' -Milisegundos $lag
+}
+
+function Global:Nombre-ProcesoAmigable {
+    param([string]$Nombre, [int]$Pid2 = 0)
+    if ($Pid2 -eq $PID) { return @{ Texto = "The Dragon Tool (este programa)"; Propio = $true; Sol = '' } }
+    switch -Regex ($Nombre) {
+        '^(MsMpEng|MpDefenderCoreService|NisSrv)$' { return @{ Texto = "Windows Defender analizando archivos ($Nombre)"; Propio = $false; Sol = 'Espera a que termine el analisis del antivirus o excluye la carpeta del programa en Seguridad de Windows.' } }
+        '^(TiWorker|TrustedInstaller|WaasMedicSvc|MoUsoCoreWorker|UsoClient|wuauclt)$' { return @{ Texto = "Windows Update instalando o buscando actualizaciones ($Nombre)"; Propio = $false; Sol = 'Deja que Windows Update termine y reinicia el equipo; luego repite la prueba.' } }
+        '^(SearchIndexer|SearchProtocolHost|SearchFilterHost)$' { return @{ Texto = "Indexador de busqueda de Windows ($Nombre)"; Propio = $false; Sol = 'El indexador suele terminar solo; puedes pausarlo desde Opciones de indexacion.' } }
+        '^OneDrive' { return @{ Texto = "OneDrive sincronizando archivos"; Propio = $false; Sol = 'Pausa la sincronizacion de OneDrive mientras haces las pruebas.' } }
+        '^(chrome|msedge|firefox|opera|brave)$' { return @{ Texto = "navegador web ($Nombre) con muchas pestañas o descargas"; Propio = $false; Sol = 'Cierra pestañas o el navegador mientras haces las pruebas.' } }
+        '^(powershell|pwsh)$' { return @{ Texto = "otra ventana de PowerShell ($Nombre)"; Propio = $false; Sol = 'Revisa si hay otro script de PowerShell ejecutandose.' } }
+        '^System$' { return @{ Texto = "el Sistema de Windows (controladores / disco / red)"; Propio = $false; Sol = 'Actualiza los controladores de disco y red y revisa el estado del disco.' } }
+        '^(svchost|dwm|csrss|explorer)$' { return @{ Texto = "servicio de Windows ($Nombre)"; Propio = $false; Sol = 'Reinicia el equipo para liberar servicios de Windows saturados.' } }
+        default { return @{ Texto = "el proceso '$Nombre'"; Propio = $false; Sol = "Cierra o revisa el programa '$Nombre' si no lo necesitas." } }
+    }
+}
+
+# Analiza las muestras del sistema desde una hora dada y devuelve causas probables
+function Global:Analizar-CausaLentitud {
+    param([datetime]$Desde, [string]$Contexto = '')
+    $r = @{ Causas = @(); Soluciones = @(); Resumen = 'sin datos del sistema todavia'; Cpu = $null; Ram = $null; Disco = $null; Hay = $false; Propio = $false }
+    $m = @()
+    try { $m = @($Global:Mon.Hist.ToArray() | Where-Object { $_.Hora -ge $Desde }) } catch {}
+    if ($m.Count -eq 0 -and $Global:Mon.Ultimo) { $m = @($Global:Mon.Ultimo) }
+    if ($m.Count -eq 0) { return $r }
+    $r.Hay = $true
+    $cpus = @($m | Where-Object { $null -ne $_.Cpu } | ForEach-Object { [double]$_.Cpu })
+    $rams = @($m | Where-Object { $null -ne $_.RamPct } | ForEach-Object { [double]$_.RamPct })
+    $dis = @($m | Where-Object { $null -ne $_.DiscoPct } | ForEach-Object { [double]$_.DiscoPct })
+    $colas = @($m | Where-Object { $null -ne $_.Cola } | ForEach-Object { [double]$_.Cola })
+    $cpuP = if ($cpus.Count) { ($cpus | Measure-Object -Average).Average } else { $null }
+    $cpuM = if ($cpus.Count) { ($cpus | Measure-Object -Maximum).Maximum } else { $null }
+    $ramM = if ($rams.Count) { ($rams | Measure-Object -Maximum).Maximum } else { $null }
+    $disP = if ($dis.Count) { ($dis | Measure-Object -Average).Average } else { $null }
+    $disM = if ($dis.Count) { ($dis | Measure-Object -Maximum).Maximum } else { $null }
+    $colaM = if ($colas.Count) { ($colas | Measure-Object -Maximum).Maximum } else { $null }
+    $r.Cpu = $cpuP; $r.Ram = $ramM; $r.Disco = $disP
+    $partes = @()
+    if ($null -ne $cpuP) { $partes += ("CPU prom {0:N0}% (pico {1:N0}%)" -f $cpuP, $cpuM) }
+    if ($null -ne $ramM) { $partes += ("RAM {0:N0}%" -f $ramM) }
+    if ($null -ne $disP) { $partes += ("Disco prom {0:N0}% (pico {1:N0}%)" -f $disP, $disM) }
+    # Procesos que mas consumieron (de la muestra con mas CPU)
+    $conTop = @($m | Where-Object { $_.Top -and @($_.Top).Count -gt 0 } | Sort-Object { [double]$_.Cpu } -Descending)
+    $top = @()
+    if ($conTop.Count) { $top = @($conTop[0].Top) }
+    if ($top.Count) { $partes += "Procesos: " + (($top | Select-Object -First 3 | ForEach-Object { "$($_.Nombre) $($_.Cpu)%" }) -join ', ') }
+    $conRam = @($m | Where-Object { $_.TopRam -and @($_.TopRam).Count -gt 0 } | Select-Object -Last 1)
+    $topRam = @(); if ($conRam.Count) { $topRam = @($conRam[0].TopRam) }
+    $r.Resumen = ($partes -join ' | ')
+
+    $propio = $false
+    if ($null -ne $cpuP -and $cpuP -ge 80) {
+        $quien = ''
+        if ($top.Count) {
+            $p = Nombre-ProcesoAmigable -Nombre $top[0].Nombre -Pid2 $top[0].Pid
+            $quien = " Lo que mas consume: $($p.Texto) ($($top[0].Cpu)%)."
+            if ($p.Propio) { $propio = $true } elseif ($p.Sol) { $r.Soluciones += $p.Sol }
+        }
+        $r.Causas += ("CPU saturada ({0:N0}% de promedio).{1}" -f $cpuP, $quien)
+    }
+    if ($null -ne $ramM -and $ramM -ge 90) {
+        $quien = ''
+        if ($topRam.Count) { $quien = " Mayor consumo de memoria: $($topRam[0].Nombre) ($($topRam[0].MB) MB)." }
+        $r.Causas += ("Memoria casi llena ({0:N0}%): Windows usa el disco como memoria y todo se vuelve lento.{1}" -f $ramM, $quien)
+        $r.Soluciones += 'Cierra programas que no uses o usa "Liberar RAM"; si ocurre siempre, conviene ampliar la memoria.'
+    }
+    if (($null -ne $disP -and $disP -ge 85) -or ($null -ne $colaM -and $colaM -ge 6)) {
+        $r.Causas += ("Disco saturado (uso prom {0:N0}%): las lecturas/escrituras esperan en cola." -f $disP)
+        $r.Soluciones += 'Revisa descargas, antivirus o actualizaciones en segundo plano; si el disco es mecanico (HDD), un SSD mejora mucho la fluidez.'
+    }
+    try {
+        $t = Get-TemperaturaCPUC
+        if ($null -ne $t -and $t -ge 85) {
+            $r.Causas += "Temperatura alta ($t °C): el procesador reduce su velocidad para enfriarse."
+            $r.Soluciones += 'Limpia el polvo, revisa ventiladores/pasta termica y evita superficies blandas.'
+        }
+    } catch {}
+    if ($r.Causas.Count -eq 0) {
+        $ctx = ''
+        if ($Contexto) { $ctx = " ($Contexto)" }
+        $nivelGrafico = 3
+        try { $nivelGrafico = ([int][System.Windows.Media.RenderCapability]::Tier) -shr 16 } catch {}
+        if ($nivelGrafico -le 1) {
+            $r.Causas += "Aceleracion grafica limitada: los efectos animados (neon, aurora, particulas) cargan el procesador$ctx."
+            $r.Soluciones += 'Desactiva los efectos con el boton ✨ de la barra de titulo.'
+        } else {
+            $r.Causas += "El retraso lo causo una operacion pesada del propio programa$ctx, sin carga alta del sistema en ese momento."
+            $r.Soluciones += 'Es normal en pruebas largas (se ejecutan en el hilo principal). Espera a que termine; si ocurre en reposo, avisa con el registro exportado.'
+        }
+    } elseif ($propio) {
+        $r.Soluciones += 'La carga la genera la propia prueba en curso: es esperable mientras dura.'
+    }
+    $r.Propio = $propio
+    return $r
+}
+
+# Registra un aviso de lentitud (con causa probable) en el registro de actividad y en el registro de errores
+function Global:Registrar-Lentitud {
+    param(
+        [string]$Tipo, [double]$Milisegundos = 0, [string]$Contexto = '', [string]$Nombre = '',
+        [double]$Segundos = 0, [double]$Esperado = 0, [string]$FaseLenta = '', $Desde = $null, [switch]$ForzarAviso
+    )
+    try {
+        $ahora = Get-Date
+        if ($Tipo -eq 'Interfaz' -and ($ahora - $Global:MonUltReporte).TotalSeconds -lt 20) { $Global:MonLagOmitidos++; return }
+        if ($Tipo -eq 'Interfaz') { $Global:MonUltReporte = $ahora }
+        $seg = [math]::Round($Milisegundos / 1000, 1)
+        if (-not $Desde) { $Desde = $ahora.AddSeconds(-([math]::Max(6, $seg + 4))) }
+        # Que estaba pasando: la prueba en curso o los ultimos mensajes del registro de actividad
+        $ctx = $Contexto
+        if (-not $ctx -and $Tipo -eq 'Interfaz') {
+            if ($Global:DiagEnCurso -and $Global:DiagNombreActual) { $ctx = "prueba en curso: $($Global:DiagNombreActual)" }
+            elseif ($Global:Actividad) {
+                $a = $Global:Actividad; $p = $Global:ActividadPrev
+                if ($p -and (($a.Hora - $p.Hora).TotalMilliseconds -ge ($Milisegundos * 0.6))) { $ctx = "entre '$($p.Texto)' y '$($a.Texto)'" }
+                else { $ctx = "ultima actividad: '$($a.Texto)'" }
+            }
+        }
+        $an = Analizar-CausaLentitud -Desde $Desde -Contexto $ctx
+        $causas = if ($an.Causas.Count) { $an.Causas -join ' ' } else { 'sin causa clara' }
+        $extra = ''
+        if ($Global:MonLagOmitidos -gt 0 -and $Tipo -eq 'Interfaz') { $extra = " (+$($Global:MonLagOmitidos) bloqueo(s) menores desde el aviso anterior)"; $Global:MonLagOmitidos = 0 }
+        switch ($Tipo) {
+            'Interfaz' { $msg = "Lentitud detectada: el programa dejo de responder $seg s. Causa probable: $causas Contexto: $ctx.$extra"; $icono = '🐢' }
+            'Arranque' { $msg = "Arranque lento: el programa tardo $([math]::Round($Segundos,1)) s en abrirse (fase mas lenta: '$FaseLenta'). Causa probable: $causas"; $icono = '🚦' }
+            default    { $msg = "Prueba lenta: '$Nombre' tardo $([math]::Round($Segundos,1)) s (lo normal es ~$([math]::Round($Esperado,0)) s). Causa probable: $causas"; $icono = '⏳' }
+        }
+        $sol = if ($an.Soluciones.Count) { ($an.Soluciones | Select-Object -Unique) -join ' ' } else { 'Repite la prueba con el equipo en reposo y exporta el registro si persiste.' }
+        $detalle = "Sistema durante el evento: $($an.Resumen)"
+        # Si el bloqueo fue breve y el sistema esta tranquilo solo se anota como informacion; si no, es un aviso del registro de errores
+        $esAviso = $ForzarAviso -or ($Tipo -ne 'Interfaz') -or ($Milisegundos -ge 2500) -or ($an.Causas.Count -gt 0 -and $an.Causas[0] -notmatch '^El retraso lo causo|^Aceleracion')
+        [void]$Global:EventosLentitud.Add(@{ Hora = $ahora; Tipo = $Tipo; Texto = $msg })
+        if ($esAviso) {
+            Write-Log "$icono $msg Sistema: $($an.Resumen)" -Tipo AVISO -SinRegistro
+            Add-RegistroError -Tipo 'AVISO' -Categoria 'Rendimiento (lentitud)' -Origen 'Monitor de lentitud' -Mensaje $msg -Solucion $sol -Detalle $detalle
+            try { if ($window.FindName("GridRegistroErrores")) { Cargar-RegistroErrores } } catch {}
+        } else {
+            Write-Log "$icono Bloqueo breve de la interfaz ($seg s). $ctx. Sistema: $($an.Resumen)" -Tipo INFO -SinRegistro
+        }
+        return $an
+    } catch {}
+}
+
+# Mide el arranque del programa y avisa si fue lento
+function Global:Reportar-Arranque {
+    try {
+        $Global:RelojArranque.Stop()
+        $total = $Global:RelojArranque.Elapsed.TotalSeconds
+        $fases = @($Global:FasesArranque.ToArray())
+        $detalle = @(); $prev = 0.0; $peor = ''; $peorT = 0.0
+        foreach ($f in $fases) {
+            $d = $f.T - $prev
+            $detalle += ("{0} {1:N1}s" -f $f.Fase, $d)
+            if ($d -gt $peorT) { $peorT = $d; $peor = $f.Fase }
+            $prev = $f.T
+        }
+        Write-Log ("Arranque del programa: {0:N1} s en total ({1})." -f $total, ($detalle -join ' | ')) -Tipo INFO -SinRegistro
+        if ($total -ge 8) {
+            [void](Registrar-Lentitud -Tipo 'Arranque' -Segundos $total -FaseLenta "$peor ($([math]::Round($peorT,1)) s)" -Desde (Get-Date).AddSeconds(-($total + 3)) -Contexto 'durante el arranque')
+        }
+    } catch {}
+    Iniciar-VigilanciaInterfaz
+}
+
+# Informe manual de rendimiento (boton de la pestaña Registro de errores)
+function Global:Informe-Lentitud {
+    try {
+        Write-Log "Analizando rendimiento del equipo (unos segundos)..." -Tipo INFO -SinRegistro
+        $Global:Mon.ForzarProcesos = $true
+        $t0 = Get-Date
+        while (((Get-Date) - $t0).TotalSeconds -lt 3.5) { Wait-UI -Milisegundos 100 }
+        $an = Analizar-CausaLentitud -Desde (Get-Date).AddSeconds(-30) -Contexto 'en reposo'
+        $L = New-Object System.Collections.ArrayList
+        [void]$L.Add("INFORME DE LENTITUD  ($((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')))")
+        [void]$L.Add("")
+        [void]$L.Add("Sistema (ultimos 30 s): $($an.Resumen)")
+        $u = $Global:Mon.Ultimo
+        if ($u -and $u.Top -and @($u.Top).Count) {
+            [void]$L.Add("Procesos que mas CPU usan ahora:")
+            foreach ($p in @($u.Top)) { [void]$L.Add("   - $($p.Nombre) (PID $($p.Pid)): $($p.Cpu)%") }
+        }
+        if ($u -and $u.TopRam -and @($u.TopRam).Count) {
+            [void]$L.Add("Procesos que mas memoria usan:")
+            foreach ($p in @($u.TopRam)) { [void]$L.Add("   - $($p.Nombre) (PID $($p.Pid)): $($p.MB) MB") }
+        }
+        [void]$L.Add("")
+        if ($an.Causas.Count) {
+            [void]$L.Add("QUE LO ESTA RALENTIZANDO:")
+            foreach ($c in $an.Causas) { [void]$L.Add("   * $c") }
+            [void]$L.Add("QUE HACER:")
+            foreach ($s in ($an.Soluciones | Select-Object -Unique)) { [void]$L.Add("   > $s") }
+        } else {
+            [void]$L.Add("No se detecta ahora una carga que ralentice el equipo (CPU, RAM y disco dentro de lo normal).")
+        }
+        [void]$L.Add("")
+        [void]$L.Add("Eventos de lentitud en esta sesion: $($Global:EventosLentitud.Count) (la interfaz estuvo bloqueada $($Global:MonLagCuenta) vez/veces, $([math]::Round($Global:MonLagTotalMs/1000,1)) s en total).")
+        foreach ($e in @($Global:EventosLentitud.ToArray() | Select-Object -Last 8)) { [void]$L.Add("   $($e.Hora.ToString('HH:mm:ss'))  $($e.Texto)") }
+        if ($Global:HistPruebas.Count) {
+            [void]$L.Add("")
+            [void]$L.Add("Duracion de las ultimas pruebas de diagnostico:")
+            foreach ($h in @($Global:HistPruebas.ToArray() | Select-Object -Last 10)) { [void]$L.Add("   $h") }
+        }
+        $fases = @($Global:FasesArranque.ToArray())
+        if ($fases.Count) {
+            $prev = 0.0; $tx = @()
+            foreach ($f in $fases) { $tx += ("{0} {1:N1}s" -f $f.Fase, ($f.T - $prev)); $prev = $f.T }
+            [void]$L.Add("")
+            [void]$L.Add("Arranque del programa: $($tx -join ' | ')")
+        }
+        $texto = ($L -join "`r`n")
+        $caja = $window.FindName("TxtDetalleError")
+        if ($caja) { $caja.Text = $texto }
+        foreach ($linea in @($L | Select-Object -First 4)) { if ($linea) { Write-Log $linea -Tipo INFO -SinRegistro } }
+        if ($an.Causas.Count) { Write-Log "🐢 Lentitud actual: $($an.Causas -join ' ')" -Tipo AVISO -SinRegistro }
+        else { Write-Log "Rendimiento actual normal. Detalle completo en la pestaña Registro de errores." -Tipo OK -SinRegistro }
+    } catch { Write-Log "No se pudo generar el informe de lentitud: $($_.Exception.Message)" -Tipo AVISO }
+}
+
+# Duracion normal esperada (segundos) de cada prueba de diagnostico, para detectar pruebas lentas
+$Global:DiagEsperadoSeg = @{
+    'Rendimiento del procesador' = 20; 'Velocidad de disco' = 40; 'Velocidad de Internet' = 50; 'Latencia aleatoria 4K' = 45
+    'Actividad del disco' = 15; 'Diagnostico completo del equipo' = 150; 'Diagnostico completo de disco' = 60
+    'Verificacion CHKDSK' = 900; 'Fragmentacion y optimizacion' = 900
+}
+
+Iniciar-MonitorLentitud
 
 function Global:Show-Confirm {
     param([string]$Mensaje, [string]$Titulo = "Confirmar")
@@ -5288,22 +5641,51 @@ function Global:Diag-Fin {
     } catch {}
 }
 
+# Resume la duracion de la prueba y su impacto en el sistema; avisa si fue lenta y por que
+function Global:Diag-AnalisisRendimiento {
+    param([string]$Nombre, $Inicio, [int]$Lag0 = 0, [double]$LagMs0 = 0)
+    try {
+        $seg = ((Get-Date) - $Inicio).TotalSeconds
+        $esp = 40
+        if ($Global:DiagEsperadoSeg.ContainsKey($Nombre)) { $esp = $Global:DiagEsperadoSeg[$Nombre] }
+        $an = Analizar-CausaLentitud -Desde $Inicio -Contexto "prueba '$Nombre'"
+        $lagN = $Global:MonLagCuenta - $Lag0
+        $lagS = ($Global:MonLagTotalMs - $LagMs0) / 1000
+        $linea = ("   ⏱ Duracion: {0:N1} s" -f $seg)
+        if ($an.Hay) { $linea += " | Sistema durante la prueba: $($an.Resumen)" }
+        if ($lagN -gt 0) { $linea += (" | La ventana se congelo {0} vez/veces ({1:N1} s en total)" -f $lagN, $lagS) }
+        Write-DiagLog $linea
+        [void]$Global:HistPruebas.Add(("{0}  {1}: {2:N1} s" -f (Get-Date).ToString('HH:mm:ss'), $Nombre, $seg))
+        $cargaAlta = ($an.Hay -and -not $an.Propio -and (($an.Cpu -ge 80) -or ($an.Ram -ge 90) -or ($an.Disco -ge 85)))
+        if ($seg -gt $esp -or $cargaAlta) {
+            $r = Registrar-Lentitud -Tipo 'Prueba' -Nombre $Nombre -Segundos $seg -Esperado $esp -Desde $Inicio
+            $causas = if ($r -and $r.Causas.Count) { $r.Causas -join ' ' } else { 'revisa el informe de lentitud en la pestaña Registro de errores' }
+            Diag-Aviso "Lentitud detectada en '$Nombre': $causas"
+        }
+    } catch {}
+}
+
 # Envoltorio: muestra la tarjeta animada mientras corre una prueba automatica
 function Global:Ejecutar-PruebaDiag {
     param([string]$Nombre, [string]$Icono = '🔎', [scriptblock]$Accion)
     if ($Global:DiagEnCurso) { return }
     $Global:DiagEnCurso = $true
     $Global:DiagCancelada = $false
+    $Global:DiagNombreActual = $Nombre
+    $inicioPrueba = Get-Date
     $u = Obtener-DiagUi
     try {
         if ($u) { $u.ScrollDiagIzq.IsEnabled = $false }
         Diag-Inicio -Nombre $Nombre -Icono $Icono
         Wait-UI -Milisegundos 30
+        $lagCuenta0 = $Global:MonLagCuenta; $lagMs0 = $Global:MonLagTotalMs
         & $Accion
+        if (-not $Global:DiagCancelada) { Diag-AnalisisRendimiento -Nombre $Nombre -Inicio $inicioPrueba -Lag0 $lagCuenta0 -LagMs0 $lagMs0 }
     } catch {
         Write-DiagLog "No se pudo completar '$Nombre': $($_.Exception.Message)"
     } finally {
         $Global:DiagEnCurso = $false
+        $Global:DiagNombreActual = ''
         try { if ($u) { $u.ScrollDiagIzq.IsEnabled = $true } } catch {}
         if ($Global:DiagCancelada) { Diag-Ocultar } else { Diag-Fin -Nombre $Nombre }
     }
@@ -11772,6 +12154,7 @@ function Buscar-DriverLaptop {
 #  INTERFAZ GRAFICA (XAML)
 # ---------------------------------------------------------------------------
 
+Marcar-Arranque 'funciones y recursos'
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -13334,6 +13717,7 @@ function Buscar-DriverLaptop {
                                     <ComboBoxItem Content="Controladores"/>
                                     <ComboBoxItem Content="Perfiles de optimizacion"/>
                                     <ComboBoxItem Content="Programa general"/>
+                                    <ComboBoxItem Content="Rendimiento (lentitud)"/>
                                 </ComboBox>
                                 <TextBlock Text="Tipo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <ComboBox x:Name="CmbFiltroTipoError" Width="140">
@@ -13345,11 +13729,13 @@ function Buscar-DriverLaptop {
                             <WrapPanel>
                                 <Button x:Name="BtnActualizarErrores" Content="🔄 Actualizar" Width="140" Height="42" FontSize="12"/>
                                 <Button x:Name="BtnEscanearHardware" Content="🔬 Escanear hardware ahora" Width="210" Height="42" FontSize="12" BorderBrush="#2F7CF6"/>
+                                <Button x:Name="BtnInformeLentitud" Content="🐢 Informe de lentitud ahora" Width="210" Height="42" FontSize="12" BorderBrush="#FFC857"/>
                                 <Button x:Name="BtnCopiarErrores" Content="📋 Copiar todo" Width="140" Height="42" FontSize="12"/>
                                 <Button x:Name="BtnExportarErrores" Content="💾 Exportar a archivo" Width="170" Height="42" FontSize="12"/>
                                 <Button x:Name="BtnLimpiarErrores" Content="🗑️ Limpiar registro" Width="160" Height="42" FontSize="12" BorderBrush="#A85050"/>
                             </WrapPanel>
                             <CheckBox x:Name="ChkMonitoreoVivo" Content="📡 Monitoreo en vivo del hardware (revisa cada 3 minutos mientras el programa este abierto)" Foreground="White" Margin="0,12,0,0" FontSize="12"/>
+                            <CheckBox x:Name="ChkMonitorLentitud" IsChecked="True" Content="🐢 Detectar lentitud automaticamente (al abrir el programa, en la interfaz y en cada prueba) e indicar que la causa" Foreground="White" Margin="0,8,0,0" FontSize="12"/>
                             <TextBlock x:Name="TxtEstadoMonitor" Foreground="#7C93BD" FontSize="12" Margin="0,4,0,0" Text="Monitoreo en vivo: apagado."/>
                             <TextBlock x:Name="TxtResumenErrores" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" Margin="0,8,0,0"/>
                         </StackPanel>
@@ -13667,8 +14053,10 @@ function Buscar-DriverLaptop {
 
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
+Marcar-Arranque 'construccion de la interfaz'
 # Marco neon animado y translucido alrededor de toda la ventana (barra de titulo propia)
 Aplicar-MarcoNeon -Ventana $window -Principal
+Marcar-Arranque 'marco neon'
 
 $Script:LogBox = $window.FindName("LogBox")
 
@@ -14516,6 +14904,9 @@ $window.FindName("TxtBuscarError").Add_TextChanged({ Cargar-RegistroErrores })
 $window.FindName("BtnEscanearHardware").Add_Click({ Iniciar-EscaneoHardware -Horas 72 -Manual $true -IncluirEstado $true })
 $window.FindName("ChkMonitoreoVivo").Add_Checked({ Iniciar-MonitoreoVivo })
 $window.FindName("ChkMonitoreoVivo").Add_Unchecked({ Detener-MonitoreoVivo })
+$window.FindName("BtnInformeLentitud").Add_Click({ Informe-Lentitud })
+$window.FindName("ChkMonitorLentitud").Add_Checked({ $Global:MonActivo = $true; $Global:MonUltTick = [DateTime]::UtcNow; Write-Log "Deteccion de lentitud activada." -Tipo OK -SinRegistro })
+$window.FindName("ChkMonitorLentitud").Add_Unchecked({ $Global:MonActivo = $false; Write-Log "Deteccion de lentitud desactivada." -Tipo INFO -SinRegistro })
 
 $window.FindName("GridRegistroErrores").Add_SelectionChanged({
     $it = $window.FindName("GridRegistroErrores").SelectedItem
@@ -14804,5 +15195,15 @@ try {
     Write-Log "No se pudo activar el escalado automatico a la pantalla: $($_.Exception.Message)" -Tipo AVISO
 }
 
+Marcar-Arranque 'enlace de controles y efectos'
+$Global:ArranqueReportado = $false
+$window.Add_ContentRendered({
+    if (-not $Global:ArranqueReportado) {
+        $Global:ArranqueReportado = $true
+        Marcar-Arranque 'primer dibujo de la ventana'
+        Reportar-Arranque
+    }
+})
 Write-Log "The Dragon Tool listo. Creado por $Script:Autor." -Tipo OK
 $window.ShowDialog() | Out-Null
+Detener-MonitorLentitud
