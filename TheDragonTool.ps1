@@ -4032,7 +4032,9 @@ function Global:Write-DiagLog {
         if (-not $Script:DiagLogIniciado) {
             $caja.Clear()
             $Script:DiagLogIniciado = $true
+            $Global:DiagInforme = $null
         }
+        try { Registrar-LineaInforme $Mensaje } catch { }
         $caja.AppendText("$Mensaje`r`n")
         $caja.ScrollToEnd()
     }
@@ -5694,6 +5696,12 @@ function Global:Ejecutar-PruebaDiag {
     } finally {
         $Global:DiagEnCurso = $false
         $Global:DiagNombreActual = ''
+        try {
+            if (-not $Global:DiagCancelada) {
+                if (-not $Global:DiagInforme) { Registrar-LineaInforme '' }
+                $Global:DiagInforme.Pruebas.Add([PSCustomObject]@{ Nombre = $Nombre; Inicio = $inicioPrueba; Seg = ((Get-Date) - $inicioPrueba).TotalSeconds; Ok = [int]$Global:DiagStats.Ok; Aviso = [int]$Global:DiagStats.Aviso })
+            }
+        } catch { }
         try { if ($u) { $u.ScrollDiagIzq.IsEnabled = $true } } catch {}
         if ($Global:DiagCancelada) { Diag-Ocultar } else { Diag-Fin -Nombre $Nombre }
     }
@@ -13639,6 +13647,7 @@ Marcar-Arranque 'funciones y recursos'
                         <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,6">
                             <Button x:Name="BtnDiagCopiar" Content="📋 Copiar" Width="100" Height="36" FontSize="12"/>
                             <Button x:Name="BtnDiagExportar" Content="💾 Guardar informe" Width="150" Height="36" FontSize="12"/>
+                            <Button x:Name="BtnDiagPdf" Content="📄 Informe PDF" Width="140" Height="36" FontSize="12" BorderBrush="#4CD964" ToolTip="Genera un informe PDF con los resultados (pide nombre del usuario y fecha de ingreso)"/>
                             <Button x:Name="BtnDiagLimpiar" Content="🧹 Limpiar" Width="100" Height="36" FontSize="12"/>
                         </WrapPanel>
                         <TextBox x:Name="TxtDiagResultados" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
@@ -14792,9 +14801,11 @@ $window.FindName("BtnDiagExportar").Add_Click({
         } catch { Write-Log "No se pudo guardar el informe: $($_.Exception.Message)" -Tipo ERROR }
     }
 })
+$window.FindName("BtnDiagPdf").Add_Click({ Exportar-InformeDiagnosticoPDF })
 $window.FindName("BtnDiagLimpiar").Add_Click({
     $window.FindName("TxtDiagResultados").Text = "Los resultados de cada prueba apareceran aqui. Ejecuta una o varias pruebas para ver el diagnostico."
     $Script:DiagLogIniciado = $false
+    $Global:DiagInforme = $null
     if (-not $Global:DiagEnCurso) { Diag-Ocultar }
 })
 
@@ -14858,44 +14869,7 @@ function Global:Detener-MonitoreoVivo {
     Actualizar-EstadoMonitoreo
 }
 
-function Global:Exportar-InformeErroresPDF {
-    $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
-    $entradas = @(@($Script:RegistroErrores.ToArray()) | Sort-Object Momento -Descending)
-    if ($entradas.Count -eq 0) { Show-Aviso "No hay errores registrados para exportar." "Registro vacio"; return }
-    Add-Type -AssemblyName System.Windows.Forms
-    $dlg = New-Object System.Windows.Forms.SaveFileDialog
-    $dlg.Title = "Guardar informe de errores en PDF"
-    $dlg.Filter = "Documento PDF (*.pdf)|*.pdf"
-    $dlg.FileName = "DragonTool_InformeErrores_$(Get-Date -Format 'yyyyMMdd_HHmmss').pdf"
-    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
-    $pdf = $dlg.FileName
-    Write-Log "Generando informe de errores en PDF..." -Tipo INFO
-    try {
-        # --- datos del equipo ---
-        $info = [ordered]@{}
-        $info['Equipo'] = $env:COMPUTERNAME
-        $info['Usuario'] = $env:USERNAME
-        try { $so = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $info['Windows'] = "$($so.Caption) (version $($so.Version), $($so.OSArchitecture))"; $info['Encendido desde'] = $so.LastBootUpTime.ToString('yyyy-MM-dd HH:mm') } catch { }
-        try { $c = @(Get-CimInstance Win32_Processor -ErrorAction Stop)[0]; $info['Procesador'] = "$($c.Name.Trim()) ($($c.NumberOfCores) nucleos / $($c.NumberOfLogicalProcessors) hilos)" } catch { }
-        try { $r = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory; $info['Memoria RAM'] = "{0:N1} GB" -f ($r / 1GB) } catch { }
-        try { $g = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { $_.Name }) -join " / "; if ($g) { $info['Grafica'] = $g } } catch { }
-        try {
-            $d = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop | ForEach-Object {
-                $pct = if ($_.Size) { [math]::Round(100 * $_.FreeSpace / $_.Size, 1) } else { 0 }
-                "$($_.DeviceID) {0:N0} GB libres de {1:N0} GB ($pct%)" -f ($_.FreeSpace / 1GB), ($_.Size / 1GB)
-            })
-            if ($d) { $info['Discos'] = $d -join "<br>" }
-        } catch { }
-        $nErr = @($entradas | Where-Object { $_.Tipo -eq 'ERROR' }).Count
-        $nAv = @($entradas | Where-Object { $_.Tipo -eq 'AVISO' }).Count
-        $nOtros = $entradas.Count - $nErr - $nAv
-        $cats = @($entradas | Group-Object Categoria | Sort-Object Count -Descending)
-        $maxCat = [math]::Max(1, ($cats | Measure-Object Count -Maximum).Maximum)
-        $estado = if ($nErr -gt 0) { "Se detectaron errores que requieren atencion" } elseif ($nAv -gt 0) { "Solo se detectaron avisos" } else { "Sin problemas graves" }
-        $claseEstado = if ($nErr -gt 0) { 'mal' } elseif ($nAv -gt 0) { 'aviso' } else { 'ok' }
-
-        $h = New-Object System.Text.StringBuilder
-        $css = @'
+$Global:CssInforme = @'
 @page { size: A4; margin: 14mm 12mm; }
 * { box-sizing: border-box; }
 body { font-family: "Segoe UI", Arial, sans-serif; color: #1c2433; font-size: 11px; margin: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -14933,7 +14907,26 @@ table.cats td { padding: 4px 8px; border-bottom: 1px solid #eef2fa; }
 .rec li { margin-bottom: 5px; }
 .pie { margin-top: 18px; padding-top: 8px; border-top: 1px solid #dbe3f3; color: #7a88a6; font-size: 10px; text-align: center; }
 '@
-        [void]$h.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>Informe de errores - The Dragon Tool</title><style>$css</style></head><body>")
+
+function Global:Obtener-InfoEquipo {
+        $info = [ordered]@{}
+        $info['Equipo'] = $env:COMPUTERNAME
+        $info['Usuario'] = $env:USERNAME
+        try { $so = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $info['Windows'] = "$($so.Caption) (version $($so.Version), $($so.OSArchitecture))"; $info['Encendido desde'] = $so.LastBootUpTime.ToString('yyyy-MM-dd HH:mm') } catch { }
+        try { $c = @(Get-CimInstance Win32_Processor -ErrorAction Stop)[0]; $info['Procesador'] = "$($c.Name.Trim()) ($($c.NumberOfCores) nucleos / $($c.NumberOfLogicalProcessors) hilos)" } catch { }
+        try { $r = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory; $info['Memoria RAM'] = "{0:N1} GB" -f ($r / 1GB) } catch { }
+        try { $g = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { $_.Name }) -join " / "; if ($g) { $info['Grafica'] = $g } } catch { }
+        try {
+            $d = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop | ForEach-Object {
+                $pct = if ($_.Size) { [math]::Round(100 * $_.FreeSpace / $_.Size, 1) } else { 0 }
+                "$($_.DeviceID) {0:N0} GB libres de {1:N0} GB ($pct%)" -f ($_.FreeSpace / 1GB), ($_.Size / 1GB)
+            })
+            if ($d) { $info['Discos'] = $d -join "<br>" }
+        } catch { }
+    return $info
+}
+
+function Global:Obtener-LogoHtml {
         # logo del usuario (logo.png junto al script) incrustado en la portada
         $logoHtml = ""
         try {
@@ -14946,48 +14939,11 @@ table.cats td { padding: 4px 8px; border-bottom: 1px solid #eef2fa; }
                 $logoHtml = "<div class='logo'><img alt='The Dragon Tech' src='data:image/png;base64,$b64'></div>"
             }
         } catch { }
-        [void]$h.Append("<div class='portada'><div><h1>THE DRAGON TOOL</h1><div class='sub'>Informe detallado de errores y diagnostico del equipo</div><div class='meta'>Generado el $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss') &nbsp;|&nbsp; Equipo: $(& $enc $env:COMPUTERNAME) &nbsp;|&nbsp; Autor: $(& $enc $Script:Autor) - The Dragon Tech</div></div>$logoHtml</div>")
-        [void]$h.Append("<div class='estado $claseEstado'>Estado general: $(& $enc $estado)</div>")
-        [void]$h.Append("<div class='tarjetas'><div class='tarjeta'><div class='n'>$($entradas.Count)</div><div class='t'>Entradas</div></div><div class='tarjeta e'><div class='n'>$nErr</div><div class='t'>Errores</div></div><div class='tarjeta a'><div class='n'>$nAv</div><div class='t'>Avisos</div></div><div class='tarjeta'><div class='n'>$($cats.Count)</div><div class='t'>Categorias</div></div></div>")
-        [void]$h.Append("<h2>1. Datos del equipo</h2><table class='info'>")
-        foreach ($k in $info.Keys) {
-            $v = if ($k -eq 'Discos') { $info[$k] } else { & $enc $info[$k] }
-            [void]$h.Append("<tr><td>$(& $enc $k)</td><td>$v</td></tr>")
-        }
-        [void]$h.Append("</table>")
-        [void]$h.Append("<h2>2. Resumen por categoria</h2><table class='cats'>")
-        foreach ($c in $cats) {
-            $ce = @($c.Group | Where-Object { $_.Tipo -eq 'ERROR' }).Count
-            $w = [int](100 * $c.Count / $maxCat)
-            [void]$h.Append("<tr><td style='width:28%'><b>$(& $enc $c.Name)</b></td><td style='width:50%'><div class='barra'><div style='width:$w%'></div></div></td><td style='width:22%;text-align:right'>$($c.Count) entrada(s)$(if ($ce) { ", <span style='color:#c81e1e'>$ce error(es)</span>" })</td></tr>")
-        }
-        [void]$h.Append("</table>")
-        # recomendaciones prioritarias (soluciones unicas de los errores mas repetidos)
-        $prio = @($entradas | Where-Object { $_.Solucion } | Group-Object Solucion | Sort-Object @{e={ @($_.Group | Where-Object { $_.Tipo -eq 'ERROR' }).Count }; Descending=$true}, Count -Descending | Select-Object -First 6)
-        if ($prio.Count -gt 0) {
-            [void]$h.Append("<h2>3. Recomendaciones prioritarias</h2><ol class='rec'>")
-            foreach ($p in $prio) {
-                $ej = $p.Group[0]
-                [void]$h.Append("<li><b>$(& $enc $ej.Categoria):</b> $(& $enc $p.Name) <span style='color:#7a88a6'>(afecta a $($p.Count) entrada(s))</span></li>")
-            }
-            [void]$h.Append("</ol>")
-        }
-        [void]$h.Append("<h2>4. Detalle de cada entrada</h2>")
-        foreach ($c in $cats) {
-            [void]$h.Append("<h3>$(& $enc $c.Name) ($($c.Count))</h3>")
-            foreach ($e in @($c.Group | Sort-Object Momento -Descending)) {
-                $tipo = if ($e.Tipo -in 'ERROR','AVISO') { $e.Tipo } else { 'OTRO' }
-                [void]$h.Append("<div class='entrada $tipo'><div class='cab'><span class='etq $tipo'>$(& $enc $e.Tipo)</span>$(& $enc $e.Fecha) &nbsp;|&nbsp; Origen: $(& $enc $e.Origen) &nbsp;|&nbsp; Repeticiones: $($e.Veces)</div><div class='msg'>$(& $enc $e.Mensaje)</div>")
-                if ($e.Solucion) { [void]$h.Append("<div class='sol'><b>Solucion sugerida:</b> $(& $enc $e.Solucion)</div>") }
-                if ($e.Detalle) { [void]$h.Append("<div class='det'>$(& $enc $e.Detalle)</div>") }
-                [void]$h.Append("</div>")
-            }
-        }
-        [void]$h.Append("<div class='pie'>The Dragon Tool - The Dragon Tech, Hardware and Software &nbsp;|&nbsp; Informe generado automaticamente; las soluciones son sugerencias orientativas.</div></body></html>")
+    return $logoHtml
+}
 
-        $html = Join-Path $env:TEMP "DragonTool_Informe_$(Get-Date -Format 'yyyyMMddHHmmss').html"
-        [System.IO.File]::WriteAllText($html, $h.ToString(), (New-Object System.Text.UTF8Encoding($true)))
-
+function Global:Convertir-HtmlAPdf {
+    param([string]$html, [string]$pdf)
         # --- convertir a PDF con Edge o Chrome (sin ventana) ---
         $navs = @(
             "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -15034,8 +14990,257 @@ table.cats td { padding: 4px 8px; border-bottom: 1px solid #eef2fa; }
             Show-Aviso "No se pudo crear el PDF automaticamente.`n`nSe abrira el informe en el navegador y aparecera la ventana de impresion: elige 'Guardar como PDF' como impresora y pulsa Guardar." "Informe"
             try { Start-Process $htmlFinal } catch { }
         }
+}
+
+function Global:Exportar-InformeErroresPDF {
+    $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
+    $entradas = @(@($Script:RegistroErrores.ToArray()) | Sort-Object Momento -Descending)
+    if ($entradas.Count -eq 0) { Show-Aviso "No hay errores registrados para exportar." "Registro vacio"; return }
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.SaveFileDialog
+    $dlg.Title = "Guardar informe de errores en PDF"
+    $dlg.Filter = "Documento PDF (*.pdf)|*.pdf"
+    $dlg.FileName = "DragonTool_InformeErrores_$(Get-Date -Format 'yyyyMMdd_HHmmss').pdf"
+    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $pdf = $dlg.FileName
+    Write-Log "Generando informe de errores en PDF..." -Tipo INFO
+    try {
+        $info = Obtener-InfoEquipo
+        $nErr = @($entradas | Where-Object { $_.Tipo -eq 'ERROR' }).Count
+        $nAv = @($entradas | Where-Object { $_.Tipo -eq 'AVISO' }).Count
+        $nOtros = $entradas.Count - $nErr - $nAv
+        $cats = @($entradas | Group-Object Categoria | Sort-Object Count -Descending)
+        $maxCat = [math]::Max(1, ($cats | Measure-Object Count -Maximum).Maximum)
+        $estado = if ($nErr -gt 0) { "Se detectaron errores que requieren atencion" } elseif ($nAv -gt 0) { "Solo se detectaron avisos" } else { "Sin problemas graves" }
+        $claseEstado = if ($nErr -gt 0) { 'mal' } elseif ($nAv -gt 0) { 'aviso' } else { 'ok' }
+
+        $h = New-Object System.Text.StringBuilder
+        $css = $Global:CssInforme
+        [void]$h.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>Informe de errores - The Dragon Tool</title><style>$css</style></head><body>")
+        $logoHtml = Obtener-LogoHtml
+        [void]$h.Append("<div class='portada'><div><h1>THE DRAGON TOOL</h1><div class='sub'>Informe detallado de errores y diagnostico del equipo</div><div class='meta'>Generado el $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss') &nbsp;|&nbsp; Equipo: $(& $enc $env:COMPUTERNAME) &nbsp;|&nbsp; Autor: $(& $enc $Script:Autor) - The Dragon Tech</div></div>$logoHtml</div>")
+        [void]$h.Append("<div class='estado $claseEstado'>Estado general: $(& $enc $estado)</div>")
+        [void]$h.Append("<div class='tarjetas'><div class='tarjeta'><div class='n'>$($entradas.Count)</div><div class='t'>Entradas</div></div><div class='tarjeta e'><div class='n'>$nErr</div><div class='t'>Errores</div></div><div class='tarjeta a'><div class='n'>$nAv</div><div class='t'>Avisos</div></div><div class='tarjeta'><div class='n'>$($cats.Count)</div><div class='t'>Categorias</div></div></div>")
+        [void]$h.Append("<h2>1. Datos del equipo</h2><table class='info'>")
+        foreach ($k in $info.Keys) {
+            $v = if ($k -eq 'Discos') { $info[$k] } else { & $enc $info[$k] }
+            [void]$h.Append("<tr><td>$(& $enc $k)</td><td>$v</td></tr>")
+        }
+        [void]$h.Append("</table>")
+        [void]$h.Append("<h2>2. Resumen por categoria</h2><table class='cats'>")
+        foreach ($c in $cats) {
+            $ce = @($c.Group | Where-Object { $_.Tipo -eq 'ERROR' }).Count
+            $w = [int](100 * $c.Count / $maxCat)
+            [void]$h.Append("<tr><td style='width:28%'><b>$(& $enc $c.Name)</b></td><td style='width:50%'><div class='barra'><div style='width:$w%'></div></div></td><td style='width:22%;text-align:right'>$($c.Count) entrada(s)$(if ($ce) { ", <span style='color:#c81e1e'>$ce error(es)</span>" })</td></tr>")
+        }
+        [void]$h.Append("</table>")
+        # recomendaciones prioritarias (soluciones unicas de los errores mas repetidos)
+        $prio = @($entradas | Where-Object { $_.Solucion } | Group-Object Solucion | Sort-Object @{e={ @($_.Group | Where-Object { $_.Tipo -eq 'ERROR' }).Count }; Descending=$true}, Count -Descending | Select-Object -First 6)
+        if ($prio.Count -gt 0) {
+            [void]$h.Append("<h2>3. Recomendaciones prioritarias</h2><ol class='rec'>")
+            foreach ($p in $prio) {
+                $ej = $p.Group[0]
+                [void]$h.Append("<li><b>$(& $enc $ej.Categoria):</b> $(& $enc $p.Name) <span style='color:#7a88a6'>(afecta a $($p.Count) entrada(s))</span></li>")
+            }
+            [void]$h.Append("</ol>")
+        }
+        [void]$h.Append("<h2>4. Detalle de cada entrada</h2>")
+        foreach ($c in $cats) {
+            [void]$h.Append("<h3>$(& $enc $c.Name) ($($c.Count))</h3>")
+            foreach ($e in @($c.Group | Sort-Object Momento -Descending)) {
+                $tipo = if ($e.Tipo -in 'ERROR','AVISO') { $e.Tipo } else { 'OTRO' }
+                [void]$h.Append("<div class='entrada $tipo'><div class='cab'><span class='etq $tipo'>$(& $enc $e.Tipo)</span>$(& $enc $e.Fecha) &nbsp;|&nbsp; Origen: $(& $enc $e.Origen) &nbsp;|&nbsp; Repeticiones: $($e.Veces)</div><div class='msg'>$(& $enc $e.Mensaje)</div>")
+                if ($e.Solucion) { [void]$h.Append("<div class='sol'><b>Solucion sugerida:</b> $(& $enc $e.Solucion)</div>") }
+                if ($e.Detalle) { [void]$h.Append("<div class='det'>$(& $enc $e.Detalle)</div>") }
+                [void]$h.Append("</div>")
+            }
+        }
+        [void]$h.Append("<div class='pie'>The Dragon Tool - The Dragon Tech, Hardware and Software &nbsp;|&nbsp; Informe generado automaticamente; las soluciones son sugerencias orientativas.</div></body></html>")
+
+        $html = Join-Path $env:TEMP "DragonTool_Informe_$(Get-Date -Format 'yyyyMMddHHmmss').html"
+        [System.IO.File]::WriteAllText($html, $h.ToString(), (New-Object System.Text.UTF8Encoding($true)))
+
+        Convertir-HtmlAPdf -html $html -pdf $pdf
     } catch {
         Write-Log "No se pudo generar el informe PDF: $($_.Exception.Message)" -Tipo ERROR
+    }
+}
+
+# ---------------------------------------------------------------------------
+#  INFORME PDF DEL DIAGNOSTICO (pestaña Diagnosticar equipo)
+# ---------------------------------------------------------------------------
+# Guarda de forma estructurada lo que escriben las pruebas (secciones "=== TITULO ===") para el informe.
+function Global:Registrar-LineaInforme {
+    param([string]$Mensaje)
+    if (-not $Global:DiagInforme) {
+        $Global:DiagInforme = @{ Secciones = (New-Object System.Collections.Generic.List[object]); Pruebas = (New-Object System.Collections.Generic.List[object]) }
+    }
+    if ($Mensaje -match '^\s*=+\s*(.+?)\s*=+\s*$') {
+        $Global:DiagInforme.Secciones.Add([PSCustomObject]@{ Titulo = $Matches[1]; Hora = (Get-Date); Lineas = (New-Object System.Collections.Generic.List[string]) })
+        return
+    }
+    if ($Global:DiagInforme.Secciones.Count -eq 0) {
+        $Global:DiagInforme.Secciones.Add([PSCustomObject]@{ Titulo = 'General'; Hora = (Get-Date); Lineas = (New-Object System.Collections.Generic.List[string]) })
+    }
+    $sec = $Global:DiagInforme.Secciones[$Global:DiagInforme.Secciones.Count - 1]
+    if ([string]::IsNullOrWhiteSpace($Mensaje)) { return }
+    $sec.Lineas.Add($Mensaje.TrimEnd())
+}
+
+# Ventana que pide los datos del cliente antes de generar el informe. Devuelve hashtable o $null si se cancela.
+function Global:Pedir-DatosCliente {
+    [xml]$xamlCli = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Datos del cliente" Height="470" Width="470"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <StackPanel Margin="16">
+    <Button x:Name="BtnVolverVentana" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+    <TextBlock Text="📄 Informe de diagnóstico" Foreground="White" FontWeight="Bold" FontSize="16" Margin="0,0,0,4"/>
+    <TextBlock Text="Estos datos se incluirán en el informe PDF." Foreground="#8FA3C7" Margin="0,0,0,12" TextWrapping="Wrap"/>
+    <TextBlock Text="Nombre del usuario / cliente:" Foreground="White"/>
+    <TextBox x:Name="TxtCliente" Margin="0,2,0,10" Height="30" FontSize="14"/>
+    <TextBlock Text="Fecha de ingreso o visita al taller (dd/mm/aaaa):" Foreground="White"/>
+    <TextBox x:Name="TxtFechaIngreso" Margin="0,2,0,10" Height="30" FontSize="14"/>
+    <TextBlock Text="Problema reportado / observaciones (opcional):" Foreground="White"/>
+    <TextBox x:Name="TxtObs" Margin="0,2,0,6" Height="80" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+    <TextBlock x:Name="TxtErrorCli" Foreground="#FF6B6B" FontWeight="Bold" Margin="0,0,0,8" TextWrapping="Wrap"/>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="BtnCancelar" Content="Cancelar" Width="100" Margin="0,0,8,0"/>
+      <Button x:Name="BtnAceptar" Content="Generar informe" Width="150" BorderBrush="#4CD964"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+"@
+    $reader = New-Object System.Xml.XmlNodeReader $xamlCli
+    $dlg = [Windows.Markup.XamlReader]::Load($reader)
+    Iniciar-EfectosNeon -Ventana $dlg
+    $txtC = $dlg.FindName("TxtCliente"); $txtF = $dlg.FindName("TxtFechaIngreso"); $txtO = $dlg.FindName("TxtObs"); $txtE = $dlg.FindName("TxtErrorCli")
+    $txtF.Text = (Get-Date).ToString('dd/MM/yyyy')
+    if ($Global:UltimoClienteInforme) { $txtC.Text = $Global:UltimoClienteInforme.Nombre; $txtF.Text = $Global:UltimoClienteInforme.FechaTexto; $txtO.Text = $Global:UltimoClienteInforme.Obs }
+    $Global:_cliRes = $null
+    $dlg.FindName("BtnCancelar").Add_Click({ $dlg.DialogResult = $false })
+    $dlg.FindName("BtnAceptar").Add_Click({
+        $nombre = $txtC.Text.Trim()
+        if (-not $nombre) { $txtE.Text = "Escribe el nombre del usuario."; $txtC.Focus() | Out-Null; return }
+        $fecha = [datetime]::MinValue
+        $formatos = [string[]]@('dd/MM/yyyy', 'd/M/yyyy', 'dd-MM-yyyy', 'd-M-yyyy', 'yyyy-MM-dd', 'dd/MM/yy')
+        if (-not [datetime]::TryParseExact($txtF.Text.Trim(), $formatos, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$fecha)) {
+            $txtE.Text = "La fecha no es valida. Usa el formato dd/mm/aaaa (por ejemplo 10/10/2026)."; $txtF.Focus() | Out-Null; return
+        }
+        $Global:_cliRes = @{ Nombre = $nombre; Fecha = $fecha; FechaTexto = $fecha.ToString('dd/MM/yyyy'); Obs = $txtO.Text.Trim() }
+        $dlg.DialogResult = $true
+    })
+    $ok = $dlg.ShowDialog()
+    if ($ok -and $Global:_cliRes) { $Global:UltimoClienteInforme = $Global:_cliRes; return $Global:_cliRes }
+    return $null
+}
+
+function Global:Exportar-InformeDiagnosticoPDF {
+    $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
+    if ($Global:DiagEnCurso) { Show-Aviso "Espera a que termine la prueba en curso para generar el informe." "Prueba en curso"; return }
+    $inf = $Global:DiagInforme
+    if (-not $inf -or $inf.Secciones.Count -eq 0) { Show-Aviso "Todavia no hay resultados. Ejecuta una o varias pruebas en esta pestaña y luego genera el informe." "Sin resultados"; return }
+    $cli = Pedir-DatosCliente
+    if (-not $cli) { return }
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.SaveFileDialog
+    $dlg.Title = "Guardar informe de diagnostico en PDF"
+    $dlg.Filter = "Documento PDF (*.pdf)|*.pdf"
+    $limpio = (($cli.Nombre -replace '[^\p{L}\p{N}]+', '_').Trim('_'))
+    if (-not $limpio) { $limpio = 'Cliente' }
+    $dlg.FileName = "Diagnostico_${limpio}_$($cli.Fecha.ToString('yyyyMMdd')).pdf"
+    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $pdf = $dlg.FileName
+    Write-Log "Generando informe de diagnostico en PDF para $($cli.Nombre)..." -Tipo INFO
+    try {
+        $info = Obtener-InfoEquipo
+        # clasificar lineas por seccion
+        $secs = New-Object System.Collections.Generic.List[object]
+        $hallazgos = New-Object System.Collections.Generic.List[object]
+        $totOk = 0; $totAv = 0
+        foreach ($sec in @($inf.Secciones.ToArray())) {
+            $ok = 0; $av = 0; $filas = New-Object System.Collections.Generic.List[object]
+            foreach ($l in @($sec.Lineas.ToArray())) {
+                $cl = 'inf'
+                if ($l -match '✔') { $cl = 'ok'; $ok++ }
+                elseif ($l -match '⚠|ATENCION') { $cl = 'av'; $av++; [void]$hallazgos.Add([PSCustomObject]@{ Prueba = $sec.Titulo; Texto = ($l -replace '^\s*⚠\s*(ATENCION:)?\s*', '') }) }
+                [void]$filas.Add([PSCustomObject]@{ Clase = $cl; Texto = $l })
+            }
+            $totOk += $ok; $totAv += $av
+            [void]$secs.Add([PSCustomObject]@{ Titulo = $sec.Titulo; Ok = $ok; Av = $av; Filas = $filas })
+        }
+        $pruebas = @($inf.Pruebas.ToArray())
+        $estado = if ($totAv -gt 0) { "Se encontraron $totAv punto(s) que requieren atencion" } else { "Todas las pruebas se completaron sin advertencias" }
+        $claseEstado = if ($totAv -gt 0) { 'aviso' } else { 'ok' }
+
+        $h = New-Object System.Text.StringBuilder
+        $extra = @'
+.ficha { display: table; width: 100%; border-spacing: 10px 0; margin: 12px -10px 4px -10px; }
+.ficha .col { display: table-cell; width: 33%; background: #f3f6fc; border: 1px solid #dbe3f3; border-radius: 10px; padding: 9px 12px; }
+.ficha .k { font-size: 9.5px; text-transform: uppercase; letter-spacing: .6px; color: #5b6b8c; }
+.ficha .v { font-size: 14px; font-weight: 700; color: #17306b; margin-top: 2px; }
+table.pru { border-collapse: collapse; width: 100%; }
+table.pru th { background: #17306b; color: #fff; font-size: 10px; text-align: left; padding: 5px 8px; text-transform: uppercase; letter-spacing: .5px; }
+table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
+.sec { border: 1px solid #dbe3f3; border-radius: 10px; margin: 0 0 12px 0; overflow: hidden; }
+.sec .t { background: #eef3fc; padding: 7px 12px; font-weight: 700; color: #17306b; font-size: 12px; }
+.sec .t .b { float: right; font-size: 10px; font-weight: 700; color: #fff; padding: 1px 9px; border-radius: 10px; }
+.sec .t .b.ok { background: #1fa75a; } .sec .t .b.av { background: #d68a00; }
+.sec .c { padding: 6px 12px 8px 12px; }
+.ln { font-family: Consolas, "Courier New", monospace; font-size: 10px; white-space: pre-wrap; padding: 1px 0; color: #2b3650; }
+.ln.ok { color: #14683a; } .ln.av { color: #8a5a00; font-weight: 700; background: #fff4d6; border-radius: 4px; padding: 1px 5px; }
+.hall { background: #fff8e6; border: 1px solid #f3d88c; border-left: 6px solid #f0a500; border-radius: 8px; padding: 6px 12px 6px 28px; margin: 0; }
+.hall li { margin: 3px 0; }
+.obs { background: #f7f9fd; border: 1px solid #dbe3f3; border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
+.firmas { display: table; width: 100%; margin-top: 46px; border-spacing: 40px 0; page-break-inside: avoid; }
+.firmas div { display: table-cell; width: 50%; border-top: 1px solid #5b6b8c; text-align: center; padding-top: 5px; font-size: 10px; color: #5b6b8c; }
+'@
+        [void]$h.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>Informe de diagnostico - $(& $enc $cli.Nombre)</title><style>$($Global:CssInforme)`n$extra</style></head><body>")
+        $logoHtml = Obtener-LogoHtml
+        [void]$h.Append("<div class='portada'><div><h1>INFORME DE DIAGNÓSTICO</h1><div class='sub'>Revisión técnica del equipo · The Dragon Tech - Hardware and Software</div><div class='meta'>Emitido el $(Get-Date -Format 'dd/MM/yyyy HH:mm') &nbsp;|&nbsp; Técnico: $(& $enc $Script:Autor)</div></div>$logoHtml</div>")
+        [void]$h.Append("<div class='ficha'><div class='col'><div class='k'>Usuario / cliente</div><div class='v'>$(& $enc $cli.Nombre)</div></div><div class='col'><div class='k'>Fecha de ingreso / visita</div><div class='v'>$(& $enc $cli.FechaTexto)</div></div><div class='col'><div class='k'>Equipo</div><div class='v'>$(& $enc $env:COMPUTERNAME)</div></div></div>")
+        [void]$h.Append("<div class='estado $claseEstado'>Resultado general: $(& $enc $estado)</div>")
+        [void]$h.Append("<div class='tarjetas'><div class='tarjeta'><div class='n'>$($secs.Count)</div><div class='t'>Secciones de prueba</div></div><div class='tarjeta'><div class='n' style='color:#1fa75a'>$totOk</div><div class='t'>Comprobaciones OK</div></div><div class='tarjeta a'><div class='n'>$totAv</div><div class='t'>Advertencias</div></div><div class='tarjeta'><div class='n'>$($pruebas.Count)</div><div class='t'>Pruebas ejecutadas</div></div></div>")
+        if ($cli.Obs) { [void]$h.Append("<h2>Problema reportado / observaciones</h2><div class='obs'>$(& $enc $cli.Obs)</div>") }
+        [void]$h.Append("<h2>1. Datos del equipo</h2><table class='info'>")
+        foreach ($k in $info.Keys) {
+            $v = if ($k -eq 'Discos') { $info[$k] } else { & $enc $info[$k] }
+            [void]$h.Append("<tr><td>$(& $enc $k)</td><td>$v</td></tr>")
+        }
+        [void]$h.Append("</table>")
+        [void]$h.Append("<h2>2. Hallazgos que requieren atención</h2>")
+        if ($hallazgos.Count -eq 0) { [void]$h.Append("<div class='estado ok' style='font-size:11.5px'>No se detectaron advertencias en las pruebas realizadas.</div>") }
+        else {
+            [void]$h.Append("<ol class='hall'>")
+            foreach ($x in $hallazgos) { [void]$h.Append("<li><b>$(& $enc $x.Prueba):</b> $(& $enc $x.Texto)</li>") }
+            [void]$h.Append("</ol>")
+        }
+        if ($pruebas.Count -gt 0) {
+            [void]$h.Append("<h2>3. Pruebas realizadas</h2><table class='pru'><tr><th>Prueba</th><th>Hora</th><th>Duración</th><th>OK</th><th>Avisos</th></tr>")
+            foreach ($t in $pruebas) {
+                $dur = if ($t.Seg -ge 60) { "{0}m {1}s" -f [int][math]::Floor($t.Seg / 60), [int]($t.Seg % 60) } else { "{0:N1} s" -f $t.Seg }
+                $col = if ($t.Aviso -gt 0) { "style='color:#c27803;font-weight:700'" } else { "" }
+                [void]$h.Append("<tr><td>$(& $enc $t.Nombre)</td><td>$($t.Inicio.ToString('HH:mm:ss'))</td><td>$dur</td><td>$($t.Ok)</td><td $col>$($t.Aviso)</td></tr>")
+            }
+            [void]$h.Append("</table>")
+        }
+        [void]$h.Append("<h2>4. Detalle de resultados</h2>")
+        foreach ($sc in $secs) {
+            $badge = if ($sc.Av -gt 0) { "<span class='b av'>$($sc.Av) aviso(s)</span>" } else { "<span class='b ok'>OK</span>" }
+            [void]$h.Append("<div class='sec'><div class='t'>$(& $enc $sc.Titulo)$badge</div><div class='c'>")
+            foreach ($fl in $sc.Filas) { [void]$h.Append("<div class='ln $($fl.Clase)'>$(& $enc $fl.Texto)</div>") }
+            [void]$h.Append("</div></div>")
+        }
+        [void]$h.Append("<div class='firmas'><div>Firma del técnico<br>$(& $enc $Script:Autor)</div><div>Firma del cliente<br>$(& $enc $cli.Nombre)</div></div>")
+        [void]$h.Append("<div class='pie'>The Dragon Tech - Hardware and Software &nbsp;|&nbsp; Informe generado con The Dragon Tool; las observaciones son orientativas.</div></body></html>")
+
+        $html = Join-Path $env:TEMP "DragonTool_Diag_$(Get-Date -Format 'yyyyMMddHHmmss').html"
+        [System.IO.File]::WriteAllText($html, $h.ToString(), (New-Object System.Text.UTF8Encoding($true)))
+        Convertir-HtmlAPdf -html $html -pdf $pdf
+    } catch {
+        Write-Log "No se pudo generar el informe PDF de diagnostico: $($_.Exception.Message)" -Tipo ERROR
     }
 }
 
