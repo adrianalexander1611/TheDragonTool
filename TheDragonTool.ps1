@@ -6685,6 +6685,7 @@ $Global:CmbDiagUnidad = $null
 function Global:Cargar-UnidadesDiag {
     $cmb = $Global:CmbDiagUnidad
     if (-not $cmb) { return }
+    $Global:CargandoUnidades = $true
     $previa = ''
     try { if ($cmb.SelectedItem) { $previa = "$($cmb.SelectedItem.Tag)" } } catch { }
     $cmb.Items.Clear()
@@ -6702,6 +6703,7 @@ function Global:Cargar-UnidadesDiag {
         $i++
     }
     if ($cmb.Items.Count -gt 0) { $cmb.SelectedIndex = $idx }
+    $Global:CargandoUnidades = $false
 }
 
 # Unidad elegida en el panel (por defecto, la del sistema)
@@ -7585,7 +7587,7 @@ function Global:Escribir-VidaSSD {
     param($Disco)
     $nombre = "$($Disco.FriendlyName)".Trim()
     $esSsd = ("$($Disco.MediaType)" -eq 'SSD') -or ("$($Disco.BusType)" -eq 'NVMe') -or ($nombre -match '(?i)\bSSD\b|NVMe|M\.2')
-    if (-not $esSsd) { return }
+    if (-not $esSsd) { Escribir-EstadoHDD -Disco $Disco; return }
     if (-not $Global:VidaSsdImpresa) { $Global:VidaSsdImpresa = @{} }
     if ($Global:VidaSsdImpresa.ContainsKey($nombre)) { return }
     $Global:VidaSsdImpresa[$nombre] = $true
@@ -7608,23 +7610,232 @@ function Global:Escribir-VidaSSD {
     try { if ($Global:DiagInforme -and $Global:DiagInforme.Ssd) { $Global:DiagInforme.Ssd[$nombre] = @{ Pct = $pct; Fuente = $v.Fuente; Dudoso = $dudoso; Tam = [math]::Round($Disco.Size / 1GB, 0) } } } catch { }
 }
 
+# ---------------------------------------------------------------------------
+#  INFORMACION DEL DISCO ELEGIDO Y ESTADO DE SALUD DE LOS DISCOS DUROS (HDD)
+# ---------------------------------------------------------------------------
+
+# Atributos S.M.A.R.T. del disco indicado (objeto de Get-PhysicalDisk) y bandera de "fallo previsto"
+function Global:Obtener-SmartDeDisco {
+    param($Disco)
+    $res = [PSCustomObject]@{ Attrs = @(); Prediccion = $null }
+    try {
+        $nombre = "$($Disco.FriendlyName)".Trim()
+        $token = (@($nombre -split '\s+') | Select-Object -Last 1) -replace '[^A-Za-z0-9]', ''
+        $token = $token.ToUpper()
+        if ($token.Length -gt 12) { $token = $token.Substring(0, 12) }
+        $datos = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_ATAPISmartData -ErrorAction Stop)
+        $umbr = @(); $pred = @()
+        try { $umbr = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictThresholds -ErrorAction Stop) } catch { }
+        try { $pred = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction Stop) } catch { }
+        foreach ($d in $datos) {
+            $inst = ("$($d.InstanceName)" -replace '[^A-Za-z0-9]', '').ToUpper()
+            if ($datos.Count -gt 1 -and $token.Length -ge 4 -and -not $inst.Contains($token)) { continue }
+            $u = $umbr | Where-Object { $_.InstanceName -eq $d.InstanceName } | Select-Object -First 1
+            $ub = $null; if ($u) { $ub = $u.VendorSpecific }
+            $res.Attrs = @(Convertir-AtributosSmart -Datos $d.VendorSpecific -Umbrales $ub)
+            $p = $pred | Where-Object { $_.InstanceName -eq $d.InstanceName } | Select-Object -First 1
+            if ($p) { $res.Prediccion = [bool]$p.PredictFailure }
+            break
+        }
+    } catch { }
+    return $res
+}
+
+# Datos de la unidad: serie, horas de uso, velocidad y (en SSD) lecturas/escrituras
+function Global:Obtener-InfoDisco {
+    param([string]$Unidad)
+    $num = Disco-DeUnidad $Unidad
+    if ($null -eq $num) { return $null }
+    $pd = $null; $wd = $null
+    try { $pd = Get-PhysicalDisk -ErrorAction Stop | Where-Object { "$($_.DeviceId)" -eq "$num" } | Select-Object -First 1 } catch { }
+    try { $wd = Get-CimInstance Win32_DiskDrive -ErrorAction Stop | Where-Object { "$($_.Index)" -eq "$num" } | Select-Object -First 1 } catch { }
+    if (-not $pd -and -not $wd) { return $null }
+    $o = [ordered]@{ Numero = $num; Modelo = ''; Serie = ''; Firmware = ''; Tipo = 'Desconocido'; Interfaz = ''; Rpm = 0; Horas = $null; Temp = $null; Capacidad = 0; LecHostGB = $null; EscHostGB = $null; EscNandGB = $null; Smart = $null; Disco = $pd }
+    $o.Modelo = if ($pd -and $pd.FriendlyName) { "$($pd.FriendlyName)".Trim() } elseif ($wd) { "$($wd.Model)".Trim() } else { '' }
+    $serie = ''
+    if ($pd -and $pd.SerialNumber) { $serie = "$($pd.SerialNumber)".Trim(" ", "_", ".") }
+    if (-not $serie -and $wd -and $wd.SerialNumber) { $serie = "$($wd.SerialNumber)".Trim(" ", "_", ".") }
+    $o.Serie = if ($serie) { $serie } else { 'No informado' }
+    if ($wd -and $wd.FirmwareRevision) { $o.Firmware = "$($wd.FirmwareRevision)".Trim() }
+    $o.Capacidad = if ($pd -and $pd.Size) { [double]$pd.Size } elseif ($wd) { [double]$wd.Size } else { 0 }
+    $bus = if ($pd) { "$($pd.BusType)" } elseif ($wd) { "$($wd.InterfaceType)" } else { '' }
+    $o.Interfaz = $bus
+    $media = if ($pd) { "$($pd.MediaType)" } else { '' }
+    $rpm = 0; if ($pd) { $rpm = [int](Numero-Seguro $pd.SpindleSpeed); if ($rpm -le 0 -or $rpm -ge 100000) { $rpm = 0 } }
+    $o.Rpm = $rpm
+    if ($bus -eq 'NVMe') { $o.Tipo = 'SSD NVMe' }
+    elseif ($media -eq 'SSD') { $o.Tipo = 'SSD' }
+    elseif ($media -eq 'HDD' -or $rpm -gt 0) { $o.Tipo = 'HDD' }
+    elseif ($o.Modelo -match '(?i)\bSSD\b|NVMe|M\.2') { $o.Tipo = 'SSD' }
+    # contadores de Windows
+    if ($pd) {
+        try {
+            $rc = $pd | Get-StorageReliabilityCounter -ErrorAction Stop
+            if ($rc) {
+                if ($null -ne $rc.PowerOnHours -and (Numero-Seguro $rc.PowerOnHours) -gt 0) { $o.Horas = [int64](Numero-Seguro $rc.PowerOnHours) }
+                if ($null -ne $rc.Temperature -and (Numero-Seguro $rc.Temperature) -gt 0) { $o.Temp = [int](Numero-Seguro $rc.Temperature) }
+            }
+        } catch { }
+    }
+    # S.M.A.R.T. (horas, GB leidos/escritos)
+    if ($pd -and $bus -ne 'NVMe') {
+        $sm = Obtener-SmartDeDisco -Disco $pd
+        $o.Smart = $sm
+        $at = @($sm.Attrs)
+        $g = { param($id) $at | Where-Object { $_.Id -eq $id } | Select-Object -First 1 }
+        if ($null -eq $o.Horas) { $a9 = & $g 9; if ($a9 -and $a9.Raw -gt 0) { $o.Horas = [int64]($a9.Raw -band 0xFFFFFF) } }
+        if ($null -eq $o.Temp) { $c2 = & $g 194; if ($c2) { $t = [int]($c2.Raw -band 0xFF); if ($t -gt 0 -and $t -lt 120) { $o.Temp = $t } } }
+        if ($o.Tipo -like 'SSD*') {
+            $wdFam = $o.Modelo -match '(?i)^WDC|^WD |SanDisk|WDS\d'
+            $sam = $o.Modelo -match '(?i)samsung'
+            $f1 = & $g 241; $f2 = & $g 242; $e9 = & $g 233
+            if ($wdFam) {
+                if ($f1 -and $f1.Raw -gt 0) { $o.EscHostGB = [double]$f1.Raw }
+                if ($f2 -and $f2.Raw -gt 0) { $o.LecHostGB = [double]$f2.Raw }
+                if ($e9 -and $e9.Raw -gt 0) { $o.EscNandGB = [double]$e9.Raw }
+            } elseif ($sam) {
+                if ($f1 -and $f1.Raw -gt 0) { $o.EscHostGB = [math]::Round([double]$f1.Raw * 512 / 1GB, 0) }
+                if ($f2 -and $f2.Raw -gt 0) { $o.LecHostGB = [math]::Round([double]$f2.Raw * 512 / 1GB, 0) }
+            }
+        }
+    }
+    return [PSCustomObject]$o
+}
+
+# Texto de la tarjeta "Datos de la unidad" que se ve al elegir la unidad
+function Global:Texto-InfoDisco {
+    param($i)
+    if (-not $i) { return "No se pudo identificar el disco fisico de esta unidad (puede ser una unidad virtual o de red)." }
+    $l = New-Object System.Collections.Generic.List[string]
+    $l.Add("$($i.Modelo)  |  $($i.Tipo)  |  $(Format-TamanoDisco $i.Capacidad)  |  Interfaz: $($i.Interfaz)")
+    $fw = if ($i.Firmware) { "  |  Firmware: $($i.Firmware)" } else { '' }
+    $l.Add("N° de serie: $($i.Serie)$fw")
+    $h = if ($null -ne $i.Horas) { "{0:N0} h (~{1:N0} dias encendido)" -f $i.Horas, ($i.Horas / 24) } else { 'no informado' }
+    $v = if ($i.Tipo -eq 'HDD') { if ($i.Rpm -gt 0) { "$($i.Rpm) RPM" } else { 'no informada' } } elseif ($i.Tipo -like 'SSD*') { 'SSD (sin partes moviles)' } else { 'no informada' }
+    $t = if ($null -ne $i.Temp) { "  |  Temperatura: $($i.Temp) °C" } else { '' }
+    $l.Add("Horas de uso: $h  |  Velocidad: $v$t")
+    if ($i.Tipo -like 'SSD*') {
+        $f = { param($x) if ($null -ne $x) { "{0:N0} GB" -f $x } else { 'no disponible' } }
+        $l.Add("Lecturas del host: $(& $f $i.LecHostGB)  |  Escrituras del host: $(& $f $i.EscHostGB)  |  Escrituras a NAND: $(& $f $i.EscNandGB)")
+    }
+    return ($l -join "`r`n")
+}
+
+# Refresca la tarjeta de informacion segun la unidad elegida en el panel
+function Global:Mostrar-InfoUnidad {
+    $caja = $Global:TxtInfoUnidad
+    if (-not $caja) { return }
+    $u = Unidad-Diag
+    $caja.Text = "Leyendo datos de la unidad $u..."
+    try { Wait-UI -Milisegundos 1 } catch { }
+    try { $caja.Text = Texto-InfoDisco (Obtener-InfoDisco -Unidad $u) } catch { $caja.Text = "No se pudieron leer los datos de la unidad $u : $($_.Exception.Message)" }
+}
+
+# Escribe en el diagnostico la identificacion del disco (serie, horas, velocidad, NAND)
+function Global:Escribir-InfoDisco {
+    param($Info)
+    if (-not $Info) { return }
+    foreach ($ln in @((Texto-InfoDisco $Info) -split "`r?`n")) { Write-DiagLog "     $ln" }
+}
+
+# Evalua el estado de un disco duro: Bueno / En riesgo / Malo
+function Global:Evaluar-SaludHDD {
+    param($Smart, $Horas, $Temp)
+    $at = @($Smart.Attrs)
+    $raw = { param($id) $a = $at | Where-Object { $_.Id -eq $id } | Select-Object -First 1; if ($a) { [int64]([int64]$a.Raw -band [int64]4294967295) } else { $null } }
+    $malo = New-Object System.Collections.Generic.List[string]
+    $riesgo = New-Object System.Collections.Generic.List[string]
+    $datos = New-Object System.Collections.Generic.List[string]
+    if ($Smart.Prediccion -eq $true) { $malo.Add("Windows/S.M.A.R.T. predice un fallo inminente del disco") }
+    $realoc = & $raw 5; $pend = & $raw 197; $incorr = & $raw 198; $off = & $raw 187; $giro = & $raw 10; $crc = & $raw 199; $reev = & $raw 196
+    if ($null -ne $realoc) { $datos.Add("Sectores reasignados: $realoc") }
+    if ($null -ne $pend) { $datos.Add("Sectores pendientes: $pend") }
+    if ($null -ne $incorr) { $datos.Add("Sectores no corregibles: $incorr") }
+    if ($null -ne $giro) { $datos.Add("Reintentos de giro: $giro") }
+    if ($null -ne $crc) { $datos.Add("Errores CRC: $crc") }
+    if ($null -ne $realoc) { if ($realoc -ge 100) { $malo.Add("$realoc sectores reasignados (muchos)") } elseif ($realoc -gt 0) { $riesgo.Add("$realoc sector(es) reasignado(s): la superficie ya esta fallando") } }
+    if ($null -ne $pend) { if ($pend -ge 50) { $malo.Add("$pend sectores pendientes de reasignar") } elseif ($pend -gt 0) { $riesgo.Add("$pend sector(es) pendiente(s) de reasignar") } }
+    if ($null -ne $incorr) { if ($incorr -ge 50) { $malo.Add("$incorr sectores no corregibles") } elseif ($incorr -gt 0) { $riesgo.Add("$incorr sector(es) no corregible(s)") } }
+    if ($null -ne $off -and $off -gt 0) { $riesgo.Add("$off error(es) no corregibles notificados") }
+    if ($null -ne $giro -and $giro -gt 0) { $riesgo.Add("$giro reintento(s) de giro del motor") }
+    if ($null -ne $crc -and $crc -gt 0) { $riesgo.Add("$crc error(es) de comunicacion CRC (revisa cable/puerto SATA)") }
+    if ($null -ne $reev -and $reev -gt 0) { $riesgo.Add("$reev evento(s) de reasignacion") }
+    # valores normalizados cerca o por debajo del umbral del fabricante
+    foreach ($a in $at) {
+        if ($a.Umbral -gt 0 -and $a.Id -in 1, 2, 3, 4, 5, 7, 8, 10, 196, 197, 198, 199, 200) {
+            if ($a.Valor -le $a.Umbral) { $malo.Add(("Atributo {0:X2}h por debajo del umbral del fabricante ({1} <= {2})" -f $a.Id, $a.Valor, $a.Umbral)) }
+            elseif ($a.Valor -le ($a.Umbral + 10)) { $riesgo.Add(("Atributo {0:X2}h cerca del umbral del fabricante ({1} / umbral {2})" -f $a.Id, $a.Valor, $a.Umbral)) }
+        }
+    }
+    if ($null -ne $Horas) {
+        if ($Horas -ge 50000) { $riesgo.Add(("{0:N0} horas de uso: disco muy veterano" -f $Horas)) }
+        elseif ($Horas -ge 35000) { $riesgo.Add(("{0:N0} horas de uso: disco con mucho uso" -f $Horas)) }
+    }
+    if ($null -ne $Temp) {
+        if ($Temp -ge 60) { $malo.Add("Temperatura muy alta ($Temp °C)") }
+        elseif ($Temp -ge 50) { $riesgo.Add("Temperatura alta ($Temp °C)") }
+    }
+    $estado = 'Bueno'
+    if ($malo.Count -gt 0) { $estado = 'Malo' } elseif ($riesgo.Count -gt 0) { $estado = 'En riesgo' }
+    $motivos = @($malo) + @($riesgo)
+    return [PSCustomObject]@{ Estado = $estado; Motivos = $motivos; Datos = @($datos) }
+}
+
+# Muestra el estado del disco duro (una vez por prueba) y lo guarda para el informe PDF
+function Global:Escribir-EstadoHDD {
+    param($Disco)
+    $nombre = "$($Disco.FriendlyName)".Trim()
+    $rpm = [int](Numero-Seguro $Disco.SpindleSpeed)
+    $esHdd = ("$($Disco.MediaType)" -eq 'HDD') -or ($rpm -gt 0 -and $rpm -lt 100000)
+    if (-not $esHdd) { return }
+    if (-not $Global:VidaSsdImpresa) { $Global:VidaSsdImpresa = @{} }
+    $clave = "HDD:$nombre"
+    if ($Global:VidaSsdImpresa.ContainsKey($clave)) { return }
+    $Global:VidaSsdImpresa[$clave] = $true
+    $sm = Obtener-SmartDeDisco -Disco $Disco
+    if (@($sm.Attrs).Count -eq 0 -and $null -eq $sm.Prediccion) {
+        Write-DiagLog "     🩺 ESTADO DEL DISCO DURO: no determinado (este disco o su controlador no entrega datos S.M.A.R.T.; prueba con CrystalDiskInfo)."
+        return
+    }
+    $horas = $null; $temp = $null
+    try {
+        $rc = $Disco | Get-StorageReliabilityCounter -ErrorAction Stop
+        if ($rc -and (Numero-Seguro $rc.PowerOnHours) -gt 0) { $horas = [int64](Numero-Seguro $rc.PowerOnHours) }
+        if ($rc -and (Numero-Seguro $rc.Temperature) -gt 0) { $temp = [int](Numero-Seguro $rc.Temperature) }
+    } catch { }
+    $a9 = @($sm.Attrs) | Where-Object { $_.Id -eq 9 } | Select-Object -First 1
+    if ($null -eq $horas -and $a9 -and $a9.Raw -gt 0) { $horas = [int64]($a9.Raw -band 0xFFFFFF) }
+    if ($null -eq $temp) { $c2 = @($sm.Attrs) | Where-Object { $_.Id -eq 194 } | Select-Object -First 1; if ($c2) { $tt = [int]($c2.Raw -band 0xFF); if ($tt -gt 0 -and $tt -lt 120) { $temp = $tt } } }
+    $ev = Evaluar-SaludHDD -Smart $sm -Horas $horas -Temp $temp
+    $icono = switch ($ev.Estado) { 'Bueno' { '🟢' } 'En riesgo' { '🟠' } default { '🔴' } }
+    Write-DiagLog "     $icono ESTADO DEL DISCO DURO: $($ev.Estado.ToUpper())"
+    if ($ev.Datos.Count) { Write-DiagLog "     $($ev.Datos -join ' | ')" }
+    foreach ($m in $ev.Motivos) { Write-DiagLog "       - $m" }
+    switch ($ev.Estado) {
+        'Bueno' { Diag-Ok "El disco duro esta en buen estado (sin sectores danados ni alertas S.M.A.R.T.)." }
+        'En riesgo' { Diag-Aviso "Disco duro EN RIESGO: hay senales de desgaste o errores. Haz copia de seguridad de tus datos y vigilalo." }
+        default { Diag-Aviso "Disco duro en MAL ESTADO: copia de seguridad inmediata y reemplazo urgente." }
+    }
+    try { if ($Global:DiagInforme -and $Global:DiagInforme.Ssd) { $Global:DiagInforme.Ssd[$nombre] = @{ Tipo = 'HDD'; Estado = $ev.Estado; Motivos = @($ev.Motivos); Pct = -1; Fuente = 'S.M.A.R.T.'; Dudoso = $false; Tam = [math]::Round($Disco.Size / 1GB, 0); Horas = $horas } } } catch { }
+}
+
 function Accion-DiscoVidaSSD {
     $uSel = Unidad-Diag
     $numSel = Disco-DeUnidad $uSel
-    Write-DiagLog "=== VIDA UTIL DEL SSD (porcentaje restante) - unidad $uSel ==="
+    Write-DiagLog "=== VIDA UTIL / ESTADO DEL DISCO - unidad $uSel ==="
+    $info = $null
+    try { $info = Obtener-InfoDisco -Unidad $uSel } catch { }
     $hay = $false
     try {
         foreach ($d in @(Get-PhysicalDisk -ErrorAction Stop)) {
             if ($null -ne $numSel -and "$($d.DeviceId)" -ne "$numSel") { continue }
-            $n = "$($d.FriendlyName)"
-            if (("$($d.MediaType)" -eq 'SSD') -or ("$($d.BusType)" -eq 'NVMe') -or ($n -match '(?i)\bSSD\b|NVMe|M\.2')) {
-                $hay = $true
-                Write-DiagLog " - $n | $($d.MediaType) | $($d.BusType) | $([math]::Round($d.Size / 1GB, 0)) GB | Salud: $($d.HealthStatus)"
-                Escribir-VidaSSD -Disco $d
-            }
+            $hay = $true
+            Write-DiagLog " - $($d.FriendlyName) | $($d.MediaType) | $($d.BusType) | $([math]::Round($d.Size / 1GB, 0)) GB | Salud: $($d.HealthStatus)"
+            if ($info -and "$($info.Numero)" -eq "$($d.DeviceId)") { Escribir-InfoDisco -Info $info }
+            Escribir-VidaSSD -Disco $d
         }
     } catch { Write-DiagLog "No se pudo consultar los discos fisicos." }
-    if (-not $hay) { Write-DiagLog "La unidad $uSel no esta en un SSD/NVMe (o no se pudo identificar su disco). Los discos mecanicos no tienen un % de vida: revisa S.M.A.R.T. y sectores." }
+    if (-not $hay) { Write-DiagLog "No se pudo identificar el disco fisico de la unidad $uSel." }
 }
 
 # ---------------------------- CPU ----------------------------
@@ -14659,6 +14870,9 @@ Marcar-Arranque 'funciones y recursos'
                                             <ComboBox x:Name="CmbDiagUnidad" Width="400" Height="34" Margin="0,0,8,0"/>
                                             <Button x:Name="BtnDiagUnidadRefrescar" Content="🔄" Width="44" Height="34" ToolTip="Actualizar la lista de unidades"/>
                                         </WrapPanel>
+                                        <Border Background="#66151B27" BorderBrush="#33509BFF" BorderThickness="1" CornerRadius="8" Padding="10,8" Margin="0,0,0,10">
+                                            <TextBlock x:Name="TxtInfoUnidad" Foreground="#BFD2F2" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" Text="Elige una unidad para ver su numero de serie, horas de uso, velocidad y datos del disco."/>
+                                        </Border>
                                         <WrapPanel>
                                             <Button x:Name="BtnDiscoCompleto" Content="💽 Diagnostico completo de disco" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnProbarAlmacenamiento" Content="💽 Salud y espacio (resumen)" Width="212" Height="42" FontSize="12"/>
@@ -14672,7 +14886,7 @@ Marcar-Arranque 'funciones y recursos'
                                             <Button x:Name="BtnDiscoActividad" Content="📈 Actividad en vivo (6 s)" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnDiscoEventos" Content="📜 Eventos de error de disco" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnDiscoDefrag" Content="🧹 Fragmentacion / optimizacion" Width="212" Height="42" FontSize="12"/>
-                                            <Button x:Name="BtnDiscoVidaSsd" Content="💽 Vida util del SSD (%)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoVidaSsd" Content="💽 Vida util / estado del disco" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnDiscoEstres" Content="🔥 Prueba de estres (por tiempo)" Width="212" Height="42" FontSize="12"/>
                                         </WrapPanel>
                                     </StackPanel>
@@ -15983,10 +16197,13 @@ $window.FindName("BtnCpuInfo").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Informac
 $window.FindName("BtnCpuNucleos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Uso por nucleos' -Icono '📊' -Accion { Accion-CpuUsoNucleos } })
 $window.FindName("BtnCpuEstabilidad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Estabilidad del CPU' -Icono '🔥' -Accion { Accion-CpuEstabilidad } })
 $window.FindName("BtnCpuIntegridad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Integridad de calculo' -Icono '✅' -Accion { Accion-CpuIntegridad } })
-$window.FindName("BtnDiscoVidaSsd").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Vida util del SSD' -Icono '💽' -Accion { Accion-DiscoVidaSSD } })
+$window.FindName("BtnDiscoVidaSsd").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Vida util y estado del disco' -Icono '💽' -Accion { Accion-DiscoVidaSSD } })
 $Global:CmbDiagUnidad = $window.FindName("CmbDiagUnidad")
 try { Cargar-UnidadesDiag } catch { }
-$window.FindName("BtnDiagUnidadRefrescar").Add_Click({ Cargar-UnidadesDiag })
+$Global:TxtInfoUnidad = $window.FindName("TxtInfoUnidad")
+$Global:CmbDiagUnidad.Add_SelectionChanged({ if (-not $Global:CargandoUnidades) { Mostrar-InfoUnidad } })
+$window.FindName("PanelDiag_Disco").Add_IsVisibleChanged({ if ($window.FindName("PanelDiag_Disco").IsVisible) { Mostrar-InfoUnidad } })
+$window.FindName("BtnDiagUnidadRefrescar").Add_Click({ Cargar-UnidadesDiag; Mostrar-InfoUnidad })
 $window.FindName("BtnDiscoEstres").Add_Click({ Show-PruebaEstresDisco })
 $window.FindName("BtnMouseDispositivos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Dispositivos de puntero' -Icono '🔎' -Accion { Accion-MouseDispositivos } })
 $window.FindName("BtnMouseBotones").Add_Click({ Show-PruebaBotonesMouse })
@@ -16473,9 +16690,16 @@ table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
         [void]$h.Append("</table>")
         $nSec = 2
         if ($inf.Ssd -and $inf.Ssd.Count -gt 0) {
-            [void]$h.Append("<h2>2. Vida útil del SSD</h2>")
+            [void]$h.Append("<h2>2. Estado y vida útil del disco</h2>")
             foreach ($kv in @($inf.Ssd.GetEnumerator() | Sort-Object Name)) {
                 $p = [int]$kv.Value.Pct
+                if ($kv.Value.Tipo -eq 'HDD') {
+                    $colH = switch ($kv.Value.Estado) { 'Bueno' { '#1fa75a' } 'En riesgo' { '#e0a100' } default { '#d62c2c' } }
+                    $mot = if (@($kv.Value.Motivos).Count -gt 0) { (@($kv.Value.Motivos) -join ' · ') } else { 'Sin sectores danados ni alertas S.M.A.R.T.' }
+                    $hr = if ($null -ne $kv.Value.Horas) { " · {0:N0} h de uso" -f $kv.Value.Horas } else { '' }
+                    [void]$h.Append("<div class='ssd'><div class='n'>$(& $enc $kv.Key) &nbsp;<span style='color:$colH'>Disco duro: $(& $enc $kv.Value.Estado)</span></div><div class='f'>$(& $enc $mot) · Capacidad $($kv.Value.Tam) GB$hr</div></div>")
+                    continue
+                }
                 if ($kv.Value.Dudoso) {
                     [void]$h.Append("<div class='ssd'><div class='n'>$(& $enc $kv.Key) &nbsp;<span style='color:#7a88a6'>No confirmada</span></div><div class='bar'><div style='width:0%'></div></div><div class='f'>El SSD no entrega un indicador de vida confiable por S.M.A.R.T.; verificar con la herramienta del fabricante · Capacidad $($kv.Value.Tam) GB</div></div>")
                     continue
