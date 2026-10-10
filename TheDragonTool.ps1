@@ -360,9 +360,25 @@ $Global:RecursosGridXaml = @'
 function Global:Obtener-PincelNeon {
     param($Elemento, [string]$Clave = "NeonBrush")
     $p = $Elemento.FindResource($Clave)
-    if ($p -and $p.IsFrozen) {
-        $p = $p.Clone()
-        $Elemento.Resources[$Clave] = $p
+    # Se comprueba que el pincel y su transformacion sean modificables; si no lo son (o no se puede
+    # saber), se construye un pincel nuevo identico, 100% animable, y se instala en lugar del original.
+    $ok = $false
+    try {
+        $t = $p.RelativeTransform
+        $ok = (-not $p.IsFrozen) -and ($t -is [System.Windows.Media.TranslateTransform]) -and (-not $t.IsFrozen) -and (-not $t.IsSealed)
+    } catch { $ok = $false }
+    if (-not $ok -and $p -is [System.Windows.Media.LinearGradientBrush]) {
+        $n = New-Object System.Windows.Media.LinearGradientBrush
+        $n.MappingMode = $p.MappingMode
+        $n.StartPoint = $p.StartPoint
+        $n.EndPoint = $p.EndPoint
+        $n.SpreadMethod = $p.SpreadMethod
+        foreach ($gs in @($p.GradientStops)) {
+            [void]$n.GradientStops.Add((New-Object System.Windows.Media.GradientStop($gs.Color, $gs.Offset)))
+        }
+        $n.RelativeTransform = New-Object System.Windows.Media.TranslateTransform(0, 0)
+        $Elemento.Resources[$Clave] = $n
+        $p = $n
     }
     return $p
 }
@@ -386,7 +402,10 @@ function Global:Animar-PincelNeon {
             $mov.BeginAnimation($propiedad, $flujo)
         }
         return $true
-    } catch { return $false }
+    } catch {
+        $Global:ErrorPincelNeon = "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+        return $false
+    }
 }
 
 # Animaciones de entrada reutilizables ---------------------------------------------------
@@ -3656,6 +3675,7 @@ function Global:Write-DiagLog {
         $caja.AppendText("$Mensaje`r`n")
         $caja.ScrollToEnd()
     }
+    if ($Global:DiagStats) { $Global:DiagStats.Lineas++; if ($Global:DiagEnCurso) { Actualizar-DiagChips } }
     # Write-Log siempre recibe -Tipo INFO desde aqui (para no romper el formato
     # del registro de diagnostico), asi que los fallos de las pruebas se
     # detectan por patrones de texto y se registran aparte para la pestaña de
@@ -4954,11 +4974,347 @@ function Show-SeleccionPruebaRAM {
 #  PRUEBAS DE DIAGNOSTICO (hardware / sistema) - versiones reforzadas
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+#  TARJETA ANIMADA DE PROGRESO DE LAS PRUEBAS DE DIAGNOSTICO
+#  Anillo giratorio, icono que pulsa, barra de progreso con brillo, cronometro,
+#  contadores en vivo y efectos finales (confeti si todo esta bien, sacudida si hay avisos).
+#  Las animaciones son "independientes" de WPF: siguen fluidas aunque la prueba ocupe el hilo.
+# ---------------------------------------------------------------------------
+$Global:DiagUi = $null
+$Global:DiagEnCurso = $false
+$Global:DiagCancelada = $false
+$Global:DiagStats = @{ Ok = 0; Aviso = 0; Lineas = 0 }
+$Global:DiagReloj = New-Object System.Diagnostics.Stopwatch
+$Global:DiagTimer = $null
+$Global:DiagShimmerListo = $false
+
+function Global:Obtener-DiagUi {
+    if ($Global:DiagUi) { return $Global:DiagUi }
+    $nombres = @('PanelDiagProgreso', 'GlowDiag', 'AroDiag', 'GiroDiag', 'IcoDiag', 'EscIcoDiag', 'TxtDiagTitulo', 'TxtDiagSub', 'TxtDiagTiempo',
+                 'PbDiag', 'MarqueeDiag', 'SegDiag', 'MovSegDiag', 'ChipOkDiag', 'ChipAvDiag', 'ChipLinDiag', 'CanvasConfetiDiag',
+                 'EscDiagCard', 'MovDiagCard', 'ScrollDiagIzq')
+    $u = @{}
+    foreach ($n in $nombres) { $u[$n] = $window.FindName($n) }
+    if (-not $u.PanelDiagProgreso) { return $null }
+    $Global:DiagUi = $u
+    return $u
+}
+
+function Global:Nuevo-PincelDiag {
+    param([string]$Hex)
+    $c = New-Object System.Windows.Media.BrushConverter
+    return $c.ConvertFromString($Hex)
+}
+
+function Global:Actualizar-DiagChips {
+    try {
+        $u = Obtener-DiagUi; if (-not $u) { return }
+        $u.ChipOkDiag.Text = "✔ $($Global:DiagStats.Ok)"
+        $u.ChipAvDiag.Text = "⚠ $($Global:DiagStats.Aviso)"
+        $u.ChipLinDiag.Text = "📝 $($Global:DiagStats.Lineas)"
+    } catch {}
+}
+
+function Global:Actualizar-DiagTiempo {
+    try {
+        $u = Obtener-DiagUi; if (-not $u) { return }
+        $u.TxtDiagTiempo.Text = "⏱ " + $Global:DiagReloj.Elapsed.ToString('mm\:ss')
+    } catch {}
+}
+
+# Pone en marcha las animaciones continuas de la tarjeta
+function Global:Diag-Animar {
+    $u = Obtener-DiagUi; if (-not $u) { return }
+    $suave = New-Object System.Windows.Media.Animation.SineEase
+    $suave.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseInOut
+    # Anillo giratorio
+    $giro = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $giro.From = 0; $giro.To = 360
+    $giro.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(1800))
+    $giro.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $u.GiroDiag.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $giro)
+    # Icono que late
+    $pulso = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $pulso.From = 0.85; $pulso.To = 1.2
+    $pulso.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(650))
+    $pulso.AutoReverse = $true
+    $pulso.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $pulso.EasingFunction = $suave
+    $u.EscIcoDiag.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $pulso)
+    $u.EscIcoDiag.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $pulso)
+    # Segmento que recorre la barra cuando no se conoce el porcentaje
+    $ancho = 380
+    try { if ($u.MarqueeDiag.ActualWidth -gt 60) { $ancho = $u.MarqueeDiag.ActualWidth } } catch {}
+    $barrido = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $barrido.From = -130; $barrido.To = $ancho + 20
+    $barrido.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(1400))
+    $barrido.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $u.MovSegDiag.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $barrido)
+    # Halo que respira
+    $halo = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $halo.From = 0.25; $halo.To = 0.75
+    $halo.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(900))
+    $halo.AutoReverse = $true
+    $halo.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $u.GlowDiag.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $halo)
+    # Brillo y aura de la barra de progreso (partes de su plantilla)
+    if (-not $Global:DiagShimmerListo) {
+        try {
+            [void]$u.PbDiag.ApplyTemplate()
+            $brillo = $u.PbDiag.Template.FindName("Brillo", $u.PbDiag)
+            $aura = $u.PbDiag.Template.FindName("Aura", $u.PbDiag)
+            if ($brillo) {
+                $b = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $b.From = -100; $b.To = $ancho + 100
+                $b.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(1500))
+                $b.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+                $brillo.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $b)
+            }
+            if ($aura) {
+                $a = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $a.From = 0.15; $a.To = 0.65
+                $a.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(900))
+                $a.AutoReverse = $true
+                $a.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+                $aura.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $a)
+            }
+            $Global:DiagShimmerListo = $true
+        } catch {}
+    }
+}
+
+function Global:Diag-DetenerAnimaciones {
+    $u = Obtener-DiagUi; if (-not $u) { return }
+    try {
+        $u.GiroDiag.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
+        $u.EscIcoDiag.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $null)
+        $u.EscIcoDiag.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null)
+        $u.MovSegDiag.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null)
+        $u.GlowDiag.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+        $u.GiroDiag.Angle = 0
+        $u.EscIcoDiag.ScaleX = 1; $u.EscIcoDiag.ScaleY = 1
+    } catch {}
+}
+
+function Global:Diag-Inicio {
+    param([string]$Nombre, [string]$Icono = '🔎')
+    $u = Obtener-DiagUi; if (-not $u) { return }
+    try {
+        $Global:DiagStats.Ok = 0; $Global:DiagStats.Aviso = 0; $Global:DiagStats.Lineas = 0
+        foreach ($p in @([System.Windows.Media.ScaleTransform]::ScaleXProperty, [System.Windows.Media.ScaleTransform]::ScaleYProperty)) { $u.EscDiagCard.BeginAnimation($p, $null) }
+        $u.MovDiagCard.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null)
+        $u.PanelDiagProgreso.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+        $u.PbDiag.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty, $null)
+        $u.EscDiagCard.ScaleX = 1; $u.EscDiagCard.ScaleY = 1; $u.MovDiagCard.X = 0
+        $u.CanvasConfetiDiag.Children.Clear()
+        $u.PbDiag.Value = 0
+        $u.PbDiag.Visibility = 'Collapsed'
+        $u.MarqueeDiag.Visibility = 'Visible'
+        $u.IcoDiag.Text = $Icono
+        $u.TxtDiagTitulo.Text = "Analizando: $Nombre"
+        $u.TxtDiagSub.Text = "Preparando la prueba..."
+        $u.GlowDiag.Background = (Nuevo-PincelDiag '#00B7FF')
+        $u.TxtDiagTiempo.Text = "⏱ 00:00"
+        Actualizar-DiagChips
+        $u.PanelDiagProgreso.Visibility = 'Visible'
+        Diag-Animar
+        # Entrada: aparece con un pequeno rebote
+        $rebote = New-Object System.Windows.Media.Animation.BackEase
+        $rebote.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $rebote.Amplitude = 0.5
+        foreach ($p in @([System.Windows.Media.ScaleTransform]::ScaleXProperty, [System.Windows.Media.ScaleTransform]::ScaleYProperty)) {
+            $e = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $e.From = 0.8; $e.To = 1
+            $e.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(450))
+            $e.EasingFunction = $rebote
+            $u.EscDiagCard.BeginAnimation($p, $e)
+        }
+        $f = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $f.From = 0; $f.To = 1
+        $f.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(300))
+        $u.PanelDiagProgreso.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $f)
+        # Cronometro
+        $Global:DiagReloj.Restart()
+        if (-not $Global:DiagTimer) {
+            $Global:DiagTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $Global:DiagTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+            $Global:DiagTimer.Add_Tick({ Actualizar-DiagTiempo })
+        }
+        $Global:DiagTimer.Start()
+    } catch {}
+}
+
+# Cambia a barra con porcentaje real (suave) y actualiza el texto de estado
+function Global:Diag-Progreso {
+    param([double]$Pct, [string]$Texto = '')
+    if (-not $Global:DiagEnCurso) { return }
+    $u = Obtener-DiagUi; if (-not $u) { return }
+    try {
+        if ($u.PbDiag.Visibility -ne 'Visible') {
+            $u.MarqueeDiag.Visibility = 'Collapsed'
+            $u.PbDiag.Visibility = 'Visible'
+        }
+        $v = [Math]::Max(0, [Math]::Min(100, $Pct))
+        $an = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $an.To = $v
+        $an.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(350))
+        $ease = New-Object System.Windows.Media.Animation.CubicEase
+        $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $an.EasingFunction = $ease
+        $u.PbDiag.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty, $an)
+        if ($Texto) { $u.TxtDiagSub.Text = $Texto }
+        Wait-UI -Milisegundos 1
+    } catch {}
+}
+
+# Solo cambia el texto de estado (para pruebas sin porcentaje conocido)
+function Global:Diag-Texto {
+    param([string]$Texto)
+    if (-not $Global:DiagEnCurso) { return }
+    try { $u = Obtener-DiagUi; if ($u) { $u.TxtDiagSub.Text = $Texto } } catch {}
+}
+
+function Global:Diag-Confeti {
+    $u = Obtener-DiagUi; if (-not $u) { return }
+    try {
+        $cv = $u.CanvasConfetiDiag
+        $cv.Children.Clear()
+        $colores = @('#29D398', '#00B7FF', '#FFFFFF', '#FFC857', '#5B9CFF', '#FF7AC6')
+        $cx = 34.0; $cy = 36.0
+        for ($i = 0; $i -lt 26; $i++) {
+            $tam = Get-Random -Minimum 5 -Maximum 10
+            $r = New-Object System.Windows.Shapes.Rectangle
+            $r.Width = $tam; $r.Height = $tam
+            $r.RadiusX = 2; $r.RadiusY = 2
+            $r.Fill = (Nuevo-PincelDiag $colores[$i % $colores.Count])
+            $r.IsHitTestVisible = $false
+            $grupo = New-Object System.Windows.Media.TransformGroup
+            $mov = New-Object System.Windows.Media.TranslateTransform
+            $rot = New-Object System.Windows.Media.RotateTransform
+            [void]$grupo.Children.Add($rot); [void]$grupo.Children.Add($mov)
+            $r.RenderTransform = $grupo
+            $r.RenderTransformOrigin = [System.Windows.Point]::new(0.5, 0.5)
+            [System.Windows.Controls.Canvas]::SetLeft($r, $cx)
+            [System.Windows.Controls.Canvas]::SetTop($r, $cy)
+            [void]$cv.Children.Add($r)
+            $ang = (Get-Random -Minimum 0 -Maximum 360) * [Math]::PI / 180.0
+            $dist = Get-Random -Minimum 60 -Maximum 190
+            $seg = (Get-Random -Minimum 800 -Maximum 1500)
+            $dur = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($seg))
+            $suave = New-Object System.Windows.Media.Animation.CubicEase
+            $suave.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $ax = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $ax.From = 0; $ax.To = [Math]::Cos($ang) * $dist; $ax.Duration = $dur; $ax.EasingFunction = $suave
+            $ay = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $ay.From = 0; $ay.To = [Math]::Sin($ang) * $dist + 45; $ay.Duration = $dur; $ay.EasingFunction = $suave
+            $ar = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $ar.From = 0; $ar.To = (Get-Random -Minimum -540 -Maximum 540); $ar.Duration = $dur
+            $ao = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $ao.From = 1; $ao.To = 0; $ao.BeginTime = [TimeSpan]::FromMilliseconds($seg * 0.45)
+            $ao.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($seg * 0.55))
+            $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $ax)
+            $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $ay)
+            $rot.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $ar)
+            $r.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $ao)
+        }
+    } catch {}
+}
+
+function Global:Diag-Ocultar {
+    $u = Obtener-DiagUi; if (-not $u) { return }
+    try {
+        if ($Global:DiagTimer) { $Global:DiagTimer.Stop() }
+        $Global:DiagReloj.Stop()
+        Diag-DetenerAnimaciones
+        $u.CanvasConfetiDiag.Children.Clear()
+        $u.PanelDiagProgreso.Visibility = 'Collapsed'
+    } catch {}
+}
+
+function Global:Diag-Fin {
+    param([string]$Nombre)
+    $u = Obtener-DiagUi; if (-not $u) { return }
+    try {
+        if ($Global:DiagTimer) { $Global:DiagTimer.Stop() }
+        $Global:DiagReloj.Stop()
+        Actualizar-DiagTiempo
+        Diag-DetenerAnimaciones
+        Actualizar-DiagChips
+        # La barra se llena hasta el 100%
+        $u.MarqueeDiag.Visibility = 'Collapsed'
+        $u.PbDiag.Visibility = 'Visible'
+        $an = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $an.To = 100
+        $an.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(450))
+        $u.PbDiag.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty, $an)
+        $av = [int]$Global:DiagStats.Aviso
+        $u.GlowDiag.Opacity = 0.8
+        if ($av -eq 0) {
+            $u.IcoDiag.Text = '✅'
+            $u.TxtDiagTitulo.Text = "Completado: $Nombre"
+            $u.TxtDiagSub.Text = "Sin advertencias: todo en orden."
+            $u.GlowDiag.Background = (Nuevo-PincelDiag '#29D398')
+            # Pequeno "pop" de celebracion y confeti
+            $pop = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $pop.From = 1; $pop.To = 1.07
+            $pop.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(170))
+            $pop.AutoReverse = $true
+            foreach ($p in @([System.Windows.Media.ScaleTransform]::ScaleXProperty, [System.Windows.Media.ScaleTransform]::ScaleYProperty)) { $u.EscDiagCard.BeginAnimation($p, $pop) }
+            Diag-Confeti
+        } else {
+            $u.IcoDiag.Text = '⚠️'
+            $u.TxtDiagTitulo.Text = "Completado con avisos: $Nombre"
+            $u.TxtDiagSub.Text = "$av advertencia(s). Revisa las lineas con ⚠ en los resultados."
+            $u.GlowDiag.Background = (Nuevo-PincelDiag '#FFC857')
+            # Sacudida para llamar la atencion
+            $sacude = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+            $valores = @(@(0, 0), @(-9, 60), @(9, 120), @(-7, 180), @(7, 240), @(-3, 290), @(0, 340))
+            foreach ($kv in $valores) {
+                $kt = [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds($kv[1]))
+                [void]$sacude.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame -ArgumentList @([double]$kv[0], $kt)))
+            }
+            $u.MovDiagCard.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $sacude)
+        }
+        # El icono hace un pequeno rebote al cambiar
+        $ico = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $ico.From = 0.3; $ico.To = 1
+        $ico.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(420))
+        $bk = New-Object System.Windows.Media.Animation.BackEase
+        $bk.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $bk.Amplitude = 0.8
+        $ico.EasingFunction = $bk
+        $u.EscIcoDiag.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $ico)
+        $u.EscIcoDiag.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $ico)
+    } catch {}
+}
+
+# Envoltorio: muestra la tarjeta animada mientras corre una prueba automatica
+function Global:Ejecutar-PruebaDiag {
+    param([string]$Nombre, [string]$Icono = '🔎', [scriptblock]$Accion)
+    if ($Global:DiagEnCurso) { return }
+    $Global:DiagEnCurso = $true
+    $Global:DiagCancelada = $false
+    $u = Obtener-DiagUi
+    try {
+        if ($u) { $u.ScrollDiagIzq.IsEnabled = $false }
+        Diag-Inicio -Nombre $Nombre -Icono $Icono
+        Wait-UI -Milisegundos 30
+        & $Accion
+    } catch {
+        Write-DiagLog "No se pudo completar '$Nombre': $($_.Exception.Message)"
+    } finally {
+        $Global:DiagEnCurso = $false
+        try { if ($u) { $u.ScrollDiagIzq.IsEnabled = $true } } catch {}
+        if ($Global:DiagCancelada) { Diag-Ocultar } else { Diag-Fin -Nombre $Nombre }
+    }
+}
+
 $Script:DiagAdvertencias = 0
-function Global:Diag-Ok { param([string]$m) Write-DiagLog "   ✔ $m" }
+function Global:Diag-Ok { param([string]$m) $Global:DiagStats.Ok++; Write-DiagLog "   ✔ $m" }
 function Global:Diag-Aviso {
     param([string]$m)
     $Script:DiagAdvertencias++
+    $Global:DiagStats.Aviso++
     Write-DiagLog "   ⚠ ATENCION: $m"
 }
 
@@ -5022,7 +5378,7 @@ function Accion-ProbarVelocidadDisco {
         Write-DiagLog "Escribiendo $tamanoMB MB (con escritura directa a disco)..."
         $fs = New-Object System.IO.FileStream($archivoPrueba, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 4MB, [System.IO.FileOptions]::WriteThrough)
         $cron = [System.Diagnostics.Stopwatch]::StartNew()
-        for ($i = 0; $i -lt $bloques; $i++) { $fs.Write($bloque, 0, $bloque.Length); if ($i % 8 -eq 0) { Wait-UI -Milisegundos 1 } }
+        for ($i = 0; $i -lt $bloques; $i++) { $fs.Write($bloque, 0, $bloque.Length); if ($i % 4 -eq 0) { Diag-Progreso -Pct (($i / [Math]::Max(1,$bloques)) * 50) -Texto "Escribiendo $tamanoMB MB en el disco..." } }
         $fs.Flush($true); $cron.Stop(); $fs.Close()
         $vEsc = [math]::Round($tamanoMB / [math]::Max(0.001, $cron.Elapsed.TotalSeconds), 1)
 
@@ -5031,7 +5387,7 @@ function Accion-ProbarVelocidadDisco {
         $buf = New-Object byte[] (4MB)
         $cron = [System.Diagnostics.Stopwatch]::StartNew()
         $i = 0
-        while ($fs.Read($buf, 0, $buf.Length) -gt 0) { $i++; if ($i % 8 -eq 0) { Wait-UI -Milisegundos 1 } }
+        while ($fs.Read($buf, 0, $buf.Length) -gt 0) { $i++; if ($i % 4 -eq 0) { Diag-Progreso -Pct (50 + ($i / [Math]::Max(1,$bloques)) * 50) -Texto "Leyendo $tamanoMB MB del disco..." } }
         $cron.Stop(); $fs.Close()
         $vLec = [math]::Round($tamanoMB / [math]::Max(0.001, $cron.Elapsed.TotalSeconds), 1)
 
@@ -5247,7 +5603,7 @@ function Accion-ProbarVelocidadInternet {
         Write-DiagLog "Descargando 25 MB de prueba (puede tardar unos segundos)..."
         $cron = [System.Diagnostics.Stopwatch]::StartNew()
         $tarea = $wc.DownloadDataTaskAsync("https://speed.cloudflare.com/__down?bytes=$tam")
-        while (-not $tarea.IsCompleted -and $cron.Elapsed.TotalSeconds -lt 40) { Wait-UI -Milisegundos 100 }
+        while (-not $tarea.IsCompleted -and $cron.Elapsed.TotalSeconds -lt 40) { Diag-Texto "Descargando archivo de prueba... $([int]$cron.Elapsed.TotalSeconds) s"; Wait-UI -Milisegundos 100 }
         $cron.Stop()
         if (-not $tarea.IsCompleted) { $wc.CancelAsync(); Diag-Aviso "La descarga de prueba tardo mas de 40 s: conexion muy lenta o inestable."; return }
         if ($tarea.IsFaulted) { throw $tarea.Exception.GetBaseException() }
@@ -5356,7 +5712,7 @@ function Accion-ProbarCPUBenchmark {
         Write-DiagLog "Prueba con 1 hilo (4 s)..."
         [DragonCpuBench]::Iniciar(1)
         $cron = [System.Diagnostics.Stopwatch]::StartNew()
-        while ($cron.Elapsed.TotalSeconds -lt 4) { Wait-UI -Milisegundos 100 }
+        while ($cron.Elapsed.TotalSeconds -lt 4) { Diag-Progreso -Pct (($cron.Elapsed.TotalSeconds / 4) * 45) -Texto "Midiendo 1 hilo..."; Wait-UI -Milisegundos 100 }
         $n1 = [DragonCpuBench]::Detener(); $s1 = $cron.Elapsed.TotalSeconds
         $v1 = [math]::Round($n1 / $s1 / 1e6, 1)
 
@@ -5364,7 +5720,7 @@ function Accion-ProbarCPUBenchmark {
         [DragonCpuBench]::Iniciar($hilos)
         $cron = [System.Diagnostics.Stopwatch]::StartNew()
         $tMax = $t0
-        while ($cron.Elapsed.TotalSeconds -lt 5) { Wait-UI -Milisegundos 100 }
+        while ($cron.Elapsed.TotalSeconds -lt 5) { Diag-Progreso -Pct (45 + ($cron.Elapsed.TotalSeconds / 5) * 55) -Texto "Midiendo con todos los hilos ($hilos)..." ; Wait-UI -Milisegundos 100 }
         $tFin = Get-TemperaturaCPUC
         $nN = [DragonCpuBench]::Detener(); $sN = $cron.Elapsed.TotalSeconds
         $vN = [math]::Round($nN / $sN / 1e6, 1)
@@ -5826,6 +6182,7 @@ function Accion-DiscoActividad {
             if (-not $muestras.ContainsKey($x.Name)) { $muestras[$x.Name] = @() }
             $muestras[$x.Name] += ,@([double]$x.PercentDiskTime, [double]$x.DiskReadBytesPerSec, [double]$x.DiskWriteBytesPerSec, [double]$x.CurrentDiskQueueLength)
         }
+        Diag-Progreso -Pct ((($i + 1) / 6) * 100) -Texto "Muestra $($i + 1) de 6..."
         Wait-UI -Milisegundos 1000
     }
     foreach ($k in $muestras.Keys) {
@@ -5873,7 +6230,7 @@ function Accion-DiscoLatencia4K {
             $fs.Write($buf, 0, 4096)
             $sw.Stop()
             $latE.Add($sw.Elapsed.TotalMilliseconds)
-            if ($i % 50 -eq 0) { Wait-UI -Milisegundos 1 }
+            if ($i % 25 -eq 0) { Diag-Progreso -Pct (($i / $ops) * 50) -Texto "Escritura aleatoria 4K ($i de $ops)..." }
         }
         $fs.Flush($true); $fs.Close()
 
@@ -5887,7 +6244,7 @@ function Accion-DiscoLatencia4K {
             [void]$fs.Read($buf, 0, 4096)
             $sw.Stop()
             $latL.Add($sw.Elapsed.TotalMilliseconds)
-            if ($i % 50 -eq 0) { Wait-UI -Milisegundos 1 }
+            if ($i % 25 -eq 0) { Diag-Progreso -Pct (50 + ($i / $ops) * 50) -Texto "Lectura aleatoria 4K ($i de $ops)..." }
         }
         $fs.Close()
 
@@ -5964,6 +6321,7 @@ function Global:Invoke-ConsolaDiag {
         while (-not $p.HasExited) {
             Wait-UI -Milisegundos 250
             $seg = [int]((Get-Date) - $t0).TotalSeconds
+            Diag-Texto "$Etiqueta en curso: $seg s transcurridos (no cierres el programa)..."
             if ($seg -ge $ultimo + 20) { $ultimo = $seg; Write-DiagLog "   ... $Etiqueta sigue en curso ($seg s)" }
         }
         $p.WaitForExit()
@@ -5979,7 +6337,7 @@ function Global:Invoke-ConsolaDiag {
 
 function Accion-DiscoChkdsk {
     $u = Pedir-UnidadDiag -Titulo "Verificar sectores (CHKDSK)" -Texto "Unidad a verificar. Es una revision de SOLO LECTURA: no repara ni modifica nada."
-    if (-not $u) { return }
+    if (-not $u) { $Global:DiagCancelada = $true; return }
     Write-DiagLog "=== DISCO: VERIFICACION DE ERRORES Y SECTORES (CHKDSK solo lectura) en ${u} ==="
     if (-not (Test-Admin)) { Diag-Aviso "CHKDSK necesita permisos de administrador. Abre The Dragon Tool como administrador."; return }
     Write-DiagLog "Verificando la unidad ${u}... puede tardar varios minutos segun su tamano."
@@ -6000,7 +6358,7 @@ function Accion-DiscoChkdsk {
 
 function Accion-DiscoOptimizacion {
     $u = Pedir-UnidadDiag -Titulo "Fragmentacion y optimizacion" -Texto "Unidad a analizar (solo analisis, no modifica nada):"
-    if (-not $u) { return }
+    if (-not $u) { $Global:DiagCancelada = $true; return }
     Write-DiagLog "=== DISCO: ANALISIS DE FRAGMENTACION / OPTIMIZACION en ${u} ==="
     if (-not (Test-Admin)) { Diag-Aviso "El analisis necesita permisos de administrador. Abre The Dragon Tool como administrador."; return }
     Write-DiagLog "Analizando ${u}..."
@@ -6018,10 +6376,15 @@ function Accion-DiscoCompleto {
     Write-DiagLog "========================================"
     Write-DiagLog "   DIAGNOSTICO COMPLETO DE ALMACENAMIENTO"
     Write-DiagLog "========================================"
+    Diag-Progreso -Pct 0 -Texto 'Paso 1 de 5: Detalle fisico del disco'
     Accion-DiscoDetalleFisico
+    Diag-Progreso -Pct 20 -Texto 'Paso 2 de 5: Particiones'
     Accion-DiscoParticiones
+    Diag-Progreso -Pct 40 -Texto 'Paso 3 de 5: Atributos S.M.A.R.T.'
     Accion-DiscoSmartAtributos
+    Diag-Progreso -Pct 60 -Texto 'Paso 4 de 5: Eventos de disco'
     Accion-DiscoEventos
+    Diag-Progreso -Pct 80 -Texto 'Paso 5 de 5: Actividad del disco'
     Accion-DiscoActividad
     Write-DiagLog "========================================"
     Write-DiagLog "   Para mas detalle usa: Escanear superficie (mapa), Verificar CHKDSK, Latencia 4K y Velocidad de disco."
@@ -6300,26 +6663,47 @@ function Accion-DiagnosticoCompletoEquipo {
     Write-DiagLog "========================================"
     Write-DiagLog "   DIAGNOSTICO COMPLETO DEL EQUIPO"
     Write-DiagLog "========================================"
+    Diag-Progreso -Pct 0 -Texto 'Paso 1 de 21: Informacion del hardware'
     Accion-InfoHardwareCompleta
+    Diag-Progreso -Pct 5 -Texto 'Paso 2 de 21: Tarjeta grafica'
     Accion-ProbarGraficaDiag
+    Diag-Progreso -Pct 10 -Texto 'Paso 3 de 21: Detalles de pantalla'
     Accion-VerDetallesPantalla
+    Diag-Progreso -Pct 14 -Texto 'Paso 4 de 21: Salud del almacenamiento'
     Accion-ProbarAlmacenamiento
+    Diag-Progreso -Pct 19 -Texto 'Paso 5 de 21: Detalle fisico del disco'
     Accion-DiscoDetalleFisico
+    Diag-Progreso -Pct 24 -Texto 'Paso 6 de 21: Particiones'
     Accion-DiscoParticiones
+    Diag-Progreso -Pct 29 -Texto 'Paso 7 de 21: Atributos S.M.A.R.T.'
     Accion-DiscoSmartAtributos
+    Diag-Progreso -Pct 33 -Texto 'Paso 8 de 21: Eventos de disco'
     Accion-DiscoEventos
+    Diag-Progreso -Pct 38 -Texto 'Paso 9 de 21: Velocidad de disco'
     Accion-ProbarVelocidadDisco
+    Diag-Progreso -Pct 43 -Texto 'Paso 10 de 21: Ventiladores'
     Accion-ProbarVentiladores
+    Diag-Progreso -Pct 48 -Texto 'Paso 11 de 21: Temperatura'
     Accion-ProbarTemperaturaCPU
+    Diag-Progreso -Pct 52 -Texto 'Paso 12 de 21: Bateria'
     Accion-ProbarBateria
+    Diag-Progreso -Pct 57 -Texto 'Paso 13 de 21: Dispositivos de audio'
     Accion-ProbarDispositivosAudio
+    Diag-Progreso -Pct 62 -Texto 'Paso 14 de 21: Bluetooth'
     Accion-ProbarBluetooth
+    Diag-Progreso -Pct 67 -Texto 'Paso 15 de 21: Puertos USB'
     Accion-ProbarPuertosUSB
+    Diag-Progreso -Pct 71 -Texto 'Paso 16 de 21: Red'
     Accion-ProbarRed
+    Diag-Progreso -Pct 76 -Texto 'Paso 17 de 21: Wi-Fi'
     Accion-ProbarWifi
+    Diag-Progreso -Pct 81 -Texto 'Paso 18 de 21: Tiempo de arranque'
     Accion-ProbarTiempoArranque
+    Diag-Progreso -Pct 86 -Texto 'Paso 19 de 21: Dispositivos con problemas'
     Accion-ProbarDispositivosProblemas
+    Diag-Progreso -Pct 90 -Texto 'Paso 20 de 21: Estado de Windows'
     Accion-ProbarEstadoWindows
+    Diag-Progreso -Pct 95 -Texto 'Paso 21 de 21: Eventos criticos'
     Accion-ProbarEventosCriticos
     Write-DiagLog "========================================"
     if ($Script:DiagAdvertencias -eq 0) { Write-DiagLog "   RESULTADO: todo en orden, sin advertencias." }
@@ -11420,6 +11804,50 @@ function Buscar-DriverLaptop {
             <GradientStop Color="#1F6BFF" Offset="1"/>
         </LinearGradientBrush>
 
+        <!-- Barra de progreso animada (brillo que la recorre + aura) usada por la tarjeta de diagnostico -->
+        <Style x:Key="BarraDiag" TargetType="ProgressBar">
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Minimum" Value="0"/>
+            <Setter Property="Maximum" Value="100"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ProgressBar">
+                        <Grid>
+                            <Border x:Name="Aura" Margin="3,2" CornerRadius="12" Background="#00B7FF" Opacity="0.3">
+                                <Border.Effect><BlurEffect Radius="12"/></Border.Effect>
+                            </Border>
+                            <Border x:Name="PART_Track" CornerRadius="12" Background="#33141C30"/>
+                            <Border x:Name="PART_Indicator" HorizontalAlignment="Left" CornerRadius="12" ClipToBounds="True">
+                                <Border.Background>
+                                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                        <GradientStop Color="#00B7FF" Offset="0"/>
+                                        <GradientStop Color="#2F7CF6" Offset="0.55"/>
+                                        <GradientStop Color="#CFE8FF" Offset="1"/>
+                                    </LinearGradientBrush>
+                                </Border.Background>
+                                <Grid>
+                                    <Rectangle x:Name="Brillo" Width="90" HorizontalAlignment="Left" IsHitTestVisible="False">
+                                        <Rectangle.Fill>
+                                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                <GradientStop Color="#00FFFFFF" Offset="0"/>
+                                                <GradientStop Color="#99FFFFFF" Offset="0.5"/>
+                                                <GradientStop Color="#00FFFFFF" Offset="1"/>
+                                            </LinearGradientBrush>
+                                        </Rectangle.Fill>
+                                        <Rectangle.RenderTransform><TranslateTransform X="-100"/></Rectangle.RenderTransform>
+                                    </Rectangle>
+                                    <Border VerticalAlignment="Top" Height="8" CornerRadius="12,12,0,0" Background="#33FFFFFF" IsHitTestVisible="False"/>
+                                </Grid>
+                            </Border>
+                            <Border CornerRadius="12" BorderThickness="1.5" BorderBrush="{DynamicResource NeonBrush}" IsHitTestVisible="False"/>
+                            <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="White" FontWeight="Bold" FontSize="12"
+                                       Text="{Binding Value, RelativeSource={RelativeSource TemplatedParent}, StringFormat={}{0:0}%}"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Boton moderno: redondeado, semitransparente y con borde neon animado (igual que el panel lateral) -->
         <Style TargetType="Button">
             <Setter Property="Background" Value="#33141C30"/>
@@ -11872,10 +12300,11 @@ function Buscar-DriverLaptop {
 
         <!-- Log inferior -->
         <Border DockPanel.Dock="Bottom" Background="#55101420" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="0,1.5,0,0" Padding="10">
-            <DockPanel Height="170">
+            <DockPanel x:Name="DockLog" Height="170">
                 <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
-                    <TextBlock Text="Registro de actividad" Foreground="{StaticResource TextoAcento}" FontWeight="Bold"/>
-                    <Button x:Name="BtnLimpiarLog" Content="Limpiar" Width="80" HorizontalAlignment="Right" Margin="0"/>
+                    <Button x:Name="BtnMinLog" DockPanel.Dock="Right" Content="▾ Minimizar" Width="120" Margin="6,0,0,0" ToolTip="Minimiza o muestra el registro de actividad para tener mas espacio"/>
+                    <Button x:Name="BtnLimpiarLog" DockPanel.Dock="Right" Content="Limpiar" Width="80" Margin="0"/>
+                    <TextBlock Text="Registro de actividad" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" VerticalAlignment="Center"/>
                 </DockPanel>
                 <TextBox x:Name="LogBox" IsReadOnly="True" Background="#AA070A10" Foreground="#66AEFF" BorderBrush="{DynamicResource NeonBrush}"
                          FontFamily="Consolas" FontSize="12" TextWrapping="Wrap"
@@ -12542,7 +12971,7 @@ function Buscar-DriverLaptop {
                         <ColumnDefinition Width="12"/>
                         <ColumnDefinition Width="1*" MinWidth="280"/>
                     </Grid.ColumnDefinitions>
-                    <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <ScrollViewer x:Name="ScrollDiagIzq" Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                         <Grid>
                             <!-- Menu principal: un mosaico por componente -->
                             <StackPanel x:Name="PanelDiagMenu">
@@ -12792,6 +13221,66 @@ function Buscar-DriverLaptop {
                         </Grid>
                     </ScrollViewer>
                     <DockPanel Grid.Column="2">
+                        <!-- Tarjeta animada de progreso de la prueba en curso -->
+                        <Grid x:Name="PanelDiagProgreso" DockPanel.Dock="Top" Visibility="Collapsed" Margin="0,0,0,10" RenderTransformOrigin="0.5,0.5">
+                            <Grid.RenderTransform>
+                                <TransformGroup>
+                                    <ScaleTransform x:Name="EscDiagCard" ScaleX="1" ScaleY="1"/>
+                                    <TranslateTransform x:Name="MovDiagCard" X="0" Y="0"/>
+                                </TransformGroup>
+                            </Grid.RenderTransform>
+                            <Border x:Name="GlowDiag" Margin="6" CornerRadius="16" Background="#00B7FF" Opacity="0.4" IsHitTestVisible="False">
+                                <Border.Effect><BlurEffect Radius="18"/></Border.Effect>
+                            </Border>
+                            <Border CornerRadius="14" Background="#EE0B1226" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="1.5" Padding="12">
+                                <Grid>
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="54"/>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <Grid Width="44" Height="44" HorizontalAlignment="Left">
+                                                <Ellipse x:Name="AroDiag" Stroke="{DynamicResource NeonBrush}" StrokeThickness="3" StrokeDashArray="1.6 1.4" RenderTransformOrigin="0.5,0.5">
+                                                    <Ellipse.RenderTransform><RotateTransform x:Name="GiroDiag" Angle="0"/></Ellipse.RenderTransform>
+                                                </Ellipse>
+                                                <TextBlock x:Name="IcoDiag" Text="🔎" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+                                                    <TextBlock.RenderTransform><ScaleTransform x:Name="EscIcoDiag" ScaleX="1" ScaleY="1"/></TextBlock.RenderTransform>
+                                                </TextBlock>
+                                            </Grid>
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                                <TextBlock x:Name="TxtDiagTitulo" Foreground="White" FontWeight="Bold" FontSize="13" TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock x:Name="TxtDiagSub" Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtDiagTiempo" Grid.Column="2" Foreground="#66AEFF" FontFamily="Consolas" FontSize="13" FontWeight="Bold" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                        </Grid>
+                                        <Grid Margin="0,10,0,0" Height="24">
+                                            <ProgressBar x:Name="PbDiag" Style="{StaticResource BarraDiag}" Value="0" Visibility="Collapsed"/>
+                                            <Border x:Name="MarqueeDiag" CornerRadius="12" Background="#33141C30" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="1.5" ClipToBounds="True">
+                                                <Border x:Name="SegDiag" Width="120" HorizontalAlignment="Left" CornerRadius="12">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#0000B7FF" Offset="0"/>
+                                                            <GradientStop Color="#FF2F7CF6" Offset="0.35"/>
+                                                            <GradientStop Color="#FFCFE8FF" Offset="0.6"/>
+                                                            <GradientStop Color="#0000B7FF" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                    <Border.RenderTransform><TranslateTransform x:Name="MovSegDiag" X="-130"/></Border.RenderTransform>
+                                                </Border>
+                                            </Border>
+                                        </Grid>
+                                        <WrapPanel Margin="0,8,0,0">
+                                            <Border CornerRadius="9" Background="#3329D398" Padding="8,2" Margin="0,0,6,0"><TextBlock x:Name="ChipOkDiag" Text="✔ 0" Foreground="#29D398" FontSize="11" FontWeight="Bold"/></Border>
+                                            <Border CornerRadius="9" Background="#33FFC857" Padding="8,2" Margin="0,0,6,0"><TextBlock x:Name="ChipAvDiag" Text="⚠ 0" Foreground="#FFC857" FontSize="11" FontWeight="Bold"/></Border>
+                                            <Border CornerRadius="9" Background="#332F7CF6" Padding="8,2"><TextBlock x:Name="ChipLinDiag" Text="📝 0" Foreground="#66AEFF" FontSize="11" FontWeight="Bold"/></Border>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                    <Canvas x:Name="CanvasConfetiDiag" IsHitTestVisible="False"/>
+                                </Grid>
+                            </Border>
+                        </Grid>
                         <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,6">
                             <Button x:Name="BtnDiagCopiar" Content="📋 Copiar" Width="100" Height="36" FontSize="12"/>
                             <Button x:Name="BtnDiagExportar" Content="💾 Guardar informe" Width="150" Height="36" FontSize="12"/>
@@ -13215,6 +13704,30 @@ if ($btnAbrirAdmin) { $btnAbrirAdmin.Add_Click({ Accion-AbrirComoAdministrador }
 
 # --- Enlace de botones a acciones ---
 $window.FindName("BtnLimpiarLog").Add_Click({ $Script:LogBox.Clear() })
+# Minimizar / mostrar el registro de actividad (da mas espacio a las pestañas)
+$Global:LogMinimizado = $false
+$window.FindName("BtnMinLog").Add_Click({
+    try {
+        $dock = $window.FindName("DockLog"); $caja = $window.FindName("LogBox"); $btn = $window.FindName("BtnMinLog")
+        $Global:LogMinimizado = -not $Global:LogMinimizado
+        $an = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $an.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(260))
+        $ease = New-Object System.Windows.Media.Animation.CubicEase
+        $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $an.EasingFunction = $ease
+        if ($Global:LogMinimizado) {
+            $an.From = $dock.ActualHeight; $an.To = 46
+            $caja.Visibility = 'Collapsed'
+            $btn.Content = "▴ Mostrar"
+        } else {
+            $an.From = 46; $an.To = 170
+            $caja.Visibility = 'Visible'
+            $btn.Content = "▾ Minimizar"
+            try { $caja.ScrollToEnd() } catch {}
+        }
+        $dock.BeginAnimation([System.Windows.FrameworkElement]::HeightProperty, $an)
+    } catch {}
+})
 
 $window.FindName("BtnPerfilBajo").Add_Click({ Perfil-BajoConsumo })
 $window.FindName("BtnPerfilModerno").Add_Click({ Perfil-EquipoModerno })
@@ -13854,28 +14367,28 @@ $window.FindName("BtnProbarAudioIzq").Add_Click({ Accion-ProbarAudioCanal -Canal
 $window.FindName("BtnProbarAudioDer").Add_Click({ Accion-ProbarAudioCanal -Canal 'Derecho' })
 $window.FindName("BtnProbarAudioAmbos").Add_Click({ Accion-ProbarAudioCanal -Canal 'Ambos' })
 $window.FindName("BtnProbarPantalla").Add_Click({ Show-PruebaPantalla })
-$window.FindName("BtnDetallesPantalla").Add_Click({ Accion-VerDetallesPantalla })
+$window.FindName("BtnDetallesPantalla").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Detalles de pantalla' -Icono '🖥️' -Accion { Accion-VerDetallesPantalla } })
 $window.FindName("BtnProbarRAM").Add_Click({ Show-SeleccionPruebaRAM })
-$window.FindName("BtnProbarAlmacenamiento").Add_Click({ Accion-ProbarAlmacenamiento })
-$window.FindName("BtnVelocidadDisco").Add_Click({ Accion-ProbarVelocidadDisco })
-$window.FindName("BtnProbarVentiladores").Add_Click({ Accion-ProbarVentiladores })
-$window.FindName("BtnProbarGrafica").Add_Click({ Accion-ProbarGraficaDiag })
+$window.FindName("BtnProbarAlmacenamiento").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Salud y espacio del disco' -Icono '💽' -Accion { Accion-ProbarAlmacenamiento } })
+$window.FindName("BtnVelocidadDisco").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Velocidad de disco' -Icono '⚡' -Accion { Accion-ProbarVelocidadDisco } })
+$window.FindName("BtnProbarVentiladores").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Ventiladores' -Icono '🌀' -Accion { Accion-ProbarVentiladores } })
+$window.FindName("BtnProbarGrafica").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Tarjeta grafica' -Icono '🎮' -Accion { Accion-ProbarGraficaDiag } })
 $window.FindName("BtnProbarMouse").Add_Click({ Show-PruebaMouse })
-$window.FindName("BtnProbarBateria").Add_Click({ Accion-ProbarBateria })
-$window.FindName("BtnProbarRed").Add_Click({ Accion-ProbarRed })
-$window.FindName("BtnProbarTemperatura").Add_Click({ Accion-ProbarTemperaturaCPU })
-$window.FindName("BtnProbarArranque").Add_Click({ Accion-ProbarTiempoArranque })
-$window.FindName("BtnProbarBluetooth").Add_Click({ Accion-ProbarBluetooth })
-$window.FindName("BtnProbarUSB").Add_Click({ Accion-ProbarPuertosUSB })
-$window.FindName("BtnDiagCompleto").Add_Click({ Accion-DiagnosticoCompletoEquipo })
-$window.FindName("BtnProbarCPU").Add_Click({ Accion-ProbarCPUBenchmark })
-$window.FindName("BtnInfoHardware").Add_Click({ Accion-InfoHardwareCompleta })
-$window.FindName("BtnProbarAudioDisp").Add_Click({ Accion-ProbarDispositivosAudio })
-$window.FindName("BtnProbarWifi").Add_Click({ Accion-ProbarWifi })
-$window.FindName("BtnProbarInternet").Add_Click({ Accion-ProbarVelocidadInternet })
-$window.FindName("BtnProbarDispProblemas").Add_Click({ Accion-ProbarDispositivosProblemas })
-$window.FindName("BtnProbarEventos").Add_Click({ Accion-ProbarEventosCriticos })
-$window.FindName("BtnProbarEstadoWin").Add_Click({ Accion-ProbarEstadoWindows })
+$window.FindName("BtnProbarBateria").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Bateria' -Icono '🔋' -Accion { Accion-ProbarBateria } })
+$window.FindName("BtnProbarRed").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Red e Internet' -Icono '🌐' -Accion { Accion-ProbarRed } })
+$window.FindName("BtnProbarTemperatura").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Temperatura del procesador' -Icono '🌡️' -Accion { Accion-ProbarTemperaturaCPU } })
+$window.FindName("BtnProbarArranque").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Tiempo de arranque' -Icono '⏱️' -Accion { Accion-ProbarTiempoArranque } })
+$window.FindName("BtnProbarBluetooth").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Bluetooth' -Icono '📶' -Accion { Accion-ProbarBluetooth } })
+$window.FindName("BtnProbarUSB").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Dispositivos USB' -Icono '🔌' -Accion { Accion-ProbarPuertosUSB } })
+$window.FindName("BtnDiagCompleto").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Diagnostico completo del equipo' -Icono '🧩' -Accion { Accion-DiagnosticoCompletoEquipo } })
+$window.FindName("BtnProbarCPU").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Rendimiento del procesador' -Icono '🚀' -Accion { Accion-ProbarCPUBenchmark } })
+$window.FindName("BtnInfoHardware").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Informacion del hardware' -Icono '🧾' -Accion { Accion-InfoHardwareCompleta } })
+$window.FindName("BtnProbarAudioDisp").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Dispositivos de audio' -Icono '🎧' -Accion { Accion-ProbarDispositivosAudio } })
+$window.FindName("BtnProbarWifi").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Wi-Fi' -Icono '📡' -Accion { Accion-ProbarWifi } })
+$window.FindName("BtnProbarInternet").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Velocidad de Internet' -Icono '⚡' -Accion { Accion-ProbarVelocidadInternet } })
+$window.FindName("BtnProbarDispProblemas").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Dispositivos con problemas' -Icono '🧩' -Accion { Accion-ProbarDispositivosProblemas } })
+$window.FindName("BtnProbarEventos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Eventos criticos' -Icono '📜' -Accion { Accion-ProbarEventosCriticos } })
+$window.FindName("BtnProbarEstadoWin").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Estado de Windows' -Icono '🛡️' -Accion { Accion-ProbarEstadoWindows } })
 # Menu de componentes: muestra solo el panel elegido (o el menu si Clave esta vacia)
 $Global:DiagCategorias = @('Sistema', 'CPU', 'RAM', 'Disco', 'Graficos', 'Audio', 'Entrada', 'Camara', 'Red', 'Energia', 'Puertos')
 function Global:Mostrar-CategoriaDiag {
@@ -13894,16 +14407,16 @@ foreach ($catDiag in $Global:DiagCategorias) {
     $window.FindName("BtnDiagCat_$claveDiag").Add_Click({ Mostrar-CategoriaDiag -Clave $claveDiag }.GetNewClosure())
     $window.FindName("BtnDiagVolver_$claveDiag").Add_Click({ Mostrar-CategoriaDiag -Clave '' }.GetNewClosure())
 }
-$window.FindName("BtnDiscoCompleto").Add_Click({ Accion-DiscoCompleto })
-$window.FindName("BtnDiscoDetalle").Add_Click({ Accion-DiscoDetalleFisico })
-$window.FindName("BtnDiscoParticiones").Add_Click({ Accion-DiscoParticiones })
-$window.FindName("BtnDiscoSmart").Add_Click({ Accion-DiscoSmartAtributos })
+$window.FindName("BtnDiscoCompleto").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Diagnostico completo de disco' -Icono '💽' -Accion { Accion-DiscoCompleto } })
+$window.FindName("BtnDiscoDetalle").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Detalle fisico y sectores' -Icono '🔎' -Accion { Accion-DiscoDetalleFisico } })
+$window.FindName("BtnDiscoParticiones").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Particiones y alineacion' -Icono '🧱' -Accion { Accion-DiscoParticiones } })
+$window.FindName("BtnDiscoSmart").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Atributos S.M.A.R.T.' -Icono '📊' -Accion { Accion-DiscoSmartAtributos } })
 $window.FindName("BtnDiscoSuperficie").Add_Click({ Show-EscaneoSuperficieDisco })
-$window.FindName("BtnDiscoChkdsk").Add_Click({ Accion-DiscoChkdsk })
-$window.FindName("BtnDiscoDefrag").Add_Click({ Accion-DiscoOptimizacion })
-$window.FindName("BtnDiscoLatencia").Add_Click({ Accion-DiscoLatencia4K })
-$window.FindName("BtnDiscoActividad").Add_Click({ Accion-DiscoActividad })
-$window.FindName("BtnDiscoEventos").Add_Click({ Accion-DiscoEventos })
+$window.FindName("BtnDiscoChkdsk").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Verificacion CHKDSK' -Icono '🛠️' -Accion { Accion-DiscoChkdsk } })
+$window.FindName("BtnDiscoDefrag").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Fragmentacion y optimizacion' -Icono '🧹' -Accion { Accion-DiscoOptimizacion } })
+$window.FindName("BtnDiscoLatencia").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Latencia aleatoria 4K' -Icono '⏲️' -Accion { Accion-DiscoLatencia4K } })
+$window.FindName("BtnDiscoActividad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Actividad del disco' -Icono '📈' -Accion { Accion-DiscoActividad } })
+$window.FindName("BtnDiscoEventos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Eventos de error de disco' -Icono '📜' -Accion { Accion-DiscoEventos } })
 $window.FindName("BtnDiagCopiar").Add_Click({
     $t = $window.FindName("TxtDiagResultados").Text
     if ([string]::IsNullOrWhiteSpace($t) -or -not $Script:DiagLogIniciado) { Show-Aviso "Todavia no hay resultados para copiar. Ejecuta alguna prueba primero." "Sin resultados"; return }
@@ -13928,6 +14441,7 @@ $window.FindName("BtnDiagExportar").Add_Click({
 $window.FindName("BtnDiagLimpiar").Add_Click({
     $window.FindName("TxtDiagResultados").Text = "Los resultados de cada prueba apareceran aqui. Ejecuta una o varias pruebas para ver el diagnostico."
     $Script:DiagLogIniciado = $false
+    if (-not $Global:DiagEnCurso) { Diag-Ocultar }
 })
 
 # --- Pestaña Registro de errores ---
@@ -14217,7 +14731,7 @@ try {
 # los colores alrededor de todos los botones y bordes a la vez (muy barato de dibujar).
 try {
     $pincelNeon = Obtener-PincelNeon -Elemento $window
-    if (-not (Animar-PincelNeon -Pincel $pincelNeon)) { throw "el pincel no admite animacion" }
+    if (-not (Animar-PincelNeon -Pincel $pincelNeon)) { throw "el pincel no admite animacion ($($Global:ErrorPincelNeon))" }
 } catch {
     Write-Log "No se pudo animar el borde neon (se muestra estatico): $($_.Exception.Message)" -Tipo AVISO
 }
