@@ -377,7 +377,7 @@ function Global:Obtener-PincelNeon {
             [void]$n.GradientStops.Add((New-Object System.Windows.Media.GradientStop($gs.Color, $gs.Offset)))
         }
         $n.RelativeTransform = New-Object System.Windows.Media.TranslateTransform(0, 0)
-        $Elemento.Resources[$Clave] = $n
+        $Elemento.Resources[$Clave] = $n.PSObject.BaseObject
         $p = $n
     }
     return $p
