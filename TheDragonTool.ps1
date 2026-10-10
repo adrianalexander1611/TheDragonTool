@@ -5682,6 +5682,7 @@ function Global:Ejecutar-PruebaDiag {
     $Global:DiagEnCurso = $true
     $Global:DiagCancelada = $false
     $Global:DiagNombreActual = $Nombre
+    $Global:VidaSsdImpresa = @{}
     $inicioPrueba = Get-Date
     $u = Obtener-DiagUi
     try {
@@ -5726,6 +5727,7 @@ function Accion-ProbarAlmacenamiento {
             Write-DiagLog " - $($d.FriendlyName) | $($d.MediaType) | $($d.BusType) | $tam GB"
             if ("$($d.HealthStatus)" -eq 'Healthy') { Diag-Ok "Salud del disco: Healthy (OK)" }
             else { Diag-Aviso "Salud del disco: $($d.HealthStatus) ($($d.OperationalStatus)). Haz copia de seguridad y revisa el disco." }
+            try { Escribir-VidaSSD -Disco $d } catch { }
             try {
                 $rc = $d | Get-StorageReliabilityCounter -ErrorAction Stop
                 $partes = @()
@@ -6418,6 +6420,7 @@ function Accion-DiscoDetalleFisico {
             if ("$($p.HealthStatus)" -eq 'Healthy') { Diag-Ok "Salud del disco ${num}: Healthy (OK)" }
             else { Diag-Aviso "Salud del disco ${num}: $($p.HealthStatus) ($($p.OperationalStatus)). Haz copia de seguridad y revisa el disco." }
             if (-not (Escribir-ContadoresDisco -Disco $p)) { Write-DiagLog "     (Este disco/controlador no entrega contadores de confiabilidad.)" }
+            try { Escribir-VidaSSD -Disco $p } catch { }
         }
     }
     # TRIM (importante para el rendimiento y vida util de los SSD)
@@ -7063,6 +7066,712 @@ function Show-EscaneoSuperficieDisco {
     }
 }
 
+# ---------------------------------------------------------------------------
+#  VIDA UTIL DEL SSD, IDENTIDAD DEL EQUIPO Y NUEVAS PRUEBAS (CPU / Wi-Fi / mouse)
+# ---------------------------------------------------------------------------
+
+# Marca, modelo y numero de serie del equipo (descarta los valores de relleno que dejan algunos fabricantes)
+function Global:Obtener-IdentidadEquipo {
+    $r = @{ Marca = ''; Modelo = ''; Serie = '' }
+    $util = {
+        param($v)
+        $t = "$v".Trim()
+        if (-not $t) { return $false }
+        if ($t -match '(?i)to be filled|default string|system (serial|manufacturer|product|version)|o\.e\.m|^none$|not specified|not applicable|^n/?a$|^0+$|^x+$|0123456789|^unknown$|serial ?number|chassis') { return $false }
+        return $true
+    }
+    $cs = $null; $csp = $null; $bios = $null; $bb = $null; $enc = $null
+    try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop | Select-Object -First 1 } catch { }
+    try { $csp = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop | Select-Object -First 1 } catch { }
+    try { $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop | Select-Object -First 1 } catch { }
+    try { $bb = Get-CimInstance Win32_BaseBoard -ErrorAction Stop | Select-Object -First 1 } catch { }
+    try { $enc = Get-CimInstance Win32_SystemEnclosure -ErrorAction Stop | Select-Object -First 1 } catch { }
+    foreach ($m in @($(if ($cs) { $cs.Manufacturer }), $(if ($csp) { $csp.Vendor }), $(if ($bb) { $bb.Manufacturer }), $(if ($bios) { $bios.Manufacturer }))) {
+        if (& $util $m) { $r.Marca = "$m".Trim(); break }
+    }
+    $modelo = ''
+    if ($cs -and (& $util $cs.Model)) { $modelo = "$($cs.Model)".Trim() }
+    # Lenovo guarda el nombre comercial (ThinkPad T480, IdeaPad...) en "Version"
+    if ($r.Marca -match '(?i)lenovo' -and $csp -and (& $util $csp.Version)) {
+        $v = "$($csp.Version)".Trim()
+        $modelo = if ($modelo -and $modelo -ne $v) { "$v ($modelo)" } else { $v }
+    }
+    if (-not $modelo -and $csp -and (& $util $csp.Name)) { $modelo = "$($csp.Name)".Trim() }
+    if (-not $modelo -and $bb -and (& $util $bb.Product)) { $modelo = "$($bb.Product)".Trim() }
+    $r.Modelo = $modelo
+    foreach ($s in @($(if ($bios) { $bios.SerialNumber }), $(if ($csp) { $csp.IdentifyingNumber }), $(if ($enc) { $enc.SerialNumber }), $(if ($bb) { $bb.SerialNumber }))) {
+        if (& $util $s) { $r.Serie = "$s".Trim(); break }
+    }
+    if (-not $r.Marca) { $r.Marca = 'No disponible' }
+    if (-not $r.Modelo) { $r.Modelo = 'No disponible' }
+    if (-not $r.Serie) { $r.Serie = 'No registrado en la BIOS' }
+    return $r
+}
+
+# Porcentaje de vida util restante de un SSD (contadores de Windows o atributos S.M.A.R.T.)
+function Global:Obtener-VidaSSD {
+    param($Disco)
+    try {
+        $rc = $Disco | Get-StorageReliabilityCounter -ErrorAction Stop
+        if ($rc -and $null -ne $rc.Wear -and "$($rc.Wear)" -match '^\d+$') {
+            $w = [int]$rc.Wear
+            if ($w -ge 0 -and $w -le 100) { return [PSCustomObject]@{ Pct = (100 - $w); Fuente = 'contadores de confiabilidad de Windows' } }
+        }
+    } catch { }
+    try {
+        $token = ("$($Disco.FriendlyName)".Trim() -split '\s+' | Select-Object -Last 1) -replace '[^A-Za-z0-9]', ''
+        $token = $token.ToUpper()
+        $datos = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_ATAPISmartData -ErrorAction Stop)
+        $umbr = @()
+        try { $umbr = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictThresholds -ErrorAction Stop) } catch { }
+        foreach ($d in $datos) {
+            $inst = ("$($d.InstanceName)" -replace '[^A-Za-z0-9]', '').ToUpper()
+            if ($datos.Count -gt 1 -and $token.Length -ge 4 -and -not $inst.Contains($token)) { continue }
+            $u = $umbr | Where-Object { $_.InstanceName -eq $d.InstanceName } | Select-Object -First 1
+            $ub = $null; if ($u) { $ub = $u.VendorSpecific }
+            $attrs = @(Convertir-AtributosSmart -Datos $d.VendorSpecific -Umbrales $ub)
+            foreach ($id in @(231, 233, 177, 202, 169)) {
+                $a = $attrs | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+                if ($a -and $a.Valor -gt 0 -and $a.Valor -le 100) {
+                    return [PSCustomObject]@{ Pct = [int]$a.Valor; Fuente = "atributo S.M.A.R.T. $id ($($Global:SmartNombres[$id]))" }
+                }
+            }
+        }
+    } catch { }
+    return $null
+}
+
+# Muestra la vida util del SSD (una vez por prueba) y la guarda para el informe PDF
+function Global:Escribir-VidaSSD {
+    param($Disco)
+    $nombre = "$($Disco.FriendlyName)".Trim()
+    $esSsd = ("$($Disco.MediaType)" -eq 'SSD') -or ("$($Disco.BusType)" -eq 'NVMe') -or ($nombre -match '(?i)\bSSD\b|NVMe|M\.2')
+    if (-not $esSsd) { return }
+    if (-not $Global:VidaSsdImpresa) { $Global:VidaSsdImpresa = @{} }
+    if ($Global:VidaSsdImpresa.ContainsKey($nombre)) { return }
+    $Global:VidaSsdImpresa[$nombre] = $true
+    $v = Obtener-VidaSSD -Disco $Disco
+    if (-not $v) {
+        Write-DiagLog "     💽 Vida util del SSD: no disponible (el SSD o su controlador no entrega el dato; usa la herramienta del fabricante)."
+        return
+    }
+    $pct = [int]$v.Pct; $uso = 100 - $pct
+    $llenos = [int][math]::Round($pct / 10)
+    $barra = ('█' * $llenos) + ('░' * (10 - $llenos))
+    Write-DiagLog "     💽 VIDA UTIL DEL SSD: $pct % restante  [$barra]  (desgaste $uso %) - fuente: $($v.Fuente)"
+    if ($pct -lt 10) { Diag-Aviso "Vida util del SSD critica ($pct %). Haz copia de seguridad y reemplazalo cuanto antes." }
+    elseif ($pct -lt 30) { Diag-Aviso "Vida util del SSD baja ($pct %). Planea reemplazarlo pronto y mantén copias de seguridad." }
+    elseif ($pct -ge 70) { Diag-Ok "Vida util del SSD en buen estado ($pct % restante)." }
+    else { Write-DiagLog "     Desgaste moderado ($uso %): el SSD aun tiene vida util, pero conviene vigilarlo." }
+    try { if ($Global:DiagInforme -and $Global:DiagInforme.Ssd) { $Global:DiagInforme.Ssd[$nombre] = @{ Pct = $pct; Fuente = $v.Fuente; Tam = [math]::Round($Disco.Size / 1GB, 0) } } } catch { }
+}
+
+function Accion-DiscoVidaSSD {
+    Write-DiagLog "=== VIDA UTIL DEL SSD (porcentaje restante) ==="
+    $hay = $false
+    try {
+        foreach ($d in @(Get-PhysicalDisk -ErrorAction Stop)) {
+            $n = "$($d.FriendlyName)"
+            if (("$($d.MediaType)" -eq 'SSD') -or ("$($d.BusType)" -eq 'NVMe') -or ($n -match '(?i)\bSSD\b|NVMe|M\.2')) {
+                $hay = $true
+                Write-DiagLog " - $n | $($d.MediaType) | $($d.BusType) | $([math]::Round($d.Size / 1GB, 0)) GB | Salud: $($d.HealthStatus)"
+                Escribir-VidaSSD -Disco $d
+            }
+        }
+    } catch { Write-DiagLog "No se pudo consultar los discos fisicos." }
+    if (-not $hay) { Write-DiagLog "No se detecto ningun SSD/NVMe en este equipo (solo discos mecanicos). Los discos mecanicos no tienen un % de vida: revisa S.M.A.R.T. y sectores." }
+}
+
+# ---------------------------- CPU ----------------------------
+
+$Script:TipoCpuCheckListo = $false
+function Ensure-TipoCpuCheck {
+    if ($Script:TipoCpuCheckListo) { return }
+    $codigo = @"
+using System;
+using System.Threading;
+public static class DragonCpuCheck {
+    static volatile bool detener;
+    static long errores;
+    static long vueltas;
+    static ulong referencia;
+    static Thread[] hilos;
+    static ulong Calcular() {
+        ulong h = 1469598103934665603UL; double x = 1.5; long e = 7;
+        for (int i = 1; i <= 3000; i++) {
+            x = Math.Sqrt(x * x + i) * 1.0000001;
+            e = (e * 6364136223846793005L + 1442695040888963407L);
+            h ^= (ulong)BitConverter.DoubleToInt64Bits(x) ^ (ulong)e;
+            h *= 1099511628211UL;
+            h = (h << 13) | (h >> 51);
+        }
+        return h;
+    }
+    static void Trabajo() {
+        long malos = 0, n = 0;
+        while (!detener) {
+            if (Calcular() != referencia) malos++;
+            n++;
+        }
+        Interlocked.Add(ref errores, malos);
+        Interlocked.Add(ref vueltas, n);
+    }
+    public static void Iniciar(int cantidad) {
+        detener = false; errores = 0; vueltas = 0; referencia = Calcular();
+        hilos = new Thread[cantidad];
+        for (int i = 0; i < cantidad; i++) { hilos[i] = new Thread(Trabajo); hilos[i].IsBackground = true; hilos[i].Start(); }
+    }
+    public static long Detener() { detener = true; foreach (Thread t in hilos) t.Join(); return errores; }
+    public static long Vueltas { get { return vueltas; } }
+}
+"@
+    Add-Type -TypeDefinition $codigo -ErrorAction Stop
+    $Script:TipoCpuCheckListo = $true
+}
+
+function Accion-CpuInformacion {
+    Write-DiagLog "=== PROCESADOR: INFORMACION, FRECUENCIAS Y CARACTERISTICAS ==="
+    try {
+        foreach ($cpu in @(Get-CimInstance Win32_Processor -ErrorAction Stop)) {
+            Write-DiagLog " - $("$($cpu.Name)".Trim())"
+            Write-DiagLog "     Fabricante: $($cpu.Manufacturer) | Socket: $($cpu.SocketDesignation) | Arquitectura: $(@{0='x86';5='ARM';9='x64';12='ARM64'}[[int]$cpu.Architecture])"
+            Write-DiagLog "     Nucleos: $($cpu.NumberOfCores) | Hilos: $($cpu.NumberOfLogicalProcessors) | Cache L2: $([math]::Round($cpu.L2CacheSize / 1024, 1)) MB | Cache L3: $([math]::Round($cpu.L3CacheSize / 1024, 1)) MB"
+            Write-DiagLog "     Frecuencia: actual $($cpu.CurrentClockSpeed) MHz | maxima $($cpu.MaxClockSpeed) MHz | uso instantaneo: $($cpu.LoadPercentage) %"
+            $virt = if ($cpu.VirtualizationFirmwareEnabled) { 'activada' } else { 'desactivada o no disponible (BIOS)' }
+            Write-DiagLog "     Virtualizacion en BIOS: $virt"
+            if ($cpu.MaxClockSpeed -gt 0 -and $cpu.CurrentClockSpeed -gt 0) {
+                $rel = [math]::Round(100 * $cpu.CurrentClockSpeed / $cpu.MaxClockSpeed, 0)
+                if ($rel -lt 40 -and [int]$cpu.LoadPercentage -gt 60) { Diag-Aviso "La CPU trabaja al $rel % de su frecuencia maxima con carga alta: posible limitacion por temperatura, plan de energia o bateria." }
+                else { Diag-Ok "Frecuencia de la CPU coherente con su carga ($rel % de la maxima)." }
+            }
+            if ([int]$cpu.NumberOfLogicalProcessors -le 2) { Write-DiagLog "     Procesador de pocos hilos: puede notarse lento con Windows 10/11 y navegadores modernos." }
+        }
+    } catch { Write-DiagLog "No se pudo leer la informacion del procesador: $($_.Exception.Message)" }
+    try {
+        $plan = (powercfg /getactivescheme 2>$null) -join ' '
+        if ($plan -match ':\s*[0-9a-f-]+\s*\((.+?)\)') { Write-DiagLog " - Plan de energia activo: $($Matches[1])" ; if ($Matches[1] -match '(?i)ahorr|saver') { Diag-Aviso "El plan de energia es de ahorro: limita el rendimiento de la CPU. Cambia a 'Equilibrado' o 'Alto rendimiento'." } }
+    } catch { }
+    $t = Get-TemperaturaCPUC
+    if ($null -ne $t) { Write-DiagLog " - Temperatura actual: $t °C" } else { Write-DiagLog " - Temperatura: Windows no la expone en este equipo." }
+}
+
+function Accion-CpuUsoNucleos {
+    Write-DiagLog "=== PROCESADOR: USO POR NUCLEO Y PROCESOS (8 segundos) ==="
+    try {
+        $muestras = 8
+        $nucleos = @{}
+        $procs = @{}
+        $totales = New-Object System.Collections.Generic.List[double]
+        $nCpu = [math]::Max(1, [Environment]::ProcessorCount)
+        for ($i = 1; $i -le $muestras; $i++) {
+            Diag-Progreso -Pct (($i - 1) / $muestras * 100) -Texto "Midiendo uso de la CPU... ($i/$muestras)"
+            try {
+                foreach ($c in @(Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -ErrorAction Stop)) {
+                    if ($c.Name -eq '_Total') { $totales.Add([double]$c.PercentProcessorTime) }
+                    else {
+                        if (-not $nucleos.ContainsKey($c.Name)) { $nucleos[$c.Name] = New-Object System.Collections.Generic.List[double] }
+                        $nucleos[$c.Name].Add([double]$c.PercentProcessorTime)
+                    }
+                }
+            } catch { }
+            try {
+                foreach ($p in @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -ErrorAction Stop)) {
+                    $nm = ("$($p.Name)" -replace '#\d+$', '')
+                    if ($nm -in '_Total', 'Idle') { continue }
+                    if (-not $procs.ContainsKey($nm)) { $procs[$nm] = 0.0 }
+                    $procs[$nm] += [double]$p.PercentProcessorTime / $nCpu / $muestras
+                }
+            } catch { }
+            Wait-UI -Milisegundos 700
+        }
+        Diag-Progreso -Pct 100 -Texto "Analizando resultados..."
+        if ($totales.Count -eq 0) { Write-DiagLog "Windows no entrego los contadores de uso de CPU en este equipo."; return }
+        $prom = [math]::Round(($totales | Measure-Object -Average).Average, 1)
+        $max = [math]::Round(($totales | Measure-Object -Maximum).Maximum, 0)
+        Write-DiagLog " - Uso total de la CPU: promedio $prom % | pico $max %"
+        foreach ($k in ($nucleos.Keys | Sort-Object { [int]$_ })) {
+            $a = [math]::Round(($nucleos[$k] | Measure-Object -Average).Average, 0)
+            $barra = ('█' * [int][math]::Round($a / 10)) + ('░' * (10 - [int][math]::Round($a / 10)))
+            Write-DiagLog ("     Nucleo/hilo {0,-3} [{1}] {2,3} %" -f $k, $barra, $a)
+        }
+        $top = @($procs.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 5 | Where-Object { $_.Value -ge 0.5 })
+        if ($top.Count) {
+            Write-DiagLog " - Procesos que mas CPU usan:"
+            foreach ($t in $top) { Write-DiagLog ("     {0,-32} {1,5} %" -f $t.Key, [math]::Round($t.Value, 1)) }
+        }
+        if ($prom -ge 85) { Diag-Aviso "La CPU esta saturada ($prom % de promedio). Cierra programas o revisa el proceso que mas consume." }
+        elseif ($prom -ge 60) { Diag-Aviso "Uso de CPU alto ($prom %) en reposo. Revisa los procesos de arriba, el antivirus o programas de inicio." }
+        else { Diag-Ok "Uso de CPU normal ($prom % de promedio)." }
+        if ($top.Count -and $top[0].Value -ge 40) { Diag-Aviso "El proceso '$($top[0].Key)' consume el $([math]::Round($top[0].Value, 0)) % de la CPU." }
+    } catch { Write-DiagLog "No se pudo medir el uso por nucleo: $($_.Exception.Message)" }
+}
+
+function Accion-CpuEstabilidad {
+    Write-DiagLog "=== PROCESADOR: ESTABILIDAD Y THROTTLING BAJO CARGA (30 segundos) ==="
+    try {
+        Ensure-TipoCpuBench
+        $hilos = [Environment]::ProcessorCount
+        $segmentos = 6; $dur = 5
+        $res = New-Object System.Collections.Generic.List[object]
+        $t0 = Get-TemperaturaCPUC
+        Write-DiagLog "Cargando los $hilos hilos al maximo durante $($segmentos * $dur) s y midiendo rendimiento, frecuencia y temperatura..."
+        for ($s = 1; $s -le $segmentos; $s++) {
+            [DragonCpuBench]::Iniciar($hilos)
+            $cron = [System.Diagnostics.Stopwatch]::StartNew()
+            $mhz = $null
+            while ($cron.Elapsed.TotalSeconds -lt $dur) {
+                Diag-Progreso -Pct ((($s - 1) * $dur + $cron.Elapsed.TotalSeconds) / ($segmentos * $dur) * 100) -Texto "Carga maxima... segmento $s de $segmentos"
+                if ($null -eq $mhz -and $cron.Elapsed.TotalSeconds -gt ($dur - 1.5)) { try { $mhz = [int](Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1).CurrentClockSpeed } catch { $mhz = 0 } }
+                Wait-UI -Milisegundos 100
+            }
+            $n = [DragonCpuBench]::Detener(); $seg = $cron.Elapsed.TotalSeconds
+            $temp = Get-TemperaturaCPUC
+            $res.Add([PSCustomObject]@{ N = $s; Mops = [math]::Round($n / $seg / 1e6, 1); Mhz = $mhz; Temp = $temp })
+        }
+        foreach ($r in $res) {
+            $extra = @()
+            if ($r.Mhz) { $extra += "$($r.Mhz) MHz" }
+            if ($null -ne $r.Temp) { $extra += "$($r.Temp) °C" }
+            Write-DiagLog ("     Segmento {0}: {1,7} M ops/s   {2}" -f $r.N, $r.Mops, ($extra -join ' | '))
+        }
+        $primero = $res[0].Mops; $ultimo = $res[$res.Count - 1].Mops
+        $mejor = ($res | Measure-Object Mops -Maximum).Maximum
+        $caida = if ($mejor -gt 0) { [math]::Round(100 * (1 - $ultimo / $mejor), 1) } else { 0 }
+        Write-DiagLog " - Rendimiento final respecto al mejor segmento: -$caida %"
+        if ($caida -ge 25) { Diag-Aviso "La CPU pierde el $caida % de rendimiento bajo carga sostenida (throttling por temperatura o energia). Limpia ventiladores/disipador y cambia la pasta termica." }
+        elseif ($caida -ge 12) { Diag-Aviso "La CPU baja el $caida % bajo carga sostenida: refrigeracion justa." }
+        else { Diag-Ok "Rendimiento estable bajo carga sostenida (variacion de $caida %)." }
+        $tFin = $res[$res.Count - 1].Temp
+        if ($null -ne $tFin) {
+            if ($tFin -ge 95) { Diag-Aviso "Temperatura critica bajo carga ($tFin °C)." }
+            elseif ($tFin -ge 85) { Diag-Aviso "Temperatura alta bajo carga ($tFin °C)." }
+            else { Diag-Ok "Temperatura bajo carga sostenida correcta ($tFin °C)." }
+        }
+        $m1 = $res[0].Mhz; $m6 = $res[$res.Count - 1].Mhz
+        if ($m1 -and $m6 -and $m6 -lt ($m1 * 0.8)) { Diag-Aviso "La frecuencia cayo de $m1 a $m6 MHz durante la prueba (limitacion termica o de energia)." }
+    } catch {
+        try { [DragonCpuBench]::Detener() | Out-Null } catch { }
+        Write-DiagLog "No se pudo completar la prueba de estabilidad: $($_.Exception.Message)"
+    }
+}
+
+function Accion-CpuIntegridad {
+    Write-DiagLog "=== PROCESADOR: INTEGRIDAD DE CALCULO (15 segundos) ==="
+    try {
+        Ensure-TipoCpuCheck
+        $hilos = [Environment]::ProcessorCount
+        Write-DiagLog "Cada hilo repite el mismo calculo y compara el resultado; cualquier diferencia indica inestabilidad (overclock, voltaje, RAM o CPU defectuosa)."
+        [DragonCpuCheck]::Iniciar($hilos)
+        $cron = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($cron.Elapsed.TotalSeconds -lt 15) { Diag-Progreso -Pct ($cron.Elapsed.TotalSeconds / 15 * 100) -Texto "Verificando calculos en $hilos hilos..."; Wait-UI -Milisegundos 100 }
+        $errores = [DragonCpuCheck]::Detener()
+        $vueltas = [DragonCpuCheck]::Vueltas
+        Write-DiagLog " - Calculos verificados: $('{0:N0}' -f $vueltas) en $hilos hilos | Resultados incorrectos: $errores"
+        if ($errores -gt 0) { Diag-Aviso "Se detectaron $errores resultado(s) incorrecto(s): el procesador es inestable. Quita overclock/undervolt, revisa temperatura, fuente de poder y prueba la RAM." }
+        else { Diag-Ok "El procesador calculo sin errores durante toda la prueba." }
+    } catch {
+        try { [DragonCpuCheck]::Detener() | Out-Null } catch { }
+        Write-DiagLog "No se pudo ejecutar la prueba de integridad: $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------- Wi-Fi ----------------------------
+
+function Accion-WifiAdaptador {
+    Write-DiagLog "=== WI-FI: ADAPTADOR, DRIVER Y CAPACIDADES ==="
+    $hallado = $false
+    try {
+        $ads = @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.InterfaceDescription -match '(?i)wi-?fi|wireless|802\.11|wlan|centrino|killer|dual band' -or $_.PhysicalMediaType -match '802\.11' })
+        foreach ($a in $ads) {
+            $hallado = $true
+            Write-DiagLog " - $($a.Name): $($a.InterfaceDescription)"
+            Write-DiagLog "     Estado: $($a.Status) | Velocidad del enlace: $($a.LinkSpeed) | MAC: $($a.MacAddress)"
+            $drv = "$($a.DriverVersionString)"; $fd = $null
+            try { $fd = [datetime]$a.DriverDate } catch { }
+            Write-DiagLog "     Driver: $drv | Fecha: $(if ($fd) { $fd.ToString('yyyy-MM-dd') } else { 'desconocida' }) | Proveedor: $($a.DriverProvider)"
+            if ("$($a.Status)" -eq 'Disabled') { Diag-Aviso "El adaptador Wi-Fi esta deshabilitado en Windows." }
+            elseif ("$($a.Status)" -eq 'Up') { Diag-Ok "Adaptador Wi-Fi activo y conectado." }
+            else { Write-DiagLog "     (Adaptador sin conexion en este momento.)" }
+            if ($fd -and ((Get-Date) - $fd).TotalDays -gt 1095) { Diag-Aviso "El driver Wi-Fi tiene mas de 3 años: actualizalo desde el fabricante del equipo/adaptador." }
+            try {
+                $pm = Get-NetAdapterPowerManagement -Name $a.Name -ErrorAction Stop
+                if ("$($pm.AllowComputerToTurnOffDevice)" -eq 'Enabled') { Write-DiagLog "     Ahorro de energia: Windows puede apagar el adaptador (si hay cortes de Wi-Fi, desactiva esa opcion en las propiedades del adaptador)." }
+            } catch { }
+        }
+    } catch { }
+    if (-not $hallado) { Write-DiagLog "No se detecto ningun adaptador Wi-Fi (equipo de escritorio sin Wi-Fi, adaptador apagado o sin driver)."; }
+    try {
+        $drv = @(netsh wlan show drivers 2>$null)
+        $radio = $drv | Where-Object { $_ -match '(?i)(Tipos de radio admitidos|Radio types supported)' } | Select-Object -First 1
+        if ($radio) {
+            $tipos = ($radio -split ':', 2)[1].Trim()
+            Write-DiagLog " - Estandares Wi-Fi soportados: $tipos"
+            if ($tipos -match '802\.11ax') { Diag-Ok "Soporta Wi-Fi 6 (802.11ax)." }
+            elseif ($tipos -match '802\.11ac') { Write-DiagLog "   Soporta Wi-Fi 5 (802.11ac), banda de 5 GHz." }
+            elseif ($tipos -match '802\.11n') { Write-DiagLog "   Solo Wi-Fi 4 (802.11n): velocidad limitada frente a routers modernos." }
+        }
+        $bandas = $drv | Where-Object { $_ -match '(?i)(Bandas admitidas|Bands? supported)' } | Select-Object -First 1
+        if ($bandas) { Write-DiagLog " - $($bandas.Trim())" }
+    } catch { }
+    try {
+        $svc = Get-Service WlanSvc -ErrorAction Stop
+        if ($svc.Status -ne 'Running') { Diag-Aviso "El servicio 'Configuracion automatica de WLAN' esta detenido: el Wi-Fi no funcionara." } else { Write-DiagLog " - Servicio WLAN AutoConfig: en ejecucion." }
+    } catch { }
+}
+
+function Accion-WifiRedes {
+    Write-DiagLog "=== WI-FI: REDES CERCANAS Y SATURACION DE CANALES ==="
+    try {
+        $actual = $null; $canalActual = $null
+        $inter = @(netsh wlan show interfaces 2>$null)
+        foreach ($l in $inter) {
+            if ($l -match '^\s*SSID\s*:\s*(.+)$') { $actual = $Matches[1].Trim() }
+            if ($l -match '^\s*(Canal|Channel)\s*:\s*(\d+)') { $canalActual = [int]$Matches[2] }
+        }
+        $sal = @(netsh wlan show networks mode=bssid 2>$null)
+        $redes = New-Object System.Collections.Generic.List[object]
+        $ssid = ''; $auth = ''; $cif = ''; $cur = $null
+        foreach ($l in $sal) {
+            if ($l -match '^\s*SSID\s+\d+\s*:\s*(.*)$') { $ssid = $Matches[1].Trim(); $auth = ''; $cif = ''; continue }
+            if ($l -match '^\s*(Autenticaci.n|Authentication)\s*:\s*(.+)$') { $auth = $Matches[2].Trim(); continue }
+            if ($l -match '^\s*(Cifrado|Encryption)\s*:\s*(.+)$') { $cif = $Matches[2].Trim(); continue }
+            if ($l -match '^\s*BSSID\s+\d+\s*:') { $cur = [PSCustomObject]@{ Ssid = $ssid; Auth = $auth; Cifrado = $cif; Senal = 0; Canal = 0 }; $redes.Add($cur); continue }
+            if ($cur -and $l -match '^\s*(Se.al|Signal)\s*:\s*(\d+)\s*%') { $cur.Senal = [int]$Matches[2]; continue }
+            if ($cur -and $l -match '^\s*(Canal|Channel)\s*:\s*(\d+)') { $cur.Canal = [int]$Matches[2]; continue }
+        }
+        if ($redes.Count -eq 0) {
+            Write-DiagLog "No se pudieron listar redes. Causas comunes: Wi-Fi apagado, sin adaptador, o Windows sin permiso de ubicacion (Configuracion > Privacidad > Ubicacion)."
+            return
+        }
+        $lista = @($redes | Where-Object { $_.Canal -gt 0 } | Sort-Object Senal -Descending)
+        Write-DiagLog " - Puntos de acceso detectados: $($lista.Count) (redes distintas: $(@($lista | Select-Object -ExpandProperty Ssid -Unique).Count))"
+        foreach ($r in ($lista | Select-Object -First 12)) {
+            $banda = if ($r.Canal -le 14) { '2.4 GHz' } else { '5 GHz' }
+            $nom = if ($r.Ssid) { $r.Ssid } else { '(oculta)' }
+            $marca = if ($actual -and $r.Ssid -eq $actual) { ' <- tu red' } else { '' }
+            Write-DiagLog ("     {0,-26} senal {1,3} %  canal {2,-3} {3,-8} {4}{5}" -f $nom, $r.Senal, $r.Canal, $banda, $r.Auth, $marca)
+        }
+        if ($canalActual) {
+            $mismos = @($lista | Where-Object { $_.Canal -eq $canalActual -and $_.Senal -ge 30 }).Count - 1
+            if ($canalActual -le 14) { $solapa = @($lista | Where-Object { $_.Canal -le 14 -and $_.Canal -ne $canalActual -and [math]::Abs($_.Canal - $canalActual) -le 4 -and $_.Senal -ge 30 }).Count } else { $solapa = 0 }
+            Write-DiagLog " - Tu red usa el canal ${canalActual}: otras $([math]::Max(0, $mismos)) red(es) fuertes en el mismo canal y $solapa en canales que se solapan."
+            if (($mismos + $solapa) -ge 4) { Diag-Aviso "El canal $canalActual esta muy saturado ($($mismos + $solapa) redes interfieren). Cambia el canal del router (en 2.4 GHz usa 1, 6 u 11) o usa la banda de 5 GHz." }
+            else { Diag-Ok "El canal de tu red no esta saturado." }
+            if ($canalActual -le 14 -and @($lista | Where-Object { $_.Canal -gt 14 }).Count -gt 0) { Write-DiagLog "   Hay redes de 5 GHz disponibles: si el router lo permite, conectate a esa banda para mas velocidad." }
+        }
+        $inseguras = @($lista | Where-Object { $_.Ssid -eq $actual -and ($_.Auth -match '(?i)abiert|open' -or $_.Cifrado -match '(?i)wep|tkip') } | Select-Object -First 1)
+        if ($actual -and $inseguras.Count) { Diag-Aviso "Tu red '$actual' usa seguridad debil ($($inseguras[0].Auth) / $($inseguras[0].Cifrado)). Configura WPA2 o WPA3 con AES en el router." }
+    } catch { Write-DiagLog "No se pudo escanear las redes Wi-Fi: $($_.Exception.Message)" }
+}
+
+function Global:Medir-PingLista {
+    param([string]$Destino, [int]$Tiempo = 1000)
+    try {
+        $p = New-Object System.Net.NetworkInformation.Ping
+        $r = $p.Send($Destino, $Tiempo)
+        if ($r.Status -eq 'Success') { return [double]$r.RoundtripTime }
+    } catch { }
+    return -1.0
+}
+
+function Accion-WifiEstabilidad {
+    Write-DiagLog "=== WI-FI: ESTABILIDAD, PERDIDA DE PAQUETES Y LATENCIA (20 segundos) ==="
+    try {
+        $gw = $null
+        try { $gw = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop | Sort-Object RouteMetric | Select-Object -First 1).NextHop } catch { }
+        if (-not $gw) { $gw = ((Get-NetIPConfiguration -ErrorAction Stop | Where-Object { $_.IPv4DefaultGateway } | Select-Object -First 1).IPv4DefaultGateway.NextHop) }
+        $destinos = @()
+        if ($gw) { $destinos += [PSCustomObject]@{ Nombre = "Router ($gw)"; Ip = $gw; Datos = (New-Object System.Collections.Generic.List[double]); Perdidos = 0 } }
+        $destinos += [PSCustomObject]@{ Nombre = "Internet (1.1.1.1)"; Ip = '1.1.1.1'; Datos = (New-Object System.Collections.Generic.List[double]); Perdidos = 0 }
+        if (-not $gw) { Write-DiagLog "No se encontro la puerta de enlace (router): se mide solo Internet." }
+        $n = 20
+        for ($i = 1; $i -le $n; $i++) {
+            Diag-Progreso -Pct (($i - 1) / $n * 100) -Texto "Enviando paquetes de prueba... ($i/$n)"
+            foreach ($d in $destinos) {
+                $ms = Medir-PingLista -Destino $d.Ip
+                if ($ms -lt 0) { $d.Perdidos++ } else { $d.Datos.Add($ms) }
+            }
+            Wait-UI -Milisegundos 800
+        }
+        foreach ($d in $destinos) {
+            $perd = [math]::Round(100 * $d.Perdidos / $n, 0)
+            if ($d.Datos.Count -eq 0) { Write-DiagLog " - $($d.Nombre): sin respuesta (100 % perdido)"; Diag-Aviso "No hay respuesta de $($d.Nombre)."; continue }
+            $arr = $d.Datos.ToArray()
+            $prom = [math]::Round(($arr | Measure-Object -Average).Average, 1)
+            $max = [math]::Round(($arr | Measure-Object -Maximum).Maximum, 0)
+            $min = [math]::Round(($arr | Measure-Object -Minimum).Minimum, 0)
+            $jit = 0.0
+            if ($arr.Length -gt 1) { $s = 0.0; for ($k = 1; $k -lt $arr.Length; $k++) { $s += [math]::Abs($arr[$k] - $arr[$k - 1]) }; $jit = [math]::Round($s / ($arr.Length - 1), 1) }
+            Write-DiagLog " - $($d.Nombre): perdidos $perd % | latencia min/prom/max: $min / $prom / $max ms | variacion (jitter): $jit ms"
+            if ($perd -ge 5) { Diag-Aviso "Perdida de paquetes del $perd % hacia $($d.Nombre): conexion inestable (señal, interferencia o cable)." }
+            elseif ($perd -gt 0) { Write-DiagLog "   Perdida minima ($perd %): aceptable." }
+            if ($d.Nombre -like 'Router*') {
+                if ($prom -gt 30) { Diag-Aviso "Latencia alta hacia el router ($prom ms): Wi-Fi congestionado o señal debil." }
+                elseif ($perd -lt 5) { Diag-Ok "Conexion con el router estable ($prom ms)." }
+            } else {
+                if ($prom -gt 120) { Diag-Aviso "Latencia alta hacia Internet ($prom ms)." }
+                elseif ($perd -lt 5) { Diag-Ok "Conexion a Internet estable ($prom ms)." }
+            }
+            if ($jit -gt 40) { Diag-Aviso "Variacion de latencia alta ($jit ms): se notara en videollamadas y juegos." }
+        }
+        try {
+            $cron = [System.Diagnostics.Stopwatch]::StartNew()
+            [void][System.Net.Dns]::GetHostAddresses('www.microsoft.com')
+            $cron.Stop()
+            Write-DiagLog " - Resolucion DNS: $([math]::Round($cron.Elapsed.TotalMilliseconds, 0)) ms"
+            if ($cron.Elapsed.TotalMilliseconds -gt 500) { Diag-Aviso "El DNS tarda $([math]::Round($cron.Elapsed.TotalMilliseconds, 0)) ms: las paginas tardan en abrir. Prueba DNS 1.1.1.1 o 8.8.8.8." }
+        } catch { Diag-Aviso "No se pudo resolver un nombre de dominio (DNS): revisa la conexion o el DNS configurado." }
+    } catch { Write-DiagLog "No se pudo completar la prueba de estabilidad: $($_.Exception.Message)" }
+}
+
+function Accion-WifiSeguridadEventos {
+    Write-DiagLog "=== WI-FI: SEGURIDAD DE LA CONEXION Y DESCONEXIONES (7 dias) ==="
+    try {
+        $inter = @(netsh wlan show interfaces 2>$null)
+        $auth = ''; $cif = ''; $ssid = ''
+        foreach ($l in $inter) {
+            if ($l -match '^\s*SSID\s*:\s*(.+)$') { $ssid = $Matches[1].Trim() }
+            if ($l -match '^\s*(Autenticaci.n|Authentication)\s*:\s*(.+)$') { $auth = $Matches[2].Trim() }
+            if ($l -match '^\s*(Cifrado|Cipher)\s*:\s*(.+)$') { $cif = $Matches[2].Trim() }
+        }
+        if ($ssid) {
+            Write-DiagLog " - Red conectada: $ssid | Autenticacion: $auth | Cifrado: $cif"
+            if ($auth -match '(?i)abiert|open' -or $cif -match '(?i)wep|none|ning') { Diag-Aviso "La red '$ssid' no esta protegida o usa cifrado debil. Usa WPA2/WPA3." }
+            elseif ($auth -match '(?i)WPA3') { Diag-Ok "Seguridad excelente (WPA3)." }
+            elseif ($auth -match '(?i)WPA2') { Diag-Ok "Seguridad correcta (WPA2)." }
+            elseif ($auth -match '(?i)WPA\b') { Diag-Aviso "La red usa WPA (antiguo). Cambia a WPA2/WPA3 en el router." }
+        } else { Write-DiagLog " - No hay una red Wi-Fi conectada ahora mismo." }
+    } catch { }
+    try {
+        $perf = @(netsh wlan show profiles 2>$null | Where-Object { $_ -match ':\s*\S' -and $_ -match '(?i)perfil|profile' })
+        if ($perf.Count) { Write-DiagLog " - Redes guardadas en el equipo: $($perf.Count)" }
+    } catch { }
+    try {
+        $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-WLAN-AutoConfig/Operational'; Id = 8001, 8002, 8003, 11006; StartTime = (Get-Date).AddDays(-7) } -ErrorAction Stop)
+        $con = @($ev | Where-Object { $_.Id -eq 8001 }).Count
+        $fallos = @($ev | Where-Object { $_.Id -in 8002, 11006 })
+        $desc = @($ev | Where-Object { $_.Id -eq 8003 }).Count
+        Write-DiagLog " - Ultimos 7 dias: conexiones $con | desconexiones $desc | intentos fallidos $($fallos.Count)"
+        foreach ($f in ($fallos | Select-Object -First 3)) {
+            $m = ("$($f.Message)" -split "`n")[0].Trim()
+            Write-DiagLog "     $($f.TimeCreated.ToString('yyyy-MM-dd HH:mm')): $m"
+        }
+        if ($desc -ge 30) { Diag-Aviso "Hay $desc desconexiones Wi-Fi en 7 dias: el adaptador, el driver o la señal fallan con frecuencia." }
+        elseif ($fallos.Count -ge 5) { Diag-Aviso "Hay $($fallos.Count) intentos de conexion fallidos en 7 dias: revisa la clave, el router o el driver." }
+        else { Diag-Ok "Pocas desconexiones o fallos de Wi-Fi en los ultimos 7 dias." }
+    } catch { Write-DiagLog " - No hay registro de eventos Wi-Fi disponible (registro desactivado o sin permisos)." }
+}
+
+# ---------------------------- Mouse / touchpad ----------------------------
+
+function Accion-MouseDispositivos {
+    Write-DiagLog "=== MOUSE / TOUCHPAD: DISPOSITIVOS Y AJUSTES ==="
+    $hayTouch = $false
+    try {
+        $dev = @(Get-CimInstance Win32_PointingDevice -ErrorAction Stop)
+        if ($dev.Count -eq 0) { Write-DiagLog "Windows no detecta ningun dispositivo señalador." }
+        foreach ($d in $dev) {
+            $esTouch = ("$($d.Name) $($d.Description)" -match '(?i)touch|synaptics|elan|trackpad|precision|clickpad')
+            if ($esTouch) { $hayTouch = $true }
+            $tipo = if ($esTouch) { 'Touchpad' } else { 'Mouse' }
+            Write-DiagLog " - [$tipo] $($d.Name) | Fabricante: $($d.Manufacturer) | Botones: $($d.NumberOfButtons) | Estado: $($d.Status)"
+            if ([int]$d.ConfigManagerErrorCode -ne 0) { Diag-Aviso "'$($d.Name)' tiene un problema en el Administrador de dispositivos (codigo $($d.ConfigManagerErrorCode)). Reinstala o actualiza su controlador." }
+            else { Diag-Ok "$tipo '$($d.Name)' funciona correctamente segun Windows." }
+            try {
+                $id = ("$($d.PNPDeviceID)").Replace('\', '\\')
+                $drv = Get-CimInstance Win32_PnPSignedDriver -Filter "DeviceID='$id'" -ErrorAction Stop | Select-Object -First 1
+                if ($drv) {
+                    $fd = $null; try { $fd = [datetime]$drv.DriverDate } catch { }
+                    Write-DiagLog "     Driver: $($drv.DriverVersion) | Fecha: $(if ($fd) { $fd.ToString('yyyy-MM-dd') } else { 'desconocida' }) | $($drv.DriverProviderName)"
+                }
+            } catch { }
+        }
+        if (-not $hayTouch) { Write-DiagLog " - No se detecto touchpad (equipo de escritorio o solo mouse externo)." }
+    } catch { Write-DiagLog "No se pudo consultar los dispositivos señaladores: $($_.Exception.Message)" }
+    try {
+        if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\PrecisionTouchPad') { Write-DiagLog " - Touchpad de precision de Windows: configuracion presente." }
+    } catch { }
+    try {
+        $m = Get-ItemProperty 'HKCU:\Control Panel\Mouse' -ErrorAction Stop
+        $vel = [int]$m.MouseSensitivity
+        Write-DiagLog " - Velocidad del puntero: $vel/20 | Doble clic: $($m.DoubleClickSpeed) ms | Precision del puntero mejorada: $(if ("$($m.MouseSpeed)" -ne '0') { 'si' } else { 'no' }) | Lineas por rueda: $([System.Windows.SystemParameters]::WheelScrollLines)"
+        if ("$($m.SwapMouseButtons)" -eq '1') { Write-DiagLog "   Los botones izquierdo y derecho estan invertidos (normal si el usuario es zurdo; si no, cambialo en Configuracion > Mouse)." }
+        if ($vel -le 3 -or $vel -ge 19) { Write-DiagLog "   La velocidad del puntero esta en un extremo: puede sentirse muy lento o impreciso." }
+    } catch { }
+    try {
+        $prob = @(Get-PnpDevice -Class Mouse, HIDClass -ErrorAction Stop | Where-Object { $_.Status -in 'Error', 'Degraded', 'Unknown' -and $_.FriendlyName -match '(?i)mouse|touch|pointer|hid-compliant' })
+        foreach ($p in ($prob | Select-Object -First 4)) { Diag-Aviso "Dispositivo '$($p.FriendlyName)' con estado $($p.Status) en Windows." }
+    } catch { }
+}
+
+function Global:Marcar-PruebaMouse {
+    param([string]$Clave)
+    try {
+        if (-not $Global:_pmEstado) { return }
+        if ($Global:_pmEstado.ContainsKey($Clave)) {
+            $Global:_pmEstado[$Clave] = $true
+            $tb = $Global:_pmUi[$Clave]
+            if ($tb) { $tb.Text = "✔ " + $tb.Tag; $tb.Foreground = [System.Windows.Media.Brushes]::LimeGreen }
+        }
+    } catch { }
+}
+
+function Show-PruebaBotonesMouse {
+    Write-DiagLog "=== MOUSE / TOUCHPAD: PRUEBA DE BOTONES Y GESTOS ==="
+    try {
+        [xml]$xamlBm = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Prueba de botones del mouse/touchpad - The Dragon Tool" Height="560" Width="760" WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="14">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+    <TextBlock DockPanel.Dock="Top" Text="Realiza cada accion dentro del recuadro azul. Cada prueba se marca con ✔ al detectarla." Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"/>
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="BtnFinBm" Content="Terminar y guardar resultado" Width="220"/>
+    </StackPanel>
+    <UniformGrid DockPanel.Dock="Right" Columns="1" Width="250" Margin="12,0,0,0">
+      <TextBlock x:Name="CkIzq" Foreground="#8FA3C7" FontSize="14" VerticalAlignment="Center"/>
+      <TextBlock x:Name="CkDer" Foreground="#8FA3C7" FontSize="14" VerticalAlignment="Center"/>
+      <TextBlock x:Name="CkMed" Foreground="#8FA3C7" FontSize="14" VerticalAlignment="Center"/>
+      <TextBlock x:Name="CkDoble" Foreground="#8FA3C7" FontSize="14" VerticalAlignment="Center"/>
+      <TextBlock x:Name="CkArrastre" Foreground="#8FA3C7" FontSize="14" VerticalAlignment="Center"/>
+      <TextBlock x:Name="CkArriba" Foreground="#8FA3C7" FontSize="14" VerticalAlignment="Center"/>
+      <TextBlock x:Name="CkAbajo" Foreground="#8FA3C7" FontSize="14" VerticalAlignment="Center"/>
+      <TextBlock x:Name="CkZoom" Foreground="#8FA3C7" FontSize="14" VerticalAlignment="Center"/>
+    </UniformGrid>
+    <Border x:Name="ZonaBm" BorderBrush="#2F7CF6" BorderThickness="2" CornerRadius="12" Background="#151B27">
+      <TextBlock x:Name="TxtZonaBm" Text="Zona de prueba&#10;(clic izquierdo, derecho, medio, doble clic, arrastrar, rueda, Ctrl + rueda / pellizco)" Foreground="#4C6595" FontSize="16" TextAlignment="Center" TextWrapping="Wrap" VerticalAlignment="Center" HorizontalAlignment="Center" IsHitTestVisible="False" Margin="20"/>
+    </Border>
+  </DockPanel>
+</Window>
+"@
+        $readerBm = New-Object System.Xml.XmlNodeReader $xamlBm
+        $winBm = [Windows.Markup.XamlReader]::Load($readerBm)
+        Iniciar-EfectosNeon -Ventana $winBm
+        $etq = [ordered]@{ Izq = 'Clic izquierdo'; Der = 'Clic derecho'; Med = 'Clic medio (rueda)'; Doble = 'Doble clic'; Arrastre = 'Arrastrar con clic sostenido'; Arriba = 'Rueda / 2 dedos hacia arriba'; Abajo = 'Rueda / 2 dedos hacia abajo'; Zoom = 'Ctrl + rueda (pellizco)' }
+        $Global:_pmEstado = @{}; $Global:_pmUi = @{}; $Global:_pmDown = $null
+        foreach ($k in $etq.Keys) {
+            $tb = $winBm.FindName("Ck$k")
+            $tb.Tag = $etq[$k]; $tb.Text = "○ " + $etq[$k]
+            $Global:_pmEstado[$k] = $false; $Global:_pmUi[$k] = $tb
+        }
+        $zona = $winBm.FindName("ZonaBm")
+        $zona.Add_MouseLeftButtonDown({ param($s, $e) Marcar-PruebaMouse 'Izq'; if ($e.ClickCount -ge 2) { Marcar-PruebaMouse 'Doble' }; $Global:_pmDown = $e.GetPosition($s) })
+        $zona.Add_MouseLeftButtonUp({ $Global:_pmDown = $null })
+        $zona.Add_MouseRightButtonDown({ Marcar-PruebaMouse 'Der' })
+        $zona.Add_MouseDown({ param($s, $e) if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Middle) { Marcar-PruebaMouse 'Med' } })
+        $zona.Add_MouseMove({
+            param($s, $e)
+            if ($e.LeftButton -eq [System.Windows.Input.MouseButtonState]::Pressed -and $Global:_pmDown) {
+                $p = $e.GetPosition($s)
+                if (([math]::Abs($p.X - $Global:_pmDown.X) + [math]::Abs($p.Y - $Global:_pmDown.Y)) -gt 80) { Marcar-PruebaMouse 'Arrastre' }
+            }
+        })
+        $zona.Add_MouseWheel({
+            param($s, $e)
+            if ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control) { Marcar-PruebaMouse 'Zoom' }
+            elseif ($e.Delta -gt 0) { Marcar-PruebaMouse 'Arriba' } else { Marcar-PruebaMouse 'Abajo' }
+        })
+        $winBm.FindName("BtnFinBm").Add_Click({ $winBm.Close() })
+        $winBm.ShowDialog() | Out-Null
+        $hechos = @($Global:_pmEstado.Keys | Where-Object { $Global:_pmEstado[$_] })
+        $faltan = @($Global:_pmEstado.Keys | Where-Object { -not $Global:_pmEstado[$_] })
+        foreach ($k in $etq.Keys) {
+            if ($Global:_pmEstado[$k]) { Diag-Ok "$($etq[$k]): funciona." }
+        }
+        foreach ($k in $faltan) {
+            if ($k -in 'Izq', 'Der') { Diag-Aviso "$($etq[$k]) no respondio durante la prueba: el boton o el touchpad puede estar fallando." }
+            else { Write-DiagLog "   - $($etq[$k]): no se detecto durante la prueba (no probado o no responde)." }
+        }
+        Write-DiagLog "Prueba de botones finalizada: $($hechos.Count) de $($etq.Count) acciones detectadas."
+    } catch { Write-DiagLog "No se pudo abrir la prueba de botones: $($_.Exception.Message)" }
+}
+
+function Global:Nueva-RondaPrecision {
+    try {
+        $c = $Global:_ppCanvas
+        $w = [double]$c.ActualWidth; $h = [double]$c.ActualHeight
+        if ($w -lt 120) { $w = 600 }; if ($h -lt 120) { $h = 320 }
+        $r = $Global:_ppRadio
+        $x = $r + $Global:_ppRnd.NextDouble() * ($w - 2 * $r)
+        $y = $r + $Global:_ppRnd.NextDouble() * ($h - 2 * $r)
+        $Global:_ppObj.Width = 2 * $r; $Global:_ppObj.Height = 2 * $r
+        [System.Windows.Controls.Canvas]::SetLeft($Global:_ppObj, $x - $r)
+        [System.Windows.Controls.Canvas]::SetTop($Global:_ppObj, $y - $r)
+        $Global:_ppCentro = New-Object System.Windows.Point($x, $y)
+        $Global:_ppObj.Visibility = 'Visible'
+        $Global:_ppTxt.Text = "Objetivo $($Global:_ppRonda) de $($Global:_ppTotal)  |  Aciertos: $($Global:_ppAciertos)  |  Fallos: $($Global:_ppFallos)"
+        $Global:_ppCron.Restart()
+    } catch { }
+}
+
+function Show-PruebaPrecisionMouse {
+    Write-DiagLog "=== MOUSE / TOUCHPAD: PRUEBA DE PRECISION Y RESPUESTA ==="
+    try {
+        [xml]$xamlPp = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Prueba de precision del puntero - The Dragon Tool" Height="560" Width="760" WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="14">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+    <TextBlock DockPanel.Dock="Top" Text="Haz clic en el circulo verde cada vez que aparezca, lo mas rapido y centrado que puedas (12 objetivos)." Foreground="White" TextWrapping="Wrap" Margin="0,0,0,6"/>
+    <TextBlock x:Name="TxtPp" DockPanel.Dock="Top" Foreground="#66AEFF" FontWeight="Bold" Margin="0,0,0,8" Text="Preparando..."/>
+    <Border BorderBrush="#2F7CF6" BorderThickness="2" CornerRadius="12" Background="#151B27">
+      <Canvas x:Name="CanvasPp" Background="Transparent" ClipToBounds="True"/>
+    </Border>
+  </DockPanel>
+</Window>
+"@
+        $readerPp = New-Object System.Xml.XmlNodeReader $xamlPp
+        $winPp = [Windows.Markup.XamlReader]::Load($readerPp)
+        Iniciar-EfectosNeon -Ventana $winPp
+        $canvas = $winPp.FindName("CanvasPp")
+        $Global:_ppCanvas = $canvas; $Global:_ppTxt = $winPp.FindName("TxtPp")
+        $Global:_ppRnd = New-Object System.Random
+        $Global:_ppRadio = 24.0; $Global:_ppTotal = 12; $Global:_ppRonda = 1; $Global:_ppAciertos = 0; $Global:_ppFallos = 0
+        $Global:_ppTiempos = New-Object System.Collections.Generic.List[double]
+        $Global:_ppDistancias = New-Object System.Collections.Generic.List[double]
+        $Global:_ppCron = New-Object System.Diagnostics.Stopwatch
+        $obj = New-Object System.Windows.Shapes.Ellipse
+        $obj.Fill = [System.Windows.Media.Brushes]::LimeGreen
+        $obj.Stroke = [System.Windows.Media.Brushes]::White; $obj.StrokeThickness = 2
+        $obj.Visibility = 'Collapsed'
+        [void]$canvas.Children.Add($obj)
+        $Global:_ppObj = $obj
+        $canvas.Add_MouseLeftButtonDown({
+            param($s, $e)
+            if (-not $Global:_ppCron.IsRunning) { return }
+            $p = $e.GetPosition($Global:_ppCanvas)
+            $d = [math]::Sqrt([math]::Pow($p.X - $Global:_ppCentro.X, 2) + [math]::Pow($p.Y - $Global:_ppCentro.Y, 2))
+            if ($d -le $Global:_ppRadio) {
+                $Global:_ppAciertos++
+                $Global:_ppTiempos.Add($Global:_ppCron.Elapsed.TotalSeconds)
+                $Global:_ppDistancias.Add($d)
+                $Global:_ppRonda++
+                if ($Global:_ppRonda -gt $Global:_ppTotal) { $Global:_ppCron.Stop(); $Global:_ppObj.Visibility = 'Collapsed'; $Global:_ppTxt.Text = "Prueba completada. Cierra la ventana para ver el resultado."; $Global:_ppVentana.Close() }
+                else { Nueva-RondaPrecision }
+            } else {
+                $Global:_ppFallos++
+                $Global:_ppTxt.Text = "Objetivo $($Global:_ppRonda) de $($Global:_ppTotal)  |  Aciertos: $($Global:_ppAciertos)  |  Fallos: $($Global:_ppFallos)"
+            }
+        })
+        $Global:_ppVentana = $winPp
+        $winPp.Add_ContentRendered({ Nueva-RondaPrecision })
+        $winPp.ShowDialog() | Out-Null
+        if ($Global:_ppAciertos -eq 0) { Write-DiagLog "Prueba de precision cancelada sin aciertos."; return }
+        $tp = [math]::Round(($Global:_ppTiempos | Measure-Object -Average).Average, 2)
+        $dp = [math]::Round(($Global:_ppDistancias | Measure-Object -Average).Average, 1)
+        Write-DiagLog " - Aciertos: $($Global:_ppAciertos) de $($Global:_ppTotal) | Fallos (clics fuera del objetivo): $($Global:_ppFallos)"
+        Write-DiagLog " - Tiempo promedio por objetivo: $tp s | Distancia media al centro: $dp px"
+        if ($Global:_ppAciertos -lt $Global:_ppTotal) { Write-DiagLog "   (Prueba terminada antes de completar los $($Global:_ppTotal) objetivos.)" }
+        if ($Global:_ppFallos -ge 5) { Diag-Aviso "Hubo $($Global:_ppFallos) clics fuera del objetivo: el puntero puede ser impreciso o saltar (limpia el sensor/touchpad y revisa el driver)." }
+        else { Diag-Ok "Precision del puntero correcta ($($Global:_ppFallos) fallo(s))." }
+        if ($tp -gt 2.5) { Write-DiagLog "   El tiempo promedio es alto: puede deberse a un puntero lento o a poca costumbre con el touchpad." }
+    } catch { Write-DiagLog "No se pudo abrir la prueba de precision: $($_.Exception.Message)" }
+}
+
 # Ejecuta un paso del diagnostico completo sin que un fallo en uno detenga todos los demas
 function Global:Diag-Paso {
     param([string]$Nombre, [scriptblock]$Bloque)
@@ -7078,52 +7787,62 @@ function Accion-DiagnosticoCompletoEquipo {
     Write-DiagLog "========================================"
     Write-DiagLog "   DIAGNOSTICO COMPLETO DEL EQUIPO"
     Write-DiagLog "========================================"
-    Diag-Progreso -Pct 0 -Texto 'Paso 1 de 21: Informacion del hardware'
+    Diag-Progreso -Pct 0 -Texto 'Paso 1 de 26: Informacion del hardware'
     Diag-Paso -Nombre 'Accion-InfoHardwareCompleta' -Bloque { Accion-InfoHardwareCompleta }
-    Diag-Progreso -Pct 5 -Texto 'Paso 2 de 21: Tarjeta grafica'
+    Diag-Progreso -Pct 3 -Texto 'Paso 2 de 26: Tarjeta grafica'
     Diag-Paso -Nombre 'Accion-ProbarGraficaDiag' -Bloque { Accion-ProbarGraficaDiag }
-    Diag-Progreso -Pct 10 -Texto 'Paso 3 de 21: Detalles de pantalla'
+    Diag-Progreso -Pct 7 -Texto 'Paso 3 de 26: Detalles de pantalla'
     Diag-Paso -Nombre 'Accion-VerDetallesPantalla' -Bloque { Accion-VerDetallesPantalla }
-    Diag-Progreso -Pct 14 -Texto 'Paso 4 de 21: Salud del almacenamiento'
+    Diag-Progreso -Pct 11 -Texto 'Paso 4 de 26: Salud del almacenamiento'
     Diag-Paso -Nombre 'Accion-ProbarAlmacenamiento' -Bloque { Accion-ProbarAlmacenamiento }
-    Diag-Progreso -Pct 19 -Texto 'Paso 5 de 21: Detalle fisico del disco'
+    Diag-Progreso -Pct 15 -Texto 'Paso 5 de 26: Detalle fisico del disco'
     Diag-Paso -Nombre 'Accion-DiscoDetalleFisico' -Bloque { Accion-DiscoDetalleFisico }
-    Diag-Progreso -Pct 24 -Texto 'Paso 6 de 21: Particiones'
+    Diag-Progreso -Pct 19 -Texto 'Paso 6 de 26: Particiones'
     Diag-Paso -Nombre 'Accion-DiscoParticiones' -Bloque { Accion-DiscoParticiones }
-    Diag-Progreso -Pct 29 -Texto 'Paso 7 de 21: Atributos S.M.A.R.T.'
+    Diag-Progreso -Pct 23 -Texto 'Paso 7 de 26: Atributos S.M.A.R.T.'
     Diag-Paso -Nombre 'Accion-DiscoSmartAtributos' -Bloque { Accion-DiscoSmartAtributos }
-    Diag-Progreso -Pct 33 -Texto 'Paso 8 de 21: Eventos de disco'
+    Diag-Progreso -Pct 26 -Texto 'Paso 8 de 26: Eventos de disco'
     Diag-Paso -Nombre 'Accion-DiscoEventos' -Bloque { Accion-DiscoEventos }
-    Diag-Progreso -Pct 38 -Texto 'Paso 9 de 21: Velocidad de disco'
+    Diag-Progreso -Pct 30 -Texto 'Paso 9 de 26: Velocidad de disco'
     Diag-Paso -Nombre 'Accion-ProbarVelocidadDisco' -Bloque { Accion-ProbarVelocidadDisco }
-    Diag-Progreso -Pct 43 -Texto 'Paso 10 de 21: Ventiladores'
+    Diag-Progreso -Pct 34 -Texto 'Paso 10 de 26: Ventiladores'
     Diag-Paso -Nombre 'Accion-ProbarVentiladores' -Bloque { Accion-ProbarVentiladores }
-    Diag-Progreso -Pct 48 -Texto 'Paso 11 de 21: Temperatura'
+    Diag-Progreso -Pct 38 -Texto 'Paso 11 de 26: Temperatura'
     Diag-Paso -Nombre 'Accion-ProbarTemperaturaCPU' -Bloque { Accion-ProbarTemperaturaCPU }
-    Diag-Progreso -Pct 52 -Texto 'Paso 12 de 21: Bateria'
+    Diag-Progreso -Pct 42 -Texto 'Paso 12 de 26: Informacion del procesador'
+    Diag-Paso -Nombre 'Accion-CpuInformacion' -Bloque { Accion-CpuInformacion }
+    Diag-Progreso -Pct 46 -Texto 'Paso 13 de 26: Uso por nucleos'
+    Diag-Paso -Nombre 'Accion-CpuUsoNucleos' -Bloque { Accion-CpuUsoNucleos }
+    Diag-Progreso -Pct 50 -Texto 'Paso 14 de 26: Bateria'
     Diag-Paso -Nombre 'Accion-ProbarBateria' -Bloque { Accion-ProbarBateria }
-    Diag-Progreso -Pct 57 -Texto 'Paso 13 de 21: Dispositivos de audio'
+    Diag-Progreso -Pct 53 -Texto 'Paso 15 de 26: Dispositivos de audio'
     Diag-Paso -Nombre 'Accion-ProbarDispositivosAudio' -Bloque { Accion-ProbarDispositivosAudio }
-    Diag-Progreso -Pct 62 -Texto 'Paso 14 de 21: Bluetooth'
+    Diag-Progreso -Pct 57 -Texto 'Paso 16 de 26: Bluetooth'
     Diag-Paso -Nombre 'Accion-ProbarBluetooth' -Bloque { Accion-ProbarBluetooth }
-    Diag-Progreso -Pct 67 -Texto 'Paso 15 de 21: Puertos USB'
+    Diag-Progreso -Pct 61 -Texto 'Paso 17 de 26: Dispositivos de puntero'
+    Diag-Paso -Nombre 'Accion-MouseDispositivos' -Bloque { Accion-MouseDispositivos }
+    Diag-Progreso -Pct 65 -Texto 'Paso 18 de 26: Puertos USB'
     Diag-Paso -Nombre 'Accion-ProbarPuertosUSB' -Bloque { Accion-ProbarPuertosUSB }
-    Diag-Progreso -Pct 71 -Texto 'Paso 16 de 21: Red'
+    Diag-Progreso -Pct 69 -Texto 'Paso 19 de 26: Red'
     Diag-Paso -Nombre 'Accion-ProbarRed' -Bloque { Accion-ProbarRed }
-    Diag-Progreso -Pct 76 -Texto 'Paso 17 de 21: Wi-Fi'
+    Diag-Progreso -Pct 73 -Texto 'Paso 20 de 26: Wi-Fi'
     Diag-Paso -Nombre 'Accion-ProbarWifi' -Bloque { Accion-ProbarWifi }
-    Diag-Progreso -Pct 81 -Texto 'Paso 18 de 21: Tiempo de arranque'
+    Diag-Progreso -Pct 76 -Texto 'Paso 21 de 26: Adaptador Wi-Fi'
+    Diag-Paso -Nombre 'Accion-WifiAdaptador' -Bloque { Accion-WifiAdaptador }
+    Diag-Progreso -Pct 80 -Texto 'Paso 22 de 26: Estabilidad del Wi-Fi'
+    Diag-Paso -Nombre 'Accion-WifiEstabilidad' -Bloque { Accion-WifiEstabilidad }
+    Diag-Progreso -Pct 84 -Texto 'Paso 23 de 26: Tiempo de arranque'
     Diag-Paso -Nombre 'Accion-ProbarTiempoArranque' -Bloque { Accion-ProbarTiempoArranque }
-    Diag-Progreso -Pct 86 -Texto 'Paso 19 de 21: Dispositivos con problemas'
+    Diag-Progreso -Pct 88 -Texto 'Paso 24 de 26: Dispositivos con problemas'
     Diag-Paso -Nombre 'Accion-ProbarDispositivosProblemas' -Bloque { Accion-ProbarDispositivosProblemas }
-    Diag-Progreso -Pct 90 -Texto 'Paso 20 de 21: Estado de Windows'
+    Diag-Progreso -Pct 92 -Texto 'Paso 25 de 26: Estado de Windows'
     Diag-Paso -Nombre 'Accion-ProbarEstadoWindows' -Bloque { Accion-ProbarEstadoWindows }
-    Diag-Progreso -Pct 95 -Texto 'Paso 21 de 21: Eventos criticos'
+    Diag-Progreso -Pct 96 -Texto 'Paso 26 de 26: Eventos criticos'
     Diag-Paso -Nombre 'Accion-ProbarEventosCriticos' -Bloque { Accion-ProbarEventosCriticos }
     Write-DiagLog "========================================"
     if ($Script:DiagAdvertencias -eq 0) { Write-DiagLog "   RESULTADO: todo en orden, sin advertencias." }
     else { Write-DiagLog "   RESULTADO: $($Script:DiagAdvertencias) advertencia(s) para revisar (lineas con ⚠ ATENCION)." }
-    Write-DiagLog "   Para camara, microfono, altavoces, teclado, mouse, pantalla, RAM, velocidad de Internet y rendimiento de CPU usa los botones individuales."
+    Write-DiagLog "   Para camara, microfono, altavoces, teclado, pruebas de mouse, pantalla, RAM, velocidad de Internet, estabilidad/integridad de CPU y escaneo de redes Wi-Fi usa los botones individuales."
     Write-DiagLog "========================================"
 }
 
@@ -13463,6 +14182,10 @@ Marcar-Arranque 'funciones y recursos'
                                         <WrapPanel>
                                             <Button x:Name="BtnProbarCPU" Content="🚀 Rendimiento CPU (10 s)" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnProbarTemperatura" Content="🌡️ Temperatura del procesador" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnCpuInfo" Content="🧠 Informacion del CPU" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnCpuNucleos" Content="📊 Uso por nucleos (12 s)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnCpuEstabilidad" Content="🔥 Estabilidad y throttling (30 s)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnCpuIntegridad" Content="✅ Integridad de calculo (15 s)" Width="212" Height="42" FontSize="12"/>
                                         </WrapPanel>
                                     </StackPanel>
                                 </Border>
@@ -13499,6 +14222,7 @@ Marcar-Arranque 'funciones y recursos'
                                             <Button x:Name="BtnDiscoActividad" Content="📈 Actividad en vivo (6 s)" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnDiscoEventos" Content="📜 Eventos de error de disco" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnDiscoDefrag" Content="🧹 Fragmentacion / optimizacion" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoVidaSsd" Content="💽 Vida util del SSD (%)" Width="212" Height="42" FontSize="12"/>
                                         </WrapPanel>
                                     </StackPanel>
                                 </Border>
@@ -13542,6 +14266,9 @@ Marcar-Arranque 'funciones y recursos'
                                         <WrapPanel>
                                             <Button x:Name="BtnProbarTeclado" Content="⌨️ Probar teclado (virtual)" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnProbarMouse" Content="🖱️ Probar mouse/touchpad" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnMouseDispositivos" Content="🔎 Dispositivos de puntero" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnMouseBotones" Content="🖱️ Prueba de botones y rueda" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnMousePrecision" Content="🎯 Precision del puntero" Width="212" Height="42" FontSize="12"/>
                                         </WrapPanel>
                                     </StackPanel>
                                 </Border>
@@ -13567,6 +14294,10 @@ Marcar-Arranque 'funciones y recursos'
                                         <WrapPanel>
                                             <Button x:Name="BtnProbarRed" Content="🌐 Probar red / Internet" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnProbarWifi" Content="📡 Wi-Fi (senal y velocidad)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnWifiAdaptador" Content="📶 Adaptador Wi-Fi" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnWifiRedes" Content="🛰️ Redes cercanas y canales" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnWifiEstabilidad" Content="📉 Estabilidad (perdida y latencia)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnWifiSeguridad" Content="🔐 Seguridad y eventos" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnProbarInternet" Content="⚡ Velocidad de Internet" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnProbarBluetooth" Content="📶 Verificar Bluetooth" Width="212" Height="42" FontSize="12"/>
                                         </WrapPanel>
@@ -14797,6 +15528,18 @@ $window.FindName("BtnDiscoDefrag").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Frag
 $window.FindName("BtnDiscoLatencia").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Latencia aleatoria 4K' -Icono '⏲️' -Accion { Accion-DiscoLatencia4K } })
 $window.FindName("BtnDiscoActividad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Actividad del disco' -Icono '📈' -Accion { Accion-DiscoActividad } })
 $window.FindName("BtnDiscoEventos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Eventos de error de disco' -Icono '📜' -Accion { Accion-DiscoEventos } })
+$window.FindName("BtnCpuInfo").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Informacion del CPU' -Icono '🧠' -Accion { Accion-CpuInformacion } })
+$window.FindName("BtnCpuNucleos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Uso por nucleos' -Icono '📊' -Accion { Accion-CpuUsoNucleos } })
+$window.FindName("BtnCpuEstabilidad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Estabilidad del CPU' -Icono '🔥' -Accion { Accion-CpuEstabilidad } })
+$window.FindName("BtnCpuIntegridad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Integridad de calculo' -Icono '✅' -Accion { Accion-CpuIntegridad } })
+$window.FindName("BtnDiscoVidaSsd").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Vida util del SSD' -Icono '💽' -Accion { Accion-DiscoVidaSSD } })
+$window.FindName("BtnMouseDispositivos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Dispositivos de puntero' -Icono '🔎' -Accion { Accion-MouseDispositivos } })
+$window.FindName("BtnMouseBotones").Add_Click({ Show-PruebaBotonesMouse })
+$window.FindName("BtnMousePrecision").Add_Click({ Show-PruebaPrecisionMouse })
+$window.FindName("BtnWifiAdaptador").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Adaptador Wi-Fi' -Icono '📶' -Accion { Accion-WifiAdaptador } })
+$window.FindName("BtnWifiRedes").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Redes Wi-Fi cercanas' -Icono '🛰️' -Accion { Accion-WifiRedes } })
+$window.FindName("BtnWifiEstabilidad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Estabilidad del Wi-Fi' -Icono '📉' -Accion { Accion-WifiEstabilidad } })
+$window.FindName("BtnWifiSeguridad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Seguridad y eventos Wi-Fi' -Icono '🔐' -Accion { Accion-WifiSeguridadEventos } })
 $window.FindName("BtnDiagCopiar").Add_Click({
     $t = $window.FindName("TxtDiagResultados").Text
     if ([string]::IsNullOrWhiteSpace($t) -or -not $Script:DiagLogIniciado) { Show-Aviso "Todavia no hay resultados para copiar. Ejecuta alguna prueba primero." "Sin resultados"; return }
@@ -14929,6 +15672,7 @@ function Global:Obtener-InfoEquipo {
         $info = [ordered]@{}
         $info['Equipo'] = $env:COMPUTERNAME
         $info['Usuario'] = $env:USERNAME
+        try { $idn = Obtener-IdentidadEquipo; $info['Marca'] = $idn.Marca; $info['Modelo'] = $idn.Modelo; $info['Numero de serie'] = $idn.Serie } catch { }
         try { $so = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $info['Windows'] = "$($so.Caption) (version $($so.Version), $($so.OSArchitecture))"; $info['Encendido desde'] = $so.LastBootUpTime.ToString('yyyy-MM-dd HH:mm') } catch { }
         try { $c = @(Get-CimInstance Win32_Processor -ErrorAction Stop)[0]; $info['Procesador'] = "$($c.Name.Trim()) ($($c.NumberOfCores) nucleos / $($c.NumberOfLogicalProcessors) hilos)" } catch { }
         try { $r = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory; $info['Memoria RAM'] = "{0:N1} GB" -f ($r / 1GB) } catch { }
@@ -15090,7 +15834,7 @@ function Global:Exportar-InformeErroresPDF {
 function Global:Registrar-LineaInforme {
     param([string]$Mensaje)
     if (-not $Global:DiagInforme) {
-        $Global:DiagInforme = @{ Secciones = (New-Object System.Collections.Generic.List[object]); Pruebas = (New-Object System.Collections.Generic.List[object]) }
+        $Global:DiagInforme = @{ Secciones = (New-Object System.Collections.Generic.List[object]); Pruebas = (New-Object System.Collections.Generic.List[object]); Ssd = @{} }
     }
     if ($Mensaje -match '^\s*=+\s*$') { return }
     $tituloSec = $null
@@ -15184,6 +15928,7 @@ function Global:Exportar-InformeDiagnosticoPDF {
     Write-Log "Generando informe de diagnostico en PDF para $($cli.Nombre)..." -Tipo INFO
     try {
         $info = Obtener-InfoEquipo
+        $idn = Obtener-IdentidadEquipo
         # clasificar lineas por seccion
         $secs = New-Object System.Collections.Generic.List[object]
         $hallazgos = New-Object System.Collections.Generic.List[object]
@@ -15222,6 +15967,12 @@ table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
 .hall { background: #fff8e6; border: 1px solid #f3d88c; border-left: 6px solid #f0a500; border-radius: 8px; padding: 6px 12px 6px 28px; margin: 0; }
 .hall li { margin: 3px 0; }
 .obs { background: #f7f9fd; border: 1px solid #dbe3f3; border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
+.ssd { border: 1px solid #dbe3f3; border-radius: 10px; padding: 8px 12px; margin: 0 0 8px 0; }
+.ssd .n { font-weight: 700; color: #17306b; font-size: 12px; }
+.ssd .n span { float: right; font-size: 15px; }
+.ssd .bar { background: #e6ebf5; border-radius: 6px; height: 12px; margin: 6px 0 3px 0; overflow: hidden; }
+.ssd .bar div { height: 12px; }
+.ssd .f { font-size: 10px; color: #5b6b8c; }
 .firmas { display: table; width: 100%; margin-top: 46px; border-spacing: 40px 0; page-break-inside: avoid; }
 .firmas div { display: table-cell; width: 50%; border-top: 1px solid #5b6b8c; text-align: center; padding-top: 5px; font-size: 10px; color: #5b6b8c; }
 '@
@@ -15229,6 +15980,7 @@ table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
         $logoHtml = Obtener-LogoHtml
         [void]$h.Append("<div class='portada'><div><h1>INFORME DE DIAGNÓSTICO</h1><div class='sub'>Revisión técnica del equipo · The Dragon Tech - Hardware and Software</div><div class='meta'>Emitido el $(Get-Date -Format 'dd/MM/yyyy HH:mm') &nbsp;|&nbsp; Técnico: $(& $enc $Script:Autor)</div></div>$logoHtml</div>")
         [void]$h.Append("<div class='ficha'><div class='col'><div class='k'>Usuario / cliente</div><div class='v'>$(& $enc $cli.Nombre)</div></div><div class='col'><div class='k'>Fecha de ingreso / visita</div><div class='v'>$(& $enc $cli.FechaTexto)</div></div><div class='col'><div class='k'>Equipo</div><div class='v'>$(& $enc $env:COMPUTERNAME)</div></div></div>")
+        [void]$h.Append("<div class='ficha' style='margin-top:6px'><div class='col'><div class='k'>Marca</div><div class='v'>$(& $enc $idn.Marca)</div></div><div class='col'><div class='k'>Modelo</div><div class='v'>$(& $enc $idn.Modelo)</div></div><div class='col'><div class='k'>N° de serie</div><div class='v'>$(& $enc $idn.Serie)</div></div></div>")
         [void]$h.Append("<div class='estado $claseEstado'>Resultado general: $(& $enc $estado)</div>")
         [void]$h.Append("<div class='tarjetas'><div class='tarjeta'><div class='n'>$($secs.Count)</div><div class='t'>Secciones de prueba</div></div><div class='tarjeta'><div class='n' style='color:#1fa75a'>$totOk</div><div class='t'>Comprobaciones OK</div></div><div class='tarjeta a'><div class='n'>$totAv</div><div class='t'>Advertencias</div></div><div class='tarjeta'><div class='n'>$($pruebas.Count)</div><div class='t'>Pruebas ejecutadas</div></div></div>")
         if ($cli.Obs) { [void]$h.Append("<h2>Problema reportado / observaciones</h2><div class='obs'>$(& $enc $cli.Obs)</div>") }
@@ -15238,7 +15990,18 @@ table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
             [void]$h.Append("<tr><td>$(& $enc $k)</td><td>$v</td></tr>")
         }
         [void]$h.Append("</table>")
-        [void]$h.Append("<h2>2. Hallazgos que requieren atención</h2>")
+        $nSec = 2
+        if ($inf.Ssd -and $inf.Ssd.Count -gt 0) {
+            [void]$h.Append("<h2>2. Vida útil del SSD</h2>")
+            foreach ($kv in @($inf.Ssd.GetEnumerator() | Sort-Object Name)) {
+                $p = [int]$kv.Value.Pct
+                $col = if ($p -ge 70) { '#1fa75a' } elseif ($p -ge 30) { '#e0a100' } else { '#d62c2c' }
+                $est = if ($p -ge 70) { 'Buen estado' } elseif ($p -ge 30) { 'Desgaste moderado' } elseif ($p -ge 10) { 'Vida baja: planear reemplazo' } else { 'Crítico: reemplazar' }
+                [void]$h.Append("<div class='ssd'><div class='n'>$(& $enc $kv.Key) &nbsp;<span style='color:$col'>$p % restante</span></div><div class='bar'><div style='width:$p%;background:$col'></div></div><div class='f'>$(& $enc $est) · Desgaste $(100 - $p) % · Capacidad $($kv.Value.Tam) GB · Fuente: $(& $enc $kv.Value.Fuente)</div></div>")
+            }
+            $nSec = 3
+        }
+        [void]$h.Append("<h2>$nSec. Hallazgos que requieren atención</h2>")
         if ($hallazgos.Count -eq 0) { [void]$h.Append("<div class='estado ok' style='font-size:11.5px'>No se detectaron advertencias en las pruebas realizadas.</div>") }
         else {
             [void]$h.Append("<ol class='hall'>")
@@ -15246,7 +16009,7 @@ table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
             [void]$h.Append("</ol>")
         }
         if ($pruebas.Count -gt 0) {
-            [void]$h.Append("<h2>3. Pruebas realizadas</h2><table class='pru'><tr><th>Prueba</th><th>Hora</th><th>Duración</th><th>OK</th><th>Avisos</th></tr>")
+            [void]$h.Append("<h2>$($nSec + 1). Pruebas realizadas</h2><table class='pru'><tr><th>Prueba</th><th>Hora</th><th>Duración</th><th>OK</th><th>Avisos</th></tr>")
             foreach ($t in $pruebas) {
                 $dur = if ($t.Seg -ge 60) { "{0}m {1}s" -f [int][math]::Floor($t.Seg / 60), [int]($t.Seg % 60) } else { "{0:N1} s" -f $t.Seg }
                 $col = if ($t.Aviso -gt 0) { "style='color:#c27803;font-weight:700'" } else { "" }
@@ -15254,7 +16017,7 @@ table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
             }
             [void]$h.Append("</table>")
         }
-        [void]$h.Append("<h2>4. Detalle de resultados</h2>")
+        [void]$h.Append("<h2>$($nSec + 2). Detalle de resultados</h2>")
         foreach ($sc in $secs) {
             $badge = if ($sc.Av -gt 0) { "<span class='b av'>$($sc.Av) aviso(s)</span>" } else { "<span class='b ok'>OK</span>" }
             [void]$h.Append("<div class='sec'><div class='t'>$(& $enc $sc.Titulo)$badge</div><div class='c'>")
