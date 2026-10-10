@@ -14860,7 +14860,7 @@ function Global:Detener-MonitoreoVivo {
 
 function Global:Exportar-InformeErroresPDF {
     $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
-    $entradas = @($Script:RegistroErrores.ToArray()) | Sort-Object Momento -Descending
+    $entradas = @(@($Script:RegistroErrores.ToArray()) | Sort-Object Momento -Descending)
     if ($entradas.Count -eq 0) { Show-Aviso "No hay errores registrados para exportar." "Registro vacio"; return }
     Add-Type -AssemblyName System.Windows.Forms
     $dlg = New-Object System.Windows.Forms.SaveFileDialog
@@ -14981,20 +14981,30 @@ table.cats td { padding: 4px 8px; border-bottom: 1px solid #eef2fa; }
             "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
         ) | Where-Object { $_ -and (Test-Path $_) }
         $hecho = $false
-        if ($navs.Count -gt 0) {
+        $intentos = New-Object System.Collections.Generic.List[string]
+        if (@($navs).Count -gt 0) {
             $uri = ([uri]$html).AbsoluteUri
-            foreach ($modo in @('--headless=new', '--headless')) {
-                $perfil = Join-Path $env:TEMP "DragonTool_PerfilPDF_$([guid]::NewGuid().ToString('N'))"
-                if (Test-Path $pdf) { Remove-Item $pdf -Force -ErrorAction SilentlyContinue }
-                $argsNav = "$modo --disable-gpu --no-first-run --no-pdf-header-footer --user-data-dir=`"$perfil`" --print-to-pdf=`"$pdf`" `"$uri`""
-                try {
-                    $proc = Start-Process -FilePath $navs[0] -ArgumentList $argsNav -PassThru -WindowStyle Hidden
-                    [void]$proc.WaitForExit(60000)
-                    if (-not $proc.HasExited) { try { $proc.Kill() } catch { } }
-                } catch { }
-                Start-Sleep -Milliseconds 400
-                try { Remove-Item $perfil -Recurse -Force -ErrorAction SilentlyContinue } catch { }
-                if ((Test-Path $pdf) -and ((Get-Item $pdf).Length -gt 1000)) { $hecho = $true; break }
+            foreach ($nav in @($navs)) {
+                foreach ($modo in @('--headless=new', '--headless')) {
+                    $perfil = Join-Path $env:TEMP "DragonTool_PerfilPDF_$([guid]::NewGuid().ToString('N'))"
+                    if (Test-Path $pdf) { Remove-Item $pdf -Force -ErrorAction SilentlyContinue }
+                    $lista = @($modo, '--disable-gpu', '--no-first-run', '--disable-extensions', '--no-pdf-header-footer', '--print-to-pdf-no-header', "--user-data-dir=$perfil", "--print-to-pdf=$pdf", $uri)
+                    $codigo = $null
+                    try {
+                        # el operador & con tuberia espera a que el navegador termine
+                        & $nav @lista 2>&1 | Out-Null
+                        $codigo = $LASTEXITCODE
+                    } catch { $codigo = "excepcion: $($_.Exception.Message)" }
+                    # esperar hasta 25 s a que aparezca el archivo (Edge a veces termina de escribirlo despues)
+                    for ($w = 0; $w -lt 50; $w++) {
+                        if ((Test-Path $pdf) -and ((Get-Item $pdf).Length -gt 1000)) { break }
+                        Start-Sleep -Milliseconds 500
+                    }
+                    try { Remove-Item $perfil -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+                    if ((Test-Path $pdf) -and ((Get-Item $pdf).Length -gt 1000)) { $hecho = $true; break }
+                    [void]$intentos.Add("$([System.IO.Path]::GetFileName($nav)) $modo -> codigo $codigo")
+                }
+                if ($hecho) { break }
             }
         }
         if ($hecho) {
@@ -15003,9 +15013,11 @@ table.cats td { padding: 4px 8px; border-bottom: 1px solid #eef2fa; }
             try { Start-Process $pdf } catch { }
         } else {
             $htmlFinal = [System.IO.Path]::ChangeExtension($pdf, '.html')
-            Copy-Item $html $htmlFinal -Force
-            Write-Log "No se encontro Edge/Chrome para crear el PDF; se guardo el informe como pagina web: $htmlFinal" -Tipo AVISO
-            Show-Aviso "No se pudo crear el PDF automaticamente (no se encontro Microsoft Edge o Chrome).`n`nSe guardo el informe como pagina web y se abrira ahora: pulsa Ctrl+P y elige 'Guardar como PDF'." "Informe"
+            $txt = [System.IO.File]::ReadAllText($html, [System.Text.Encoding]::UTF8).Replace('</body>', "<script>window.onload=function(){setTimeout(function(){window.print()},600)}</script></body>")
+            [System.IO.File]::WriteAllText($htmlFinal, $txt, (New-Object System.Text.UTF8Encoding($true)))
+            $diag = if (@($navs).Count -eq 0) { "no se encontro Edge ni Chrome" } else { "el navegador no genero el PDF (" + ($intentos -join '; ') + ")" }
+            Write-Log "No se pudo crear el PDF automaticamente: $diag. Se guardo el informe como pagina web: $htmlFinal" -Tipo AVISO
+            Show-Aviso "No se pudo crear el PDF automaticamente.`n`nSe abrira el informe en el navegador y aparecera la ventana de impresion: elige 'Guardar como PDF' como impresora y pulsa Guardar." "Informe"
             try { Start-Process $htmlFinal } catch { }
         }
     } catch {
