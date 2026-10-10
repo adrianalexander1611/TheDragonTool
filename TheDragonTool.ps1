@@ -12543,127 +12543,253 @@ function Buscar-DriverLaptop {
                         <ColumnDefinition Width="1*" MinWidth="280"/>
                     </Grid.ColumnDefinitions>
                     <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                        <StackPanel>
-                            <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"
-                                       Text="Pruebas organizadas por componente. Algunas requieren tu participacion (escuchar, ver, escribir); otras son automaticas. Los resultados aparecen a la derecha."/>
-                            <Button x:Name="BtnDiagCompleto" Content="🧩 Diagnostico completo automatico" Width="300" Height="44" FontSize="13" HorizontalAlignment="Left" Margin="0,0,0,10" BorderBrush="{StaticResource Acento}"/>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="🧾 Sistema general" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                        <Grid>
+                            <!-- Menu principal: un mosaico por componente -->
+                            <StackPanel x:Name="PanelDiagMenu">
+                                <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,8"
+                                           Text="Elige el componente que quieres analizar. Se mostraran solo sus pruebas, y con el boton Volver regresas a este menu. Los resultados aparecen a la derecha."/>
+                                <Button x:Name="BtnDiagCompleto" Content="🧩 Diagnostico completo automatico" Width="300" Height="44" FontSize="13" HorizontalAlignment="Left" Margin="0,0,0,12" BorderBrush="{StaticResource Acento}"/>
                                 <WrapPanel>
-                                <Button x:Name="BtnInfoHardware" Content="🧾 Informacion del hardware" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarArranque" Content="⏱️ Tiempo de arranque" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarEstadoWin" Content="🛡️ Estado de Windows" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarEventos" Content="📜 Eventos criticos (7 dias)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarDispProblemas" Content="🧩 Dispositivos con problemas" Width="212" Height="40" FontSize="12"/>
+                                    <Button x:Name="BtnDiagCat_Sistema" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="🧾" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Sistema general" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="5 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_CPU" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="🚀" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Procesador (CPU)" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="2 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_RAM" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="🧠" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Memoria RAM" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="1 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_Disco" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="💽" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Disco duro / SSD" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="12 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_Graficos" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="🎮" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Graficos y pantalla" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="3 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_Audio" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="🔊" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Audio" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="5 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_Entrada" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="⌨️" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Teclado y mouse" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="2 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_Camara" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="📷" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Camara" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="1 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_Red" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="🌐" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Red y conectividad" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="4 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_Energia" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="🔋" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Energia y refrigeracion" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="2 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
+                                    <Button x:Name="BtnDiagCat_Puertos" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="🔌" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Puertos y dispositivos" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="1 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
                                 </WrapPanel>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="🚀 Procesador (CPU)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarCPU" Content="🚀 Rendimiento CPU (10 s)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarTemperatura" Content="🌡️ Temperatura del procesador" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Sistema general -->
+                            <StackPanel x:Name="PanelDiag_Sistema" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Sistema" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="🧾 Sistema general" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnInfoHardware" Content="🧾 Informacion del hardware" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarArranque" Content="⏱️ Tiempo de arranque" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarEstadoWin" Content="🛡️ Estado de Windows" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarEventos" Content="📜 Eventos criticos (7 dias)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarDispProblemas" Content="🧩 Dispositivos con problemas" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="🧠 Memoria RAM" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarRAM" Content="🧠 Probar memoria RAM" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Procesador (CPU) -->
+                            <StackPanel x:Name="PanelDiag_CPU" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_CPU" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="🚀 Procesador (CPU)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarCPU" Content="🚀 Rendimiento CPU (10 s)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarTemperatura" Content="🌡️ Temperatura del procesador" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="💽 Almacenamiento (disco duro / SSD)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <TextBlock Text="Revisa sectores danados, desgaste, errores y rendimiento. El escaneo de superficie, CHKDSK y el analisis de fragmentacion requieren administrador y son de solo lectura." Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnDiscoCompleto" Content="💽 Diagnostico completo de disco" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarAlmacenamiento" Content="💽 Salud y espacio (resumen)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoDetalle" Content="🔎 Detalle fisico y sectores" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoSmart" Content="📊 Atributos S.M.A.R.T." Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoSuperficie" Content="🗺️ Escanear superficie (mapa)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoChkdsk" Content="🛠️ Verificar errores (CHKDSK)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoParticiones" Content="🧱 Particiones y alineacion" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnVelocidadDisco" Content="⚡ Velocidad lectura/escritura" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoLatencia" Content="⏲️ Latencia aleatoria 4K" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoActividad" Content="📈 Actividad en vivo (6 s)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoEventos" Content="📜 Eventos de error de disco" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDiscoDefrag" Content="🧹 Fragmentacion / optimizacion" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Memoria RAM -->
+                            <StackPanel x:Name="PanelDiag_RAM" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_RAM" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="🧠 Memoria RAM" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarRAM" Content="🧠 Probar memoria RAM" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="🎮 Graficos y pantalla" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarGrafica" Content="🎮 Ver tarjeta grafica" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarPantalla" Content="🖥️ Probar pantalla (colores)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnDetallesPantalla" Content="🖥️ Detalles de pantalla" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Disco duro / SSD -->
+                            <StackPanel x:Name="PanelDiag_Disco" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Disco" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="💽 Disco duro / SSD" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <TextBlock Text="Revisa sectores danados, desgaste, errores y rendimiento. El escaneo de superficie, CHKDSK y el analisis de fragmentacion requieren administrador y son de solo lectura." Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnDiscoCompleto" Content="💽 Diagnostico completo de disco" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarAlmacenamiento" Content="💽 Salud y espacio (resumen)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoDetalle" Content="🔎 Detalle fisico y sectores" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoSmart" Content="📊 Atributos S.M.A.R.T." Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoSuperficie" Content="🗺️ Escanear superficie (mapa)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoChkdsk" Content="🛠️ Verificar errores (CHKDSK)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoParticiones" Content="🧱 Particiones y alineacion" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnVelocidadDisco" Content="⚡ Velocidad lectura/escritura" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoLatencia" Content="⏲️ Latencia aleatoria 4K" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoActividad" Content="📈 Actividad en vivo (6 s)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoEventos" Content="📜 Eventos de error de disco" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoDefrag" Content="🧹 Fragmentacion / optimizacion" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="🔊 Audio" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarAudioIzq" Content="🔊 Altavoz izquierdo" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarAudioDer" Content="🔊 Altavoz derecho" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarAudioAmbos" Content="🔊 Ambos altavoces" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarMicrofono" Content="🎙️ Probar microfono" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarAudioDisp" Content="🎧 Dispositivos de audio" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Graficos y pantalla -->
+                            <StackPanel x:Name="PanelDiag_Graficos" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Graficos" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="🎮 Graficos y pantalla" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarGrafica" Content="🎮 Ver tarjeta grafica" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarPantalla" Content="🖥️ Probar pantalla (colores)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDetallesPantalla" Content="🖥️ Detalles de pantalla" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="⌨️ Teclado y mouse" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarTeclado" Content="⌨️ Probar teclado (virtual)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarMouse" Content="🖱️ Probar mouse/touchpad" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Audio -->
+                            <StackPanel x:Name="PanelDiag_Audio" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Audio" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="🔊 Audio" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarAudioIzq" Content="🔊 Altavoz izquierdo" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarAudioDer" Content="🔊 Altavoz derecho" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarAudioAmbos" Content="🔊 Ambos altavoces" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarMicrofono" Content="🎙️ Probar microfono" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarAudioDisp" Content="🎧 Dispositivos de audio" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="📷 Camara" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarCamara" Content="📷 Probar camara" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Teclado y mouse -->
+                            <StackPanel x:Name="PanelDiag_Entrada" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Entrada" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="⌨️ Teclado y mouse" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarTeclado" Content="⌨️ Probar teclado (virtual)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarMouse" Content="🖱️ Probar mouse/touchpad" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="🌐 Red y conectividad" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarRed" Content="🌐 Probar red / Internet" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarWifi" Content="📡 Wi-Fi (senal y velocidad)" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarInternet" Content="⚡ Velocidad de Internet" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarBluetooth" Content="📶 Verificar Bluetooth" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Camara -->
+                            <StackPanel x:Name="PanelDiag_Camara" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Camara" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="📷 Camara" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarCamara" Content="📷 Probar camara" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="🔋 Energia y refrigeracion" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarBateria" Content="🔋 Verificar bateria" Width="212" Height="40" FontSize="12"/>
-                                <Button x:Name="BtnProbarVentiladores" Content="🌀 Verificar ventiladores" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Red y conectividad -->
+                            <StackPanel x:Name="PanelDiag_Red" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Red" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="🌐 Red y conectividad" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarRed" Content="🌐 Probar red / Internet" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarWifi" Content="📡 Wi-Fi (senal y velocidad)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarInternet" Content="⚡ Velocidad de Internet" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarBluetooth" Content="📶 Verificar Bluetooth" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        <Border Style="{StaticResource TarjetaSeccion}" Padding="12" Margin="0,0,0,10">
-                            <StackPanel>
-                                <TextBlock Text="🔌 Puertos y dispositivos" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
-                                <WrapPanel>
-                                <Button x:Name="BtnProbarUSB" Content="🔌 Dispositivos USB conectados" Width="212" Height="40" FontSize="12"/>
-                                </WrapPanel>
+                            <!-- Componente: Energia y refrigeracion -->
+                            <StackPanel x:Name="PanelDiag_Energia" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Energia" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="🔋 Energia y refrigeracion" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarBateria" Content="🔋 Verificar bateria" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnProbarVentiladores" Content="🌀 Verificar ventiladores" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
-                        </Border>
-                        </StackPanel>
+                            <!-- Componente: Puertos y dispositivos -->
+                            <StackPanel x:Name="PanelDiag_Puertos" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Puertos" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="🔌 Puertos y dispositivos" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnProbarUSB" Content="🔌 Dispositivos USB conectados" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </Grid>
                     </ScrollViewer>
                     <DockPanel Grid.Column="2">
                         <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,6">
@@ -13750,6 +13876,24 @@ $window.FindName("BtnProbarInternet").Add_Click({ Accion-ProbarVelocidadInternet
 $window.FindName("BtnProbarDispProblemas").Add_Click({ Accion-ProbarDispositivosProblemas })
 $window.FindName("BtnProbarEventos").Add_Click({ Accion-ProbarEventosCriticos })
 $window.FindName("BtnProbarEstadoWin").Add_Click({ Accion-ProbarEstadoWindows })
+# Menu de componentes: muestra solo el panel elegido (o el menu si Clave esta vacia)
+$Global:DiagCategorias = @('Sistema', 'CPU', 'RAM', 'Disco', 'Graficos', 'Audio', 'Entrada', 'Camara', 'Red', 'Energia', 'Puertos')
+function Global:Mostrar-CategoriaDiag {
+    param([string]$Clave = '')
+    try {
+        $menu = $window.FindName("PanelDiagMenu")
+        if ($menu) { $menu.Visibility = $(if ($Clave) { 'Collapsed' } else { 'Visible' }) }
+        foreach ($c in $Global:DiagCategorias) {
+            $pn = $window.FindName("PanelDiag_$c")
+            if ($pn) { $pn.Visibility = $(if ($c -eq $Clave) { 'Visible' } else { 'Collapsed' } ) }
+        }
+    } catch { Write-Log "No se pudo cambiar de componente en el diagnostico: $($_.Exception.Message)" -Tipo AVISO }
+}
+foreach ($catDiag in $Global:DiagCategorias) {
+    $claveDiag = $catDiag
+    $window.FindName("BtnDiagCat_$claveDiag").Add_Click({ Mostrar-CategoriaDiag -Clave $claveDiag }.GetNewClosure())
+    $window.FindName("BtnDiagVolver_$claveDiag").Add_Click({ Mostrar-CategoriaDiag -Clave '' }.GetNewClosure())
+}
 $window.FindName("BtnDiscoCompleto").Add_Click({ Accion-DiscoCompleto })
 $window.FindName("BtnDiscoDetalle").Add_Click({ Accion-DiscoDetalleFisico })
 $window.FindName("BtnDiscoParticiones").Add_Click({ Accion-DiscoParticiones })
