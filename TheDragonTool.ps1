@@ -5762,13 +5762,14 @@ function Accion-ProbarAlmacenamiento {
 }
 
 function Accion-ProbarVelocidadDisco {
-    Write-DiagLog "=== VELOCIDAD DE DISCO (lectura/escritura secuencial en $($env:SystemDrive)) ==="
+    $uDisco = Unidad-Diag
+    Write-DiagLog "=== VELOCIDAD DE DISCO (lectura/escritura secuencial en $uDisco) ==="
     $archivoPrueba = $null
     try {
-        $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
+        $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$uDisco'" -ErrorAction SilentlyContinue
         $tamanoMB = 256
         if ($ld -and ($ld.FreeSpace / 1MB) -lt ($tamanoMB * 3)) { $tamanoMB = 64 }
-        $carpetaPrueba = Join-Path $env:TEMP "DragonToolDiskTest"
+        $carpetaPrueba = Carpeta-PruebaDisco $uDisco
         if (-not (Test-Path $carpetaPrueba)) { New-Item -Path $carpetaPrueba -ItemType Directory -Force | Out-Null }
         $archivoPrueba = Join-Path $carpetaPrueba "prueba.tmp"
         $bloque = New-Object byte[] (4MB)
@@ -6610,13 +6611,14 @@ function Accion-DiscoActividad {
 }
 
 function Accion-DiscoLatencia4K {
-    Write-DiagLog "=== DISCO: LATENCIA ALEATORIA 4K (en $($env:SystemDrive)) ==="
+    $uDisco = Unidad-Diag
+    Write-DiagLog "=== DISCO: LATENCIA ALEATORIA 4K (en $uDisco) ==="
     $arch = $null
     try {
-        $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -ErrorAction SilentlyContinue
+        $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$uDisco'" -ErrorAction SilentlyContinue
         $tamMB = 128
         if ($ld -and ($ld.FreeSpace / 1MB) -lt ($tamMB * 4)) { Write-DiagLog "Hay muy poco espacio libre para esta prueba."; return }
-        $carp = Join-Path $env:TEMP "DragonToolDiskTest"
+        $carp = Carpeta-PruebaDisco $uDisco
         if (-not (Test-Path $carp)) { New-Item -Path $carp -ItemType Directory -Force | Out-Null }
         $arch = Join-Path $carp "lat4k.tmp"
         $tam = [int64]$tamMB * 1MB
@@ -6674,9 +6676,421 @@ function Accion-DiscoLatencia4K {
     }
 }
 
+# ---------------------------------------------------------------------------
+#  UNIDAD ELEGIDA PARA LAS PRUEBAS DE DISCO Y PRUEBA DE ESTRES CON DURACION
+# ---------------------------------------------------------------------------
+$Global:CmbDiagUnidad = $null
+
+# Rellena la lista de unidades (fijas y extraibles) del panel de disco
+function Global:Cargar-UnidadesDiag {
+    $cmb = $Global:CmbDiagUnidad
+    if (-not $cmb) { return }
+    $previa = ''
+    try { if ($cmb.SelectedItem) { $previa = "$($cmb.SelectedItem.Tag)" } } catch { }
+    $cmb.Items.Clear()
+    $unidades = @()
+    try { $unidades = @(Get-CimInstance Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DriveType -in 2, 3 -and $_.Size } | Sort-Object DeviceID) } catch { }
+    $sys = "$env:SystemDrive"
+    $idx = 0; $i = 0
+    foreach ($u in $unidades) {
+        $it = New-Object System.Windows.Controls.ComboBoxItem
+        $tipo = if ($u.DriveType -eq 2) { 'extraible' } else { 'fija' }
+        $it.Content = "$($u.DeviceID)  $($u.VolumeName)  ($(Format-TamanoDisco $u.Size), $(Format-TamanoDisco $u.FreeSpace) libres, $tipo)"
+        $it.Tag = "$($u.DeviceID)"
+        [void]$cmb.Items.Add($it)
+        if ($previa -and "$($u.DeviceID)" -eq $previa) { $idx = $i } elseif (-not $previa -and "$($u.DeviceID)" -eq $sys) { $idx = $i }
+        $i++
+    }
+    if ($cmb.Items.Count -gt 0) { $cmb.SelectedIndex = $idx }
+}
+
+# Unidad elegida en el panel (por defecto, la del sistema)
+function Global:Unidad-Diag {
+    try { if ($Global:CmbDiagUnidad -and $Global:CmbDiagUnidad.SelectedItem) { return "$($Global:CmbDiagUnidad.SelectedItem.Tag)" } } catch { }
+    return "$env:SystemDrive"
+}
+
+# Carpeta temporal de pruebas dentro de la unidad elegida (en la del sistema, la carpeta TEMP)
+function Global:Carpeta-PruebaDisco {
+    param([string]$Unidad)
+    if (-not $Unidad -or $Unidad -eq "$env:SystemDrive") { return (Join-Path $env:TEMP "DragonToolDiskTest") }
+    return (Join-Path "$Unidad\" "DragonToolDiskTest")
+}
+
+# Numero de disco fisico que contiene una unidad (C: -> 0, etc.). $null si no se puede saber.
+function Global:Disco-DeUnidad {
+    param([string]$Unidad)
+    try {
+        $letra = "$Unidad".Substring(0, 1)
+        $p = Get-Partition -DriveLetter $letra -ErrorAction Stop | Select-Object -First 1
+        if ($p) { return [int]$p.DiskNumber }
+    } catch { }
+    return $null
+}
+
+function Global:Temperatura-DiscoUnidad {
+    param([string]$Unidad)
+    try {
+        $n = Disco-DeUnidad $Unidad
+        if ($null -eq $n) { return $null }
+        $pd = Get-PhysicalDisk -ErrorAction Stop | Where-Object { "$($_.DeviceId)" -eq "$n" } | Select-Object -First 1
+        if (-not $pd) { return $null }
+        $rc = $pd | Get-StorageReliabilityCounter -ErrorAction Stop
+        if ($rc -and $null -ne $rc.Temperature -and [int]$rc.Temperature -gt 0) { return [int]$rc.Temperature }
+    } catch { }
+    return $null
+}
+
+function Global:Ensure-TipoDiskVerif {
+    if ('DragonDiskVerif' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+public static class DragonDiskVerif {
+    public static bool Igual(byte[] a, byte[] b, int n) {
+        for (int i = 0; i < n; i++) { if (a[i] != b[i]) return false; }
+        return true;
+    }
+    public static void Marca(byte[] a, long idx) {
+        byte[] x = BitConverter.GetBytes(idx);
+        Array.Copy(x, 0, a, 0, 8);
+    }
+}
+"@
+}
+
+$Global:EstState = @{ Corriendo = $false; Detener = $false; Limite = 0; Reloj = $null; CerrarAlTerminar = $false }
+$Global:EstUi = $null
+
+function Global:Estres-Parar {
+    $st = $Global:EstState
+    if ($st.Detener) { return $true }
+    if ($st.Limite -gt 0 -and $st.Reloj -and $st.Reloj.Elapsed.TotalSeconds -ge $st.Limite) { return $true }
+    return $false
+}
+
+function Global:Estres-Formato {
+    param([double]$Seg)
+    $t = [TimeSpan]::FromSeconds([math]::Max(0, $Seg))
+    return ("{0:00}:{1:00}:{2:00}" -f [int][math]::Floor($t.TotalHours), $t.Minutes, $t.Seconds)
+}
+
+# Prueba de estres: escribe, lee y VERIFICA datos en la unidad elegida durante el tiempo indicado (o sin limite)
+function Global:Ejecutar-EstresDisco {
+    $ui = $Global:EstUi; $st = $Global:EstState
+    if ($st.Corriendo) { return }
+    $sel = $ui.CmbUnidad.SelectedItem
+    if (-not $sel) { $ui.Estado.Text = "Elige una unidad."; return }
+    $u = "$($sel.Tag)"
+    $secuencial = [bool]$ui.ChkSec.IsChecked
+    $aleatorio = [bool]$ui.ChkAle.IsChecked
+    if (-not ($secuencial -or $aleatorio)) { $ui.Estado.Text = "Marca al menos una prueba (secuencial o aleatoria 4K)."; return }
+    # duracion
+    $minutos = 0.0
+    switch ($ui.CmbDur.SelectedIndex) {
+        0 { $minutos = 1 } 1 { $minutos = 5 } 2 { $minutos = 10 } 3 { $minutos = 30 } 4 { $minutos = 60 }
+        5 {
+            $txt = "$($ui.TxtMin.Text)".Trim().Replace(',', '.')
+            $val = 0.0
+            if (-not [double]::TryParse($txt, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$val) -or $val -le 0) {
+                $ui.Estado.Text = "Escribe los minutos como numero mayor que 0 (por ejemplo 15)."; return
+            }
+            $minutos = $val
+        }
+        default { $minutos = 0 }
+    }
+    try { Ensure-TipoDiskVerif } catch { $ui.Estado.Text = "No se pudo preparar la prueba: $($_.Exception.Message)"; return }
+    $tamMB = 512
+    try { $tamMB = [int]$ui.CmbTam.SelectedItem.Tag } catch { }
+    try {
+        $ld = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$u'" -ErrorAction Stop
+        if ($ld) {
+            $libreMB = $ld.FreeSpace / 1MB
+            if ($libreMB -lt 300) { $ui.Estado.Text = "La unidad $u tiene muy poco espacio libre (menos de 300 MB)."; return }
+            while ($tamMB -gt 64 -and ($tamMB * 3) -gt $libreMB) { $tamMB = [int]($tamMB / 2) }
+        }
+    } catch { }
+    $tamMB = [int]([math]::Floor($tamMB / 4) * 4)
+    $carp = Carpeta-PruebaDisco $u
+    $arch = $null
+    $errores = 0; $msgErr = New-Object System.Collections.Generic.List[string]
+    $ciclo = 0; $totEscMB = 0.0; $totLecMB = 0.0
+    $esc = New-Object 'System.Collections.Generic.List[double]'
+    $lec = New-Object 'System.Collections.Generic.List[double]'
+    $escCiclo = New-Object 'System.Collections.Generic.List[double]'
+    $sumLatE = 0.0; $nLatE = 0; $maxLatE = 0.0; $sumLatL = 0.0; $nLatL = 0; $maxLatL = 0.0
+    $tempIni = Temperatura-DiscoUnidad $u; $tempMax = $tempIni; $tempAct = $tempIni; $ultTemp = [DateTime]::UtcNow
+    $velAct = @{ E = 0.0; L = 0.0 }
+    $st.Corriendo = $true; $st.Detener = $false; $st.CerrarAlTerminar = $false
+    $st.Limite = [double]($minutos * 60)
+    $st.Reloj = [System.Diagnostics.Stopwatch]::StartNew()
+    $ui.Iniciar.IsEnabled = $false; $ui.Detener.IsEnabled = $true
+    foreach ($c in @($ui.CmbUnidad, $ui.CmbDur, $ui.CmbTam, $ui.ChkSec, $ui.ChkAle, $ui.TxtMin)) { $c.IsEnabled = $false }
+    $ui.Barra.IsIndeterminate = ($minutos -le 0)
+    $ui.Barra.Value = 0
+    $infinito = ($minutos -le 0)
+    $durTxt = if ($infinito) { 'sin limite (hasta detener)' } else { (Estres-Formato $st.Limite) }
+    $ui.Estado.Text = "Probando la unidad $u ($tamMB MB por ciclo)... pulsa Detener para terminar cuando quieras."
+    $actualizar = {
+        $seg = $st.Reloj.Elapsed.TotalSeconds
+        if (-not $infinito -and $st.Limite -gt 0) { $ui.Barra.Value = [math]::Min(100, 100 * $seg / $st.Limite) }
+        $avg = { param($l) if ($l.Count -gt 0) { ($l | Measure-Object -Average).Average } else { 0 } }
+        $mn = { param($l) if ($l.Count -gt 0) { ($l | Measure-Object -Minimum).Minimum } else { 0 } }
+        $mx = { param($l) if ($l.Count -gt 0) { ($l | Measure-Object -Maximum).Maximum } else { 0 } }
+        $t = New-Object System.Text.StringBuilder
+        [void]$t.AppendLine(("Tiempo: {0} / {1}      Ciclos: {2}" -f (Estres-Formato $seg), $durTxt, $ciclo))
+        [void]$t.AppendLine(("Escrito: {0:N2} GB      Leido: {1:N2} GB" -f ($totEscMB / 1024), ($totLecMB / 1024)))
+        if ($secuencial) {
+            [void]$t.AppendLine(("Escritura secuencial: actual {0:N0} | prom {1:N0} | min {2:N0} | max {3:N0} MB/s" -f $velAct.E, (& $avg $esc), (& $mn $esc), (& $mx $esc)))
+            [void]$t.AppendLine(("Lectura secuencial:   actual {0:N0} | prom {1:N0} | min {2:N0} | max {3:N0} MB/s" -f $velAct.L, (& $avg $lec), (& $mn $lec), (& $mx $lec)))
+        }
+        if ($aleatorio -and $nLatE -gt 0) {
+            [void]$t.AppendLine(("4K aleatorio: escritura prom {0:N2} ms (max {1:N1}) | lectura prom {2:N3} ms (max {3:N1})" -f ($sumLatE / $nLatE), $maxLatE, ($sumLatL / [math]::Max(1, $nLatL)), $maxLatL))
+        }
+        if ($null -ne $tempAct) { [void]$t.AppendLine(("Temperatura del disco: {0} °C (maxima {1} °C)" -f $tempAct, $tempMax)) }
+        [void]$t.AppendLine(("Errores de verificacion de datos: {0}" -f $errores))
+        $ui.Stats.Text = $t.ToString()
+    }
+    try {
+        if (-not (Test-Path $carp)) { New-Item -Path $carp -ItemType Directory -Force | Out-Null }
+        $arch = Join-Path $carp "estres.tmp"
+        $bytes4m = 4MB
+        $base = New-Object byte[] $bytes4m
+        (New-Object Random).NextBytes($base)
+        $bloque = $base.Clone(); $ref = $base.Clone(); $buf = New-Object byte[] $bytes4m
+        $p4 = New-Object byte[] 4096; (New-Object Random).NextBytes($p4)
+        $b4 = New-Object byte[] 4096
+        $nB = [int]($tamMB / 4)
+        $rnd = New-Object Random
+        $sw = New-Object System.Diagnostics.Stopwatch
+        while (-not (Estres-Parar)) {
+            $ciclo++
+            $escritos = 0
+            if ($secuencial) {
+                # --- escritura ---
+                $fs = New-Object System.IO.FileStream($arch, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None, 4MB, [System.IO.FileOptions]::WriteThrough)
+                $acum = 0.0
+                try {
+                    for ($i = 0; $i -lt $nB; $i++) {
+                        if (Estres-Parar) { break }
+                        [DragonDiskVerif]::Marca($bloque, [int64]$i)
+                        $sw.Restart(); $fs.Write($bloque, 0, $bytes4m); $sw.Stop()
+                        $acum += $sw.Elapsed.TotalSeconds; $escritos++; $totEscMB += 4
+                        if ($sw.Elapsed.TotalSeconds -gt 0) { $velAct.E = 4 / $sw.Elapsed.TotalSeconds }
+                        if (($i % 2) -eq 0) { & $actualizar; Wait-UI -Milisegundos 1 }
+                    }
+                    $fs.Flush($true)
+                } finally { $fs.Close() }
+                if ($escritos -gt 0 -and $acum -gt 0) { $ve = ($escritos * 4) / $acum; $esc.Add($ve); $escCiclo.Add($ve); $velAct.E = $ve }
+                # --- lectura y verificacion ---
+                if ($escritos -gt 0) {
+                    $fs = New-Object System.IO.FileStream($arch, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read, 4MB, [System.IO.FileOptions]::SequentialScan)
+                    $acumL = 0.0; $leidos = 0
+                    try {
+                        for ($i = 0; $i -lt $escritos; $i++) {
+                            if ($st.Detener) { break }
+                            $sw.Restart()
+                            $n = 0
+                            while ($n -lt $bytes4m) { $r = $fs.Read($buf, $n, $bytes4m - $n); if ($r -le 0) { break }; $n += $r }
+                            $sw.Stop()
+                            $acumL += $sw.Elapsed.TotalSeconds; $leidos++; $totLecMB += 4
+                            if ($sw.Elapsed.TotalSeconds -gt 0) { $velAct.L = 4 / $sw.Elapsed.TotalSeconds }
+                            [DragonDiskVerif]::Marca($ref, [int64]$i)
+                            if ($n -lt $bytes4m -or -not [DragonDiskVerif]::Igual($buf, $ref, $bytes4m)) {
+                                $errores++
+                                if ($msgErr.Count -lt 15) { $msgErr.Add("Ciclo $ciclo, bloque $i : los datos leidos NO coinciden con los escritos.") }
+                                $ui.Estado.Text = "ERROR de verificacion en el ciclo $ciclo (bloque $i)."
+                            }
+                            if (($i % 2) -eq 0) { & $actualizar; Wait-UI -Milisegundos 1 }
+                        }
+                    } finally { $fs.Close() }
+                    if ($leidos -gt 0 -and $acumL -gt 0) { $lec.Add(($leidos * 4) / $acumL) }
+                }
+            }
+            # --- aleatorio 4K con verificacion ---
+            if ($aleatorio -and -not (Estres-Parar)) {
+                $fa = New-Object System.IO.FileStream($arch, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
+                try {
+                    $largo = [int64]$tamMB * 1MB
+                    if ($fa.Length -lt $largo) { $fa.SetLength($largo) }
+                    $bl4 = [int]($largo / 4096)
+                    for ($k = 0; $k -lt 400; $k++) {
+                        if (Estres-Parar) { break }
+                        $pos = [int64]$rnd.Next(0, $bl4) * 4096
+                        [DragonDiskVerif]::Marca($p4, $pos)
+                        $sw.Restart(); [void]$fa.Seek($pos, [System.IO.SeekOrigin]::Begin); $fa.Write($p4, 0, 4096); $sw.Stop()
+                        $le = $sw.Elapsed.TotalMilliseconds; $sumLatE += $le; $nLatE++; if ($le -gt $maxLatE) { $maxLatE = $le }
+                        $sw.Restart(); [void]$fa.Seek($pos, [System.IO.SeekOrigin]::Begin); [void]$fa.Read($b4, 0, 4096); $sw.Stop()
+                        $ll = $sw.Elapsed.TotalMilliseconds; $sumLatL += $ll; $nLatL++; if ($ll -gt $maxLatL) { $maxLatL = $ll }
+                        $totEscMB += 4 / 1024; $totLecMB += 4 / 1024
+                        if (-not [DragonDiskVerif]::Igual($b4, $p4, 4096)) {
+                            $errores++
+                            if ($msgErr.Count -lt 15) { $msgErr.Add("Ciclo $ciclo, posicion $pos : lectura aleatoria 4K distinta de lo escrito.") }
+                        }
+                        if (($k % 20) -eq 0) { & $actualizar; Wait-UI -Milisegundos 1 }
+                    }
+                    $fa.Flush($true)
+                } finally { $fa.Close() }
+            }
+            # temperatura cada ~15 s
+            if (([DateTime]::UtcNow - $ultTemp).TotalSeconds -ge 15) {
+                $ultTemp = [DateTime]::UtcNow
+                $tt = Temperatura-DiscoUnidad $u
+                if ($null -ne $tt) { $tempAct = $tt; if ($null -eq $tempMax -or $tt -gt $tempMax) { $tempMax = $tt } }
+            }
+            & $actualizar
+            Wait-UI -Milisegundos 1
+        }
+    } catch {
+        $ui.Estado.Text = "La prueba se interrumpio: $($_.Exception.Message)"
+        $msgErr.Add("Interrupcion: $($_.Exception.Message)")
+    } finally {
+        $st.Reloj.Stop()
+        if ($arch) { Remove-Item $arch -Force -ErrorAction SilentlyContinue }
+        try { if ((Test-Path $carp) -and -not (Get-ChildItem $carp -Force -ErrorAction SilentlyContinue)) { Remove-Item $carp -Force -ErrorAction SilentlyContinue } } catch { }
+        $st.Corriendo = $false
+        $ui.Barra.IsIndeterminate = $false
+        $ui.Iniciar.IsEnabled = $true; $ui.Detener.IsEnabled = $false
+        foreach ($c in @($ui.CmbUnidad, $ui.CmbDur, $ui.CmbTam, $ui.ChkSec, $ui.ChkAle)) { $c.IsEnabled = $true }
+        $ui.TxtMin.IsEnabled = ($ui.CmbDur.SelectedIndex -eq 5)
+    }
+    & $actualizar
+    $seg = $st.Reloj.Elapsed.TotalSeconds
+    $ui.Barra.Value = if ($infinito) { 0 } else { [math]::Min(100, 100 * $seg / [math]::Max(1, $st.Limite)) }
+    $ui.Estado.Text = if ($errores -gt 0) { "Terminada con $errores error(es) de verificacion. Revisa el informe del diagnostico." } else { "Terminada sin errores (duracion real $(Estres-Formato $seg))." }
+    # ---- resultado hacia el registro/informe del diagnostico ----
+    try {
+        $okN = 0; $avN = 0
+        Write-DiagLog "=== DISCO: PRUEBA DE ESTRES en $u (duracion $(Estres-Formato $seg), $ciclo ciclo(s), archivo de $tamMB MB) ==="
+        Write-DiagLog (" - Datos escritos: {0:N2} GB | leidos: {1:N2} GB" -f ($totEscMB / 1024), ($totLecMB / 1024))
+        if ($esc.Count -gt 0) {
+            Write-DiagLog (" - Escritura secuencial: prom {0:N0} MB/s (min {1:N0}, max {2:N0})" -f ($esc | Measure-Object -Average).Average, ($esc | Measure-Object -Minimum).Minimum, ($esc | Measure-Object -Maximum).Maximum)
+        }
+        if ($lec.Count -gt 0) {
+            Write-DiagLog (" - Lectura secuencial: prom {0:N0} MB/s (min {1:N0}, max {2:N0}) - puede verse inflada por la cache de Windows" -f ($lec | Measure-Object -Average).Average, ($lec | Measure-Object -Minimum).Minimum, ($lec | Measure-Object -Maximum).Maximum)
+        }
+        if ($nLatE -gt 0) { Write-DiagLog (" - 4K aleatorio: escritura prom {0:N2} ms (max {1:N1} ms) | lectura prom {2:N3} ms (max {3:N1} ms)" -f ($sumLatE / $nLatE), $maxLatE, ($sumLatL / [math]::Max(1, $nLatL)), $maxLatL) }
+        if ($null -ne $tempMax) { Write-DiagLog " - Temperatura del disco: inicio $tempIni °C, maxima $tempMax °C" }
+        if ($errores -gt 0) {
+            Diag-Aviso "Se detectaron $errores error(es) de verificacion: los datos leidos no coinciden con los escritos. Posible disco, cable, controlador o memoria RAM defectuosos. Haz copia de seguridad."
+            $avN++
+            foreach ($m in $msgErr) { Write-DiagLog "     $m" }
+        } elseif ($ciclo -gt 0 -and ($totEscMB + $totLecMB) -gt 0) {
+            Diag-Ok "Sin errores de verificacion tras $([math]::Round($totEscMB / 1024, 2)) GB escritos y leidos en $u."
+            $okN++
+        }
+        if ($escCiclo.Count -ge 3) {
+            $n3 = [math]::Max(1, [int]([math]::Floor($escCiclo.Count / 3)))
+            $primeros = ($escCiclo | Select-Object -First $n3 | Measure-Object -Average).Average
+            $ultimos = ($escCiclo | Select-Object -Last $n3 | Measure-Object -Average).Average
+            if ($primeros -gt 0 -and $ultimos -lt ($primeros * 0.6)) {
+                Diag-Aviso ("La velocidad de escritura cayo de {0:N0} a {1:N0} MB/s durante la prueba (agotamiento de la cache SLC, sobrecalentamiento o disco con problemas)." -f $primeros, $ultimos)
+                $avN++
+            }
+        }
+        if ($null -ne $tempMax -and $tempMax -ge 70) { Diag-Aviso "El disco llego a $tempMax °C durante la prueba. Mejora la ventilacion."; $avN++ }
+        if ($errores -eq 0 -and $msgErr.Count -gt 0) { foreach ($m in $msgErr) { Write-DiagLog "     $m" } }
+        if ($Global:DiagInforme) {
+            $Global:DiagInforme.Pruebas.Add([PSCustomObject]@{ Nombre = "Prueba de estres de disco ($u)"; Inicio = (Get-Date).AddSeconds(-$seg); Seg = $seg; Ok = $okN; Aviso = $avN })
+        }
+    } catch { }
+    if ($st.CerrarAlTerminar) { try { $ui.Win.Close() } catch { } }
+}
+
+function Global:Show-PruebaEstresDisco {
+    try {
+        [xml]$xamlEst = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Prueba de estres de disco - The Dragon Tool" Height="640" Width="720" MinHeight="560" MinWidth="620" WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="14">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+    <TextBlock DockPanel.Dock="Top" Foreground="White" TextWrapping="Wrap" Margin="0,0,0,10" FontSize="12"
+               Text="Escribe, lee y VERIFICA datos en un archivo temporal de la unidad elegida durante el tiempo indicado (o sin limite hasta pulsar Detener). Detecta errores de datos, caidas de velocidad y calentamiento. El archivo se borra al terminar. En un SSD cada ciclo consume algo de vida util: usa duraciones razonables."/>
+    <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="42"/><RowDefinition Height="42"/><RowDefinition Height="42"/><RowDefinition Height="36"/></Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Text="Unidad:" Foreground="White" VerticalAlignment="Center"/>
+      <ComboBox x:Name="CmbUnidadEst" Grid.Row="0" Grid.Column="1" Height="34"/>
+      <TextBlock Grid.Row="1" Text="Duracion:" Foreground="White" VerticalAlignment="Center"/>
+      <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal">
+        <ComboBox x:Name="CmbDurEst" Width="290" Height="34">
+          <ComboBoxItem Content="1 minuto"/>
+          <ComboBoxItem Content="5 minutos" IsSelected="True"/>
+          <ComboBoxItem Content="10 minutos"/>
+          <ComboBoxItem Content="30 minutos"/>
+          <ComboBoxItem Content="60 minutos"/>
+          <ComboBoxItem Content="Personalizado (minutos)..."/>
+          <ComboBoxItem Content="Infinito (hasta pulsar Detener)"/>
+        </ComboBox>
+        <TextBlock Text="Minutos:" Foreground="White" VerticalAlignment="Center" Margin="14,0,6,0"/>
+        <TextBox x:Name="TxtMinEst" Width="80" Height="34" Text="15" IsEnabled="False" FontSize="14"/>
+      </StackPanel>
+      <TextBlock Grid.Row="2" Text="Archivo de prueba:" Foreground="White" VerticalAlignment="Center"/>
+      <ComboBox x:Name="CmbTamEst" Grid.Row="2" Grid.Column="1" Width="290" Height="34" HorizontalAlignment="Left">
+        <ComboBoxItem Content="256 MB" Tag="256"/>
+        <ComboBoxItem Content="512 MB" Tag="512" IsSelected="True"/>
+        <ComboBoxItem Content="1 GB" Tag="1024"/>
+        <ComboBoxItem Content="2 GB" Tag="2048"/>
+      </ComboBox>
+      <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal">
+        <CheckBox x:Name="ChkSecEst" Content="Secuencial (escritura + lectura + verificacion)" Foreground="White" IsChecked="True" Margin="0,0,18,0" VerticalAlignment="Center"/>
+        <CheckBox x:Name="ChkAleEst" Content="Aleatorio 4K" Foreground="White" IsChecked="True" VerticalAlignment="Center"/>
+      </StackPanel>
+    </Grid>
+    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <Button x:Name="BtnIniciarEst" Content="▶ Iniciar prueba" Width="170" Height="38"/>
+      <Button x:Name="BtnDetenerEst" Content="⏹ Detener" Width="130" Height="38" IsEnabled="False"/>
+    </WrapPanel>
+    <ProgressBar x:Name="PbEst" DockPanel.Dock="Top" Height="14" Minimum="0" Maximum="100" Margin="0,0,0,6"/>
+    <TextBlock x:Name="TxtEstadoEst" DockPanel.Dock="Top" Foreground="#66AEFF" TextWrapping="Wrap" Margin="0,0,0,6" FontSize="12" Text="Elige la unidad y la duracion, y pulsa Iniciar."/>
+    <Border BorderBrush="#232B3D" BorderThickness="1" Background="#151B27" Padding="12">
+      <TextBlock x:Name="TxtStatsEst" Foreground="#EAF0FA" FontFamily="Consolas" FontSize="13" TextWrapping="Wrap" Text="Los datos en vivo apareceran aqui."/>
+    </Border>
+  </DockPanel>
+</Window>
+"@
+        $winEst = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xamlEst))
+        Iniciar-EfectosNeon -Ventana $winEst
+        $cmbU = $winEst.FindName("CmbUnidadEst")
+        $unidades = @()
+        try { $unidades = @(Get-CimInstance Win32_LogicalDisk -ErrorAction Stop | Where-Object { $_.DriveType -in 2, 3 -and $_.Size } | Sort-Object DeviceID) } catch { }
+        if ($unidades.Count -eq 0) { Write-DiagLog "No se encontraron unidades para probar."; return }
+        $actual = Unidad-Diag; $idx = 0; $i = 0
+        foreach ($u in $unidades) {
+            $it = New-Object System.Windows.Controls.ComboBoxItem
+            $it.Content = "$($u.DeviceID)  $($u.VolumeName)  ($(Format-TamanoDisco $u.Size), $(Format-TamanoDisco $u.FreeSpace) libres)"
+            $it.Tag = "$($u.DeviceID)"
+            [void]$cmbU.Items.Add($it)
+            if ("$($u.DeviceID)" -eq $actual) { $idx = $i }
+            $i++
+        }
+        $cmbU.SelectedIndex = $idx
+        $Global:EstState.Corriendo = $false; $Global:EstState.Detener = $false; $Global:EstState.CerrarAlTerminar = $false
+        $Global:EstUi = @{
+            Win = $winEst; CmbUnidad = $cmbU; CmbDur = $winEst.FindName("CmbDurEst"); TxtMin = $winEst.FindName("TxtMinEst"); CmbTam = $winEst.FindName("CmbTamEst")
+            ChkSec = $winEst.FindName("ChkSecEst"); ChkAle = $winEst.FindName("ChkAleEst")
+            Iniciar = $winEst.FindName("BtnIniciarEst"); Detener = $winEst.FindName("BtnDetenerEst")
+            Barra = $winEst.FindName("PbEst"); Estado = $winEst.FindName("TxtEstadoEst"); Stats = $winEst.FindName("TxtStatsEst")
+        }
+        $Global:EstUi.CmbDur.Add_SelectionChanged({ try { $Global:EstUi.TxtMin.IsEnabled = ($Global:EstUi.CmbDur.SelectedIndex -eq 5) -and (-not $Global:EstState.Corriendo) } catch { } })
+        $Global:EstUi.Iniciar.Add_Click({ Ejecutar-EstresDisco })
+        $Global:EstUi.Detener.Add_Click({ $Global:EstState.Detener = $true; $Global:EstUi.Estado.Text = "Deteniendo y limpiando el archivo de prueba..." })
+        $winEst.Add_Closing({
+            param($s, $e)
+            if ($Global:EstState.Corriendo) { $e.Cancel = $true; $Global:EstState.Detener = $true; $Global:EstState.CerrarAlTerminar = $true; $Global:EstUi.Estado.Text = "Deteniendo y limpiando el archivo de prueba..." }
+        })
+        $winEst.ShowDialog() | Out-Null
+    } catch {
+        Write-DiagLog "No se pudo abrir la ventana de la prueba de estres: $($_.Exception.Message)"
+    }
+}
+
 # Ventanita para elegir una unidad (C:, D:, ...). Devuelve la letra con dos puntos o $null.
 function Global:Pedir-UnidadDiag {
     param([string]$Titulo = "Elegir unidad", [string]$Texto = "Elige la unidad:")
+    # si ya hay una unidad elegida en el panel de disco, se usa sin preguntar de nuevo
+    try { if ($Global:CmbDiagUnidad -and $Global:CmbDiagUnidad.SelectedItem) { return "$($Global:CmbDiagUnidad.SelectedItem.Tag)" } } catch { }
     $unidades = @()
     try { $unidades = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop | Sort-Object DeviceID) } catch {}
     if ($unidades.Count -eq 0) { Show-Aviso "No se encontraron unidades de disco." "Sin unidades"; return $null }
@@ -7195,10 +7609,13 @@ function Global:Escribir-VidaSSD {
 }
 
 function Accion-DiscoVidaSSD {
-    Write-DiagLog "=== VIDA UTIL DEL SSD (porcentaje restante) ==="
+    $uSel = Unidad-Diag
+    $numSel = Disco-DeUnidad $uSel
+    Write-DiagLog "=== VIDA UTIL DEL SSD (porcentaje restante) - unidad $uSel ==="
     $hay = $false
     try {
         foreach ($d in @(Get-PhysicalDisk -ErrorAction Stop)) {
+            if ($null -ne $numSel -and "$($d.DeviceId)" -ne "$numSel") { continue }
             $n = "$($d.FriendlyName)"
             if (("$($d.MediaType)" -eq 'SSD') -or ("$($d.BusType)" -eq 'NVMe') -or ($n -match '(?i)\bSSD\b|NVMe|M\.2')) {
                 $hay = $true
@@ -7207,7 +7624,7 @@ function Accion-DiscoVidaSSD {
             }
         }
     } catch { Write-DiagLog "No se pudo consultar los discos fisicos." }
-    if (-not $hay) { Write-DiagLog "No se detecto ningun SSD/NVMe en este equipo (solo discos mecanicos). Los discos mecanicos no tienen un % de vida: revisa S.M.A.R.T. y sectores." }
+    if (-not $hay) { Write-DiagLog "La unidad $uSel no esta en un SSD/NVMe (o no se pudo identificar su disco). Los discos mecanicos no tienen un % de vida: revisa S.M.A.R.T. y sectores." }
 }
 
 # ---------------------------- CPU ----------------------------
@@ -14237,6 +14654,11 @@ Marcar-Arranque 'funciones y recursos'
                                     <StackPanel>
                                         <TextBlock Text="💽 Disco duro / SSD" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
                                         <TextBlock Text="Revisa sectores danados, desgaste, errores y rendimiento. El escaneo de superficie, CHKDSK y el analisis de fragmentacion requieren administrador y son de solo lectura." Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                                        <WrapPanel Margin="0,0,0,8">
+                                            <TextBlock Text="Unidad para las pruebas:" Foreground="White" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                            <ComboBox x:Name="CmbDiagUnidad" Width="400" Height="34" Margin="0,0,8,0"/>
+                                            <Button x:Name="BtnDiagUnidadRefrescar" Content="🔄" Width="44" Height="34" ToolTip="Actualizar la lista de unidades"/>
+                                        </WrapPanel>
                                         <WrapPanel>
                                             <Button x:Name="BtnDiscoCompleto" Content="💽 Diagnostico completo de disco" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnProbarAlmacenamiento" Content="💽 Salud y espacio (resumen)" Width="212" Height="42" FontSize="12"/>
@@ -14251,6 +14673,7 @@ Marcar-Arranque 'funciones y recursos'
                                             <Button x:Name="BtnDiscoEventos" Content="📜 Eventos de error de disco" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnDiscoDefrag" Content="🧹 Fragmentacion / optimizacion" Width="212" Height="42" FontSize="12"/>
                                             <Button x:Name="BtnDiscoVidaSsd" Content="💽 Vida util del SSD (%)" Width="212" Height="42" FontSize="12"/>
+                                            <Button x:Name="BtnDiscoEstres" Content="🔥 Prueba de estres (por tiempo)" Width="212" Height="42" FontSize="12"/>
                                         </WrapPanel>
                                     </StackPanel>
                                 </Border>
@@ -15561,6 +15984,10 @@ $window.FindName("BtnCpuNucleos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Uso p
 $window.FindName("BtnCpuEstabilidad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Estabilidad del CPU' -Icono '🔥' -Accion { Accion-CpuEstabilidad } })
 $window.FindName("BtnCpuIntegridad").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Integridad de calculo' -Icono '✅' -Accion { Accion-CpuIntegridad } })
 $window.FindName("BtnDiscoVidaSsd").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Vida util del SSD' -Icono '💽' -Accion { Accion-DiscoVidaSSD } })
+$Global:CmbDiagUnidad = $window.FindName("CmbDiagUnidad")
+try { Cargar-UnidadesDiag } catch { }
+$window.FindName("BtnDiagUnidadRefrescar").Add_Click({ Cargar-UnidadesDiag })
+$window.FindName("BtnDiscoEstres").Add_Click({ Show-PruebaEstresDisco })
 $window.FindName("BtnMouseDispositivos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Dispositivos de puntero' -Icono '🔎' -Accion { Accion-MouseDispositivos } })
 $window.FindName("BtnMouseBotones").Add_Click({ Show-PruebaBotonesMouse })
 $window.FindName("BtnMousePrecision").Add_Click({ Show-PruebaPrecisionMouse })
