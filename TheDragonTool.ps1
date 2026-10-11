@@ -7827,9 +7827,13 @@ function Global:Texto-InfoDisco {
     $h = if ($null -ne $i.Horas) { "{0:N0} h (~{1:N0} dias)" -f $i.Horas, ($i.Horas / 24) } else { 'no informado' }
     $enc = if ($null -ne $i.Encendidos) { "{0:N0} veces" -f $i.Encendidos } else { 'no informado' }
     $l.Add("Horas de uso: $h  |  Veces encendido: $enc")
-    $v = if ($i.Tipo -eq 'HDD') { if ($i.Rpm -gt 0) { "$($i.Rpm) RPM" } else { 'no informada por el disco' } } elseif ($i.Tipo -like 'SSD*') { 'no aplica (SSD, sin partes moviles)' } else { 'no informada' }
-    $t = if ($null -ne $i.Temp) { "  |  Temperatura: $($i.Temp) °C" } else { '' }
-    $l.Add("Velocidad de rotacion: $v$t")
+    $t = if ($null -ne $i.Temp) { "Temperatura: $($i.Temp) °C" } else { '' }
+    if ($i.Tipo -eq 'HDD') {
+        $v = if ($i.Rpm -gt 0) { "$($i.Rpm) RPM" } else { 'no informada por el disco' }
+        $l.Add("Velocidad de rotacion: $v" + $(if ($t) { "  |  $t" } else { '' }))
+    } elseif ($t) {
+        $l.Add($t)
+    }
     if ($i.Tipo -like 'SSD*') {
         $f = { param($x) if ($null -ne $x) { "{0:N0} GB" -f $x } else { 'no disponible' } }
         $l.Add("Lecturas del host: $(& $f $i.LecHostGB)  |  Escrituras del host: $(& $f $i.EscHostGB)  |  Escrituras a NAND: $(& $f $i.EscNandGB)")
