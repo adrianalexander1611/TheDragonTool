@@ -12488,7 +12488,7 @@ $Global:GrafInicio = @{
     RAM = @{ Nombre = 'RAM'; Canvas = $null; Datos = $null; Extra = $null; Color = '#B07CFF'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     DISCO = @{ Nombre = 'Disco'; Canvas = $null; Datos = $null; Extra = $null; Color = '#3DDC97'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     GpuCardsLista = $null
-    TempPS = $null; TempAR = $null; TickTemp = 99; TempMax = @{}; TbTempDisco = @{}; TempDiscosInfo = @{}
+    TempPS = $null; TempAR = $null; TempT0 = $null; TickTemp = 99; TempMax = @{}; TbTempDisco = @{}; TempDiscosInfo = @{}
     GpuCat = $null; GpuMem = $null; GpuPrev = @{}; GpuDisponible = $false; GpuAdaptadores = @()
     DiscosFisicos = $null; TickDiscos = 0
 }
@@ -12765,82 +12765,132 @@ function Global:Agregar-MuestraGrafico {
     while ($G.Datos.Count -gt $Global:GrafInicio.Maximo) { $G.Datos.RemoveAt(0); $G.Extra.RemoveAt(0) }
 }
 
+# Registra (una sola vez por zona) un fallo de los graficos/temperaturas con linea y pila, sin molestar con notificaciones
+function Global:Registrar-FalloGrafico {
+    param([string]$Zona, $Err)
+    try {
+        if (-not $Global:FallosGrafVistos) { $Global:FallosGrafVistos = @{} }
+        if ($Global:FallosGrafVistos.ContainsKey($Zona)) { return }
+        $Global:FallosGrafVistos[$Zona] = $true
+        $msg = "$($Err.Exception.Message)"
+        $det = "Zona: $Zona`nMensaje: $msg`nTipo: $($Err.Exception.GetType().FullName)"
+        if ($Err.InvocationInfo) { $det += "`nLinea del script: $($Err.InvocationInfo.ScriptLineNumber)`nInstruccion: $(("$($Err.InvocationInfo.Line)").Trim())" }
+        if ($Err.ScriptStackTrace) { $det += "`n`nPILA DE POWERSHELL:`n$($Err.ScriptStackTrace)" }
+        if ($Err.Exception.InnerException) { $det += "`n`nERROR INTERNO: $($Err.Exception.InnerException.Message)" }
+        Add-RegistroError -Tipo 'AVISO' -Categoria 'Programa general' -Origen "Resumen del equipo ($Zona)" -Mensaje "Fallo en los graficos/temperatura del Resumen ($Zona): $msg" -Solucion 'Reinicia el programa. Si se repite, copia el detalle tecnico de esta fila y enviaselo al desarrollador.' -Detalle $det -Notif 0
+    } catch {}
+}
+
 function Global:Dibujar-Grafico {
     param($G)
-    $cv = $G.Canvas
-    if (-not $cv -or -not $cv.IsVisible) { return }
-    $w = $cv.ActualWidth; $h = $cv.ActualHeight
-    if ($w -lt 20 -or $h -lt 20) { return }
-    $cv.Children.Clear()
-    $n = [int]$Global:GrafInicio.Ventana
-    $datos = $G.Datos
-    $total = $datos.Count
-    $cant = [Math]::Min($n, $total)
-    $paso = $w / [Math]::Max(1, ($n - 1))
-    # Rejilla
-    foreach ($frac in 0.25, 0.5, 0.75) {
-        $y = $h - $frac * ($h - 6) - 3
-        $ln = New-Object System.Windows.Shapes.Line
-        $ln.X1 = 0; $ln.X2 = $w; $ln.Y1 = $y; $ln.Y2 = $y
-        $ln.Stroke = $G.PincelRejilla; $ln.StrokeThickness = 1; $ln.StrokeDashArray = $G.Guiones
-        $cv.Children.Add($ln) | Out-Null
-    }
-    $et = New-Object System.Windows.Controls.TextBlock
-    $et.Text = "$($G.Max)$($G.Unidad)"; $et.FontSize = 9; $et.Foreground = $G.PincelRejilla
-    [System.Windows.Controls.Canvas]::SetLeft($et, 3); [System.Windows.Controls.Canvas]::SetTop($et, 0)
-    $cv.Children.Add($et) | Out-Null
-    if ($cant -lt 2) {
-        $G.TxtStats.Text = "Recopilando datos..."
-        return
-    }
-    $ini = $total - $cant
-    $pts = New-Object System.Windows.Media.PointCollection
-    $min = [double]::MaxValue; $max = [double]0; $suma = [double]0
-    for ($i = 0; $i -lt $cant; $i++) {
-        $v = [Math]::Min([double]$G.Max, [Math]::Max([double]0, [double]$datos[$ini + $i]))
-        if ($v -lt $min) { $min = $v }; if ($v -gt $max) { $max = $v }; $suma += $v
-        $x = $w - ($cant - 1 - $i) * $paso
-        $y = $h - ($v / $G.Max) * ($h - 6) - 3
-        $pts.Add([System.Windows.Point]::new($x, $y))
-    }
-    $ptsArea = [System.Windows.Media.PointCollection]$pts.Clone()
-    $ptsArea.Add([System.Windows.Point]::new($w, $h))
-    $ptsArea.Add([System.Windows.Point]::new($w - ($cant - 1) * $paso, $h))
-    $area = New-Object System.Windows.Shapes.Polygon
-    $area.Points = $ptsArea; $area.Fill = $G.PincelArea
-    $cv.Children.Add($area) | Out-Null
-    $poli = New-Object System.Windows.Shapes.Polyline
-    $poli.Points = $pts; $poli.Stroke = $G.PincelLinea; $poli.StrokeThickness = 1.8; $poli.StrokeLineJoin = 'Round'
-    $cv.Children.Add($poli) | Out-Null
-    $G.TxtStats.Text = ("Min {0:N0}{3}  ·  Prom {1:N0}{3}  ·  Max {2:N0}{3}" -f $min, ($suma / $cant), $max, $G.Unidad) + $(if ($Global:GrafInicio.Pausa) { "   ⏸ en pausa" } else { '' })
-    # Cursor interactivo
-    if ($G.HoverX -ge 0) {
-        $inicioX = $w - ($cant - 1) * $paso
-        $idx = [int][Math]::Round(($G.HoverX - $inicioX) / $paso)
-        $idx = [Math]::Max(0, [Math]::Min($cant - 1, $idx))
-        $vx = $w - ($cant - 1 - $idx) * $paso
-        $vv = [Math]::Min([double]$G.Max, [Math]::Max([double]0, [double]$datos[$ini + $idx]))
-        $vy = $h - ($vv / $G.Max) * ($h - 6) - 3
-        $lv = New-Object System.Windows.Shapes.Line
-        $lv.X1 = $vx; $lv.X2 = $vx; $lv.Y1 = 0; $lv.Y2 = $h; $lv.Stroke = $G.PincelCursor; $lv.StrokeThickness = 1
-        $cv.Children.Add($lv) | Out-Null
-        $pt = New-Object System.Windows.Shapes.Ellipse
-        $pt.Width = 9; $pt.Height = 9; $pt.Fill = [System.Windows.Media.Brushes]::White; $pt.Stroke = $G.PincelLinea; $pt.StrokeThickness = 2
-        [System.Windows.Controls.Canvas]::SetLeft($pt, $vx - 4.5); [System.Windows.Controls.Canvas]::SetTop($pt, $vy - 4.5)
-        $cv.Children.Add($pt) | Out-Null
-        $seg = $cant - 1 - $idx
-        $extra = "$($G.Extra[$ini + $idx])"
-        $txt = ("{0:N0}{1}" -f $vv, $G.Unidad) + $(if ($extra) { "  ($extra)" } else { '' }) + "`n" + $(if ($seg -eq 0) { 'ahora' } else { "hace $seg s" })
-        $tb = New-Object System.Windows.Controls.TextBlock
-        $tb.Text = $txt; $tb.Foreground = [System.Windows.Media.Brushes]::White; $tb.FontSize = 11
-        $caja = New-Object System.Windows.Controls.Border
-        $caja.Background = $G.PincelEtiqueta; $caja.CornerRadius = 6; $caja.Padding = "6,3"; $caja.Child = $tb
-        $caja.Measure([System.Windows.Size]::new([double]::PositiveInfinity, [double]::PositiveInfinity))
-        $lw = $caja.DesiredSize.Width
-        $izq = $vx + 10; if (($izq + $lw) -gt $w) { $izq = $vx - $lw - 10 }; if ($izq -lt 0) { $izq = 0 }
-        [System.Windows.Controls.Canvas]::SetLeft($caja, $izq); [System.Windows.Controls.Canvas]::SetTop($caja, 14)
-        $cv.Children.Add($caja) | Out-Null
-    }
+    try {
+        $cv = $G.Canvas
+        if (-not $cv -or -not $cv.IsVisible) { return }
+        [double]$w = $cv.ActualWidth; [double]$h = $cv.ActualHeight
+        if ($w -lt 20 -or $h -lt 20) { return }
+        [int]$n = $Global:GrafInicio.Ventana
+        if ($n -lt 2) { $n = 60 }
+        [double]$maxV = [double]$G.Max
+        if ($maxV -le 0) { $maxV = 100 }
+        $datos = $G.Datos
+        if ($null -eq $datos) { return }
+        [int]$total = $datos.Count
+        [int]$cant = $total
+        if ($cant -gt $n) { $cant = $n }
+        [double]$paso = $w / ($n - 1)
+        [double]$alto = $h - 6
+        $cv.Children.Clear()
+        # Rejilla
+        foreach ($frac in @([double]0.25, [double]0.5, [double]0.75)) {
+            [double]$yr = $h - $frac * $alto - 3
+            $ln = New-Object System.Windows.Shapes.Line
+            $ln.X1 = [double]0; $ln.X2 = $w; $ln.Y1 = $yr; $ln.Y2 = $yr
+            $ln.Stroke = $G.PincelRejilla; $ln.StrokeThickness = [double]1; $ln.StrokeDashArray = $G.Guiones
+            [void]$cv.Children.Add($ln)
+        }
+        $et = New-Object System.Windows.Controls.TextBlock
+        $et.Text = ("{0}{1}" -f $maxV, $G.Unidad); $et.FontSize = [double]9; $et.Foreground = $G.PincelRejilla
+        [System.Windows.Controls.Canvas]::SetLeft($et, [double]3)
+        [System.Windows.Controls.Canvas]::SetTop($et, [double]0)
+        [void]$cv.Children.Add($et)
+        if ($cant -lt 2) {
+            $G.TxtStats.Text = "Recopilando datos..."
+            return
+        }
+        [int]$ini = $total - $cant
+        $pts = New-Object System.Windows.Media.PointCollection
+        $ptsArea = New-Object System.Windows.Media.PointCollection
+        [double]$min = 1e9; [double]$max = 0; [double]$suma = 0
+        for ($i = 0; $i -lt $cant; $i++) {
+            [double]$v = [double]$datos[$ini + $i]
+            if ($v -gt $maxV) { $v = $maxV }
+            if ($v -lt 0) { $v = 0 }
+            if ($v -lt $min) { $min = $v }
+            if ($v -gt $max) { $max = $v }
+            $suma += $v
+            [double]$px = $w - ($cant - 1 - $i) * $paso
+            [double]$py = $h - ($v / $maxV) * $alto - 3
+            $p = New-Object System.Windows.Point($px, $py)
+            $pts.Add($p)
+            $ptsArea.Add($p)
+        }
+        $ptsArea.Add((New-Object System.Windows.Point($w, $h)))
+        $ptsArea.Add((New-Object System.Windows.Point(($w - ($cant - 1) * $paso), $h)))
+        $area = New-Object System.Windows.Shapes.Polygon
+        $area.Points = $ptsArea; $area.Fill = $G.PincelArea
+        [void]$cv.Children.Add($area)
+        $poli = New-Object System.Windows.Shapes.Polyline
+        $poli.Points = $pts; $poli.Stroke = $G.PincelLinea; $poli.StrokeThickness = [double]1.8
+        $poli.StrokeLineJoin = [System.Windows.Media.PenLineJoin]::Round
+        [void]$cv.Children.Add($poli)
+        [double]$prom = $suma / $cant
+        $u = "$($G.Unidad)"
+        $txtSt = ("Min {0:N0}{3}  ·  Prom {1:N0}{3}  ·  Max {2:N0}{3}" -f $min, $prom, $max, $u)
+        if ($Global:GrafInicio.Pausa) { $txtSt += "   ⏸ en pausa" }
+        $G.TxtStats.Text = $txtSt
+        # Cursor interactivo
+        [double]$hx = [double]$G.HoverX
+        if ($hx -ge 0) {
+            [double]$inicioX = $w - ($cant - 1) * $paso
+            [int]$idx = [int][Math]::Round(($hx - $inicioX) / $paso)
+            if ($idx -lt 0) { $idx = 0 }
+            if ($idx -gt ($cant - 1)) { $idx = $cant - 1 }
+            [double]$vx = $w - ($cant - 1 - $idx) * $paso
+            [double]$vv = [double]$datos[$ini + $idx]
+            if ($vv -gt $maxV) { $vv = $maxV }
+            if ($vv -lt 0) { $vv = 0 }
+            [double]$vy = $h - ($vv / $maxV) * $alto - 3
+            $lv = New-Object System.Windows.Shapes.Line
+            $lv.X1 = $vx; $lv.X2 = $vx; $lv.Y1 = [double]0; $lv.Y2 = $h; $lv.Stroke = $G.PincelCursor; $lv.StrokeThickness = [double]1
+            [void]$cv.Children.Add($lv)
+            $pt = New-Object System.Windows.Shapes.Ellipse
+            $pt.Width = [double]9; $pt.Height = [double]9; $pt.Fill = [System.Windows.Media.Brushes]::White; $pt.Stroke = $G.PincelLinea; $pt.StrokeThickness = [double]2
+            [System.Windows.Controls.Canvas]::SetLeft($pt, [double]($vx - 4.5))
+            [System.Windows.Controls.Canvas]::SetTop($pt, [double]($vy - 4.5))
+            [void]$cv.Children.Add($pt)
+            [int]$seg = $cant - 1 - $idx
+            $extra = "$($G.Extra[$ini + $idx])"
+            $txt = ("{0:N0}{1}" -f $vv, $u)
+            if ($extra) { $txt += "  ($extra)" }
+            $txt += "`n"
+            if ($seg -eq 0) { $txt += 'ahora' } else { $txt += "hace $seg s" }
+            $tb = New-Object System.Windows.Controls.TextBlock
+            $tb.Text = $txt; $tb.Foreground = [System.Windows.Media.Brushes]::White; $tb.FontSize = [double]11
+            $caja = New-Object System.Windows.Controls.Border
+            $caja.Background = $G.PincelEtiqueta
+            $caja.CornerRadius = New-Object System.Windows.CornerRadius([double]6)
+            $caja.Padding = New-Object System.Windows.Thickness([double]6, [double]3, [double]6, [double]3)
+            $caja.Child = $tb
+            $caja.Measure((New-Object System.Windows.Size([double]::PositiveInfinity, [double]::PositiveInfinity)))
+            [double]$lw = $caja.DesiredSize.Width
+            [double]$izq = $vx + 10
+            if (($izq + $lw) -gt $w) { $izq = $vx - $lw - 10 }
+            if ($izq -lt 0) { $izq = 0 }
+            [System.Windows.Controls.Canvas]::SetLeft($caja, $izq)
+            [System.Windows.Controls.Canvas]::SetTop($caja, [double]14)
+            [void]$cv.Children.Add($caja)
+        }
+    } catch { Registrar-FalloGrafico 'dibujo del grafico' $_ }
 }
 
 # ---------- Temperaturas (CPU, GPU, discos) ----------
@@ -12915,15 +12965,18 @@ function Global:Procesar-Temperaturas {
     param($R)
     $E = $Global:GrafInicio
     $w = $Global:VentanaPrincipal
-    if (-not $R) { return }
+    if (-not $R) { $R = [PSCustomObject]@{ Cpu = $null; Gpus = @(); Discos = @() } }
     # CPU
+    try {
     if ($null -ne $R.Cpu) {
         $mx = Registrar-MaxTemp -Clave 'CPU' -Valor ([double]$R.Cpu)
         Aplicar-TempTexto -Tb $w.FindName("TxtInicioCPUTemp") -Info @{ Nivel = (Nivel-Temp -Valor ([double]$R.Cpu) -Tipo 'CPU'); Texto = ("🌡 Temperatura: {0:N0} °C  ·  Máx (sesión): {1:N0} °C   (sensor termico de la placa)" -f $R.Cpu, $mx) }
     } else {
         Aplicar-TempTexto -Tb $w.FindName("TxtInicioCPUTemp") -Info @{ Nivel = 3; Texto = "🌡 Temperatura: no disponible (Windows no expone el sensor de la CPU en este equipo)" }
     }
+    } catch { Registrar-FalloGrafico 'temperatura CPU' $_ }
     # GPU (NVIDIA mediante nvidia-smi): cada tarjeta muestra su propia temperatura
+    try {
     foreach ($c in @($E.GpuCardsLista)) {
         $nv = $null
         foreach ($g in @($R.Gpus)) { if ($c.Nombre -like "*$($g.Nombre)*" -or $g.Nombre -like "*$($c.Nombre)*") { $nv = $g; break } }
@@ -12941,7 +12994,9 @@ function Global:Procesar-Temperaturas {
         }
         Aplicar-TempTexto -Tb $c.TbTemp -Info $info
     }
+    } catch { Registrar-FalloGrafico 'temperatura GPU' $_ }
     # Discos
+    try {
     foreach ($d in @($R.Discos)) {
         $mx = Registrar-MaxTemp -Clave "DISCO|$($d.Nombre)" -Valor ([double]$d.Temp)
         $txt = ("🌡 Temperatura: {0:N0} °C  ·  Máx (sesión): {1:N0} °C" -f $d.Temp, $mx)
@@ -12950,29 +13005,39 @@ function Global:Procesar-Temperaturas {
         $E.TempDiscosInfo[$d.Nombre] = $info
         if ($E.TbTempDisco.ContainsKey($d.Nombre)) { Aplicar-TempTexto -Tb $E.TbTempDisco[$d.Nombre] -Info $info }
     }
+    } catch { Registrar-FalloGrafico 'temperatura discos' $_ }
 }
 
 function Global:Gestionar-LecturaTemperaturas {
     $E = $Global:GrafInicio
-    if ($E.TempAR) {
-        if ($E.TempAR.IsCompleted) {
-            $res = $null
-            try { $res = @($E.TempPS.EndInvoke($E.TempAR)) | Select-Object -First 1 } catch {}
-            try { $E.TempPS.Dispose() } catch {}
-            $E.TempPS = $null; $E.TempAR = $null; $E.TickTemp = 0
-            try { Procesar-Temperaturas -R $res } catch {}
+    try {
+        if ($E.TempAR) {
+            $terminado = $false
+            try { $terminado = [bool]$E.TempAR.IsCompleted } catch { $terminado = $true }
+            $vencido = $false
+            if (-not $terminado -and $E.TempT0 -and ((Get-Date) - [datetime]$E.TempT0).TotalSeconds -gt 45) { $vencido = $true }
+            if ($terminado -or $vencido) {
+                $res = $null
+                if ($terminado) {
+                    try { $res = @($E.TempPS.EndInvoke($E.TempAR)) | Select-Object -First 1 } catch { Registrar-FalloGrafico 'lectura de temperaturas' $_ }
+                }
+                try { if ($terminado) { $E.TempPS.Dispose() } } catch {}
+                $E.TempPS = $null; $E.TempAR = $null; $E.TickTemp = 0
+                Procesar-Temperaturas -R $res
+            }
+            return
         }
-        return
-    }
-    $E.TickTemp = $E.TickTemp + 1
-    if ($E.TickTemp -ge 5) {
-        try {
-            $ps = [powershell]::Create()
-            [void]$ps.AddScript($Global:BloqueLecturaTemp.ToString())
-            $E.TempPS = $ps
-            $E.TempAR = $ps.BeginInvoke()
-        } catch { $E.TempPS = $null; $E.TempAR = $null; $E.TickTemp = 0 }
-    }
+        $E.TickTemp = [int]$E.TickTemp + 1
+        if ([int]$E.TickTemp -ge 5) {
+            try {
+                $ps = [powershell]::Create()
+                [void]$ps.AddScript($Global:BloqueLecturaTemp.ToString())
+                $E.TempPS = $ps
+                $E.TempT0 = Get-Date
+                $E.TempAR = $ps.BeginInvoke()
+            } catch { $E.TempPS = $null; $E.TempAR = $null; $E.TickTemp = 0; Registrar-FalloGrafico 'inicio de lectura de temperaturas' $_; Procesar-Temperaturas -R $null }
+        }
+    } catch { Registrar-FalloGrafico 'temperaturas' $_ }
 }
 
 # Lista de adaptadores graficos reales (DXGI, la misma fuente que usa el
@@ -13124,7 +13189,7 @@ function Global:Tick-GraficosInicio {
             $E.ValNucleos = $vals.ToArray()
             if ($E.TbNucleos) { $E.TbNucleos.Text = Texto-NucleosCpu -Info $E.CpuInfo -Valores $E.ValNucleos }
         }
-    } catch {}
+    } catch { Registrar-FalloGrafico 'lectura CPU' $_ }
     # RAM
     try {
         $m = [DragonMem]::Leer()
@@ -13135,7 +13200,7 @@ function Global:Tick-GraficosInicio {
             $w.FindName("TxtInicioRAM").Text = "$([int]$m[0])%"
             $w.FindName("TxtInicioRAMUso").Text = "$extra en uso"
         }
-    } catch {}
+    } catch { Registrar-FalloGrafico 'lectura RAM' $_ }
     # Actividad de disco
     try {
         if ($E.CtrDiscoAct) {
@@ -13147,7 +13212,7 @@ function Global:Tick-GraficosInicio {
             $w.FindName("TxtInicioDiscoAct").Text = "$([math]::Round($act))%"
             $w.FindName("TxtInicioDiscoRW").Text = $extra
         }
-    } catch {}
+    } catch { Registrar-FalloGrafico 'lectura disco' $_ }
     # GPU: una tarjeta (con su grafico) por cada adaptador
     try {
         if ($E.GpuDisponible -and $E.GpuCardsLista) {
@@ -13167,12 +13232,12 @@ function Global:Tick-GraficosInicio {
                 $c.TbMem.Text = $txtMem
             }
         }
-    } catch {}
+    } catch { Registrar-FalloGrafico 'lectura GPU' $_ }
     Redibujar-GraficosInicio
-    Gestionar-LecturaTemperaturas
+    try { Gestionar-LecturaTemperaturas } catch { Registrar-FalloGrafico 'temperaturas (ciclo)' $_ }
     # Espacio libre de los discos: se refresca cada ~30 s
     $E.TickDiscos = $E.TickDiscos + 1
-    if ($E.TickDiscos -ge 30) { $E.TickDiscos = 0; try { Dibujar-PanelDiscos } catch {} }
+    if ($E.TickDiscos -ge 30) { $E.TickDiscos = 0; try { Dibujar-PanelDiscos } catch { Registrar-FalloGrafico 'panel de discos' $_ } }
 }
 
 function Global:Preparar-Grafico {
@@ -13196,16 +13261,21 @@ function Global:Preparar-Grafico {
     $G.Canvas = $Canvas; $G.TxtStats = $TxtStats
     # Interaccion: mover el mouse muestra el valor exacto; clic pausa/reanuda
     $Canvas.Add_MouseMove({
-        param($s, $e)
-        $G.HoverX = $e.GetPosition($s).X
-        Dibujar-Grafico -G $G
+        param($sender, $args2)
+        try {
+            $G.HoverX = [double]$args2.GetPosition($sender).X
+            Dibujar-Grafico -G $G
+        } catch { Registrar-FalloGrafico 'mouse sobre el grafico' $_ }
     }.GetNewClosure())
     $Canvas.Add_MouseLeave({
-        $G.HoverX = -1.0
-        Dibujar-Grafico -G $G
+        try { $G.HoverX = -1.0; Dibujar-Grafico -G $G } catch { Registrar-FalloGrafico 'mouse fuera del grafico' $_ }
     }.GetNewClosure())
-    $Canvas.Add_SizeChanged({ Dibujar-Grafico -G $G }.GetNewClosure())
-    $Canvas.Add_MouseLeftButtonDown({ Alternar-PausaGraficos }.GetNewClosure())
+    $Canvas.Add_SizeChanged({
+        try { Dibujar-Grafico -G $G } catch { Registrar-FalloGrafico 'cambio de tamano del grafico' $_ }
+    }.GetNewClosure())
+    $Canvas.Add_MouseLeftButtonDown({
+        try { Alternar-PausaGraficos } catch { Registrar-FalloGrafico 'pausa de graficos' $_ }
+    }.GetNewClosure())
 }
 
 function Global:Formato-MemGpu {
@@ -13283,11 +13353,11 @@ function Iniciar-GraficosInicio {
     $w = $window
     $Global:VentanaPrincipal = $w
     try { Asegurar-TipoMemoriaInicio } catch { Write-Log "Resumen: no se pudo preparar la lectura de RAM en vivo: $($_.Exception.Message)" -Tipo AVISO }
-    Preparar-Grafico -G $E.CPU -Canvas $w.FindName("CanvasCPU") -TxtStats $w.FindName("TxtGrafCPU")
-    Preparar-Grafico -G $E.RAM -Canvas $w.FindName("CanvasRAM") -TxtStats $w.FindName("TxtGrafRAM")
-    Preparar-Grafico -G $E.DISCO -Canvas $w.FindName("CanvasDisco") -TxtStats $w.FindName("TxtGrafDisco")
+    try { Preparar-Grafico -G $E.CPU -Canvas $w.FindName("CanvasCPU") -TxtStats $w.FindName("TxtGrafCPU") } catch { Registrar-FalloGrafico 'preparar grafico CPU' $_ }
+    try { Preparar-Grafico -G $E.RAM -Canvas $w.FindName("CanvasRAM") -TxtStats $w.FindName("TxtGrafRAM") } catch { Registrar-FalloGrafico 'preparar grafico RAM' $_ }
+    try { Preparar-Grafico -G $E.DISCO -Canvas $w.FindName("CanvasDisco") -TxtStats $w.FindName("TxtGrafDisco") } catch { Registrar-FalloGrafico 'preparar grafico disco' $_ }
     try { $E.GpuAdaptadores = @(Get-AdaptadoresDxgi) } catch { $E.GpuAdaptadores = @() }
-    Construir-TarjetasGpu
+    try { Construir-TarjetasGpu } catch { Registrar-FalloGrafico 'tarjetas de GPU' $_ }
     try {
         if (-not [System.Diagnostics.PerformanceCounterCategory]::Exists("GPU Engine")) { throw "sin contadores GPU Engine" }
         $E.GpuCat = New-Object System.Diagnostics.PerformanceCounterCategory("GPU Engine")
@@ -13329,24 +13399,29 @@ function Iniciar-GraficosInicio {
         [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($Tarjeta, 150)
         return $tb
     }
-    $E.TbNucleos = & $crear $w.FindName("CardInicioCPU")
-    $E.TbNucleos.Text = "Nucleos: reuniendo datos..."
-    $E.TbRamTip = & $crear $w.FindName("CardInicioRAM")
-    $E.TbRamTip.Text = "Memoria RAM: reuniendo datos..."
+    try {
+        $E.TbNucleos = & $crear $w.FindName("CardInicioCPU")
+        $E.TbNucleos.Text = "Nucleos: reuniendo datos..."
+        $E.TbRamTip = & $crear $w.FindName("CardInicioRAM")
+        $E.TbRamTip.Text = "Memoria RAM: reuniendo datos..."
+    } catch { Registrar-FalloGrafico 'tooltips de CPU/RAM' $_ }
 
     $w.FindName("CmbVentanaGraficos").Add_SelectionChanged({
-        $sel = $Global:VentanaPrincipal.FindName("CmbVentanaGraficos").SelectedIndex
-        $Global:GrafInicio.Ventana = switch ($sel) { 1 { 120 } 2 { 300 } default { 60 } }
-        Redibujar-GraficosInicio
+        try {
+            [int]$sel = $Global:VentanaPrincipal.FindName("CmbVentanaGraficos").SelectedIndex
+            $nv = 60; if ($sel -eq 1) { $nv = 120 } elseif ($sel -eq 2) { $nv = 300 }
+            $Global:GrafInicio.Ventana = $nv
+            Redibujar-GraficosInicio
+        } catch { Registrar-FalloGrafico 'ventana de tiempo' $_ }
     })
-    $w.FindName("BtnPausaGraficos").Add_Click({ Alternar-PausaGraficos })
+    $w.FindName("BtnPausaGraficos").Add_Click({ try { Alternar-PausaGraficos } catch { Registrar-FalloGrafico 'boton pausa' $_ } })
 
     $E.Iniciado = $true
     $Script:TimerGraficos = New-Object System.Windows.Threading.DispatcherTimer
     $Script:TimerGraficos.Interval = [TimeSpan]::FromSeconds(1)
-    $Script:TimerGraficos.Add_Tick({ Tick-GraficosInicio })
+    $Script:TimerGraficos.Add_Tick({ try { Tick-GraficosInicio } catch { Registrar-FalloGrafico 'ciclo de graficos' $_ } })
     $Script:TimerGraficos.Start()
-    Cargar-InfoEstaticaInicio
+    try { Cargar-InfoEstaticaInicio } catch { Registrar-FalloGrafico 'informacion estatica' $_ }
 }
 
 function Actualizar-PanelInicio {
@@ -18796,7 +18871,7 @@ $window.FindName("BtnInicioActualizar").Add_Click({ Actualizar-PanelInicio; Carg
 
 $Script:TimerInicio = New-Object System.Windows.Threading.DispatcherTimer
 $Script:TimerInicio.Interval = [TimeSpan]::FromSeconds(3)
-$Script:TimerInicio.Add_Tick({ Actualizar-PanelInicio })
+$Script:TimerInicio.Add_Tick({ try { Actualizar-PanelInicio } catch { Registrar-FalloGrafico 'panel de inicio' $_ } })
 $Script:TimerInicio.Start()
 Actualizar-PanelInicio
 try { Iniciar-GraficosInicio } catch { Write-Log "Resumen del equipo: no se pudieron iniciar los graficos en vivo: $($_.Exception.Message)" -Tipo ERROR }
