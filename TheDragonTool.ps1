@@ -4220,6 +4220,55 @@ function Show-PruebaTeclado {
     Iniciar-PruebaTecladoVisual
 }
 
+# Pinta una tecla segun su estado: sostenida (amarillo) > mapa de calor >
+# probada (azul) > sin probar resaltada (rojo tenue) > color base. Global y
+# con todo por parametro porque se llama desde .GetNewClosure().
+function Global:Pintar-Tecla {
+    param($Ctx, [string]$Nombre)
+    if (-not $Ctx.Mapa.ContainsKey($Nombre)) { return }
+    $c = $Ctx.Colores
+    $pincel = $null
+    if ($Ctx.Activas.Contains($Nombre)) {
+        $pincel = $c.Mantenida
+    } elseif ($Ctx.Modo.Calor -and $Ctx.Conteos.ContainsKey($Nombre)) {
+        $maximo = [Math]::Max(1, [int]$Ctx.Est.MaxConteo)
+        $t = [Math]::Min(1.0, [double]$Ctx.Conteos[$Nombre] / $maximo)
+        # Azul (poco usada) -> rojo (la mas usada)
+        $r = [byte][Math]::Round(47 + (255 - 47) * $t)
+        $g = [byte][Math]::Round(124 + (70 - 124) * $t)
+        $b = [byte][Math]::Round(246 + (60 - 246) * $t)
+        $pincel = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.Color]::FromArgb(230, $r, $g, $b))
+    } elseif ($Ctx.Probadas.Contains($Nombre)) {
+        $pincel = $c.Presionado
+    } elseif ($Ctx.Modo.Resaltar) {
+        $pincel = $c.SinProbar
+    } else {
+        $pincel = $c.Base[$Nombre]
+    }
+    $fondo = Nuevo-FondoTecla -ColorBase $pincel
+    foreach ($borde in $Ctx.Mapa[$Nombre]) { $borde.Background = $fondo }
+}
+
+function Global:Pintar-TodasTeclas {
+    param($Ctx)
+    foreach ($k in @($Ctx.Mapa.Keys)) { Pintar-Tecla -Ctx $Ctx -Nombre $k }
+}
+
+# Texto con las teclas que aun no se han probado, en el orden del teclado.
+function Global:Texto-TeclasFaltantes {
+    param($Orden, $Probadas, $Etiquetas, [int]$Maximo = 30)
+    $faltan = @(foreach ($k in $Orden) { if (-not $Probadas.Contains($k)) { $Etiquetas[$k] } })
+    if ($faltan.Count -eq 0) { return "✔ ¡Todas las teclas fueron probadas!" }
+    $lista = @($faltan | Select-Object -First $Maximo) -join "  "
+    $extra = if ($faltan.Count -gt $Maximo) { "  … (+$($faltan.Count - $Maximo))" } else { "" }
+    return "Sin probar ($($faltan.Count)): $lista$extra"
+}
+
+function Global:Formato-DuracionTeclado {
+    param([TimeSpan]$T)
+    return ('{0:00}:{1:00}' -f [int][Math]::Floor($T.TotalMinutes), $T.Seconds)
+}
+
 function Iniciar-PruebaTecladoVisual {
     Write-DiagLog "=== TECLADO (prueba interactiva propia) ==="
     # Se pregunta ANTES de armar la ventana si el teclado tiene bloque
@@ -4334,10 +4383,32 @@ function Iniciar-PruebaTecladoVisual {
     <TextBlock x:Name="TxtUltimaTecla" DockPanel.Dock="Top" Text="Ultima tecla: (ninguna)" Foreground="#66AEFF" FontWeight="Bold" Margin="0,0,0,4"/>
     <TextBlock x:Name="TxtProbadas" DockPanel.Dock="Top" Text="Teclas probadas: 0 / 0" Foreground="#8FE38F" FontWeight="Bold" Margin="0,0,0,4"/>
     <TextBlock x:Name="TxtCodigoEspecial" DockPanel.Dock="Top" Text="Ultimo codigo detectado: (ninguno)" Foreground="#7C93BD" FontSize="11" Margin="0,0,0,6"/>
-    <TextBlock x:Name="TxtRebotes" DockPanel.Dock="Top" Text="" Foreground="#FF6B6B" FontWeight="Bold" Margin="0,0,0,10" TextWrapping="Wrap"/>
+    <TextBlock x:Name="TxtRebotes" DockPanel.Dock="Top" Text="" Foreground="#FF6B6B" FontWeight="Bold" Margin="0,0,0,6" TextWrapping="Wrap"/>
+    <Border DockPanel.Dock="Top" Background="#33000000" BorderBrush="#30FFFFFF" BorderThickness="1" CornerRadius="10" Padding="12,8" Margin="0,0,0,8">
+      <WrapPanel>
+        <StackPanel Margin="0,0,26,4"><TextBlock Text="PULSACIONES" FontSize="10" Foreground="#7C93BD"/><TextBlock x:Name="StatTotal" Text="0" Foreground="White" FontWeight="Bold" FontSize="17"/></StackPanel>
+        <StackPanel Margin="0,0,26,4"><TextBlock Text="SIMULTANEAS (AHORA / MAX)" FontSize="10" Foreground="#7C93BD"/><TextBlock x:Name="StatSimult" Text="0 / 0" Foreground="White" FontWeight="Bold" FontSize="17"/></StackPanel>
+        <StackPanel Margin="0,0,26,4"><TextBlock Text="PICO (PULSACIONES/SEG)" FontSize="10" Foreground="#7C93BD"/><TextBlock x:Name="StatPps" Text="0" Foreground="White" FontWeight="Bold" FontSize="17"/></StackPanel>
+        <StackPanel Margin="0,0,26,4"><TextBlock Text="PULSACION MEDIA" FontSize="10" Foreground="#7C93BD"/><TextBlock x:Name="StatHold" Text="-" Foreground="White" FontWeight="Bold" FontSize="17"/></StackPanel>
+        <StackPanel Margin="0,0,26,4"><TextBlock Text="TECLA MAS USADA" FontSize="10" Foreground="#7C93BD"/><TextBlock x:Name="StatTop" Text="-" Foreground="White" FontWeight="Bold" FontSize="17"/></StackPanel>
+        <StackPanel Margin="0,0,26,4"><TextBlock Text="TIEMPO DE PRUEBA" FontSize="10" Foreground="#7C93BD"/><TextBlock x:Name="StatTiempo" Text="00:00" Foreground="White" FontWeight="Bold" FontSize="17"/></StackPanel>
+        <StackPanel Margin="0,0,0,4"><TextBlock Text="INDICADORES" FontSize="10" Foreground="#7C93BD"/>
+          <StackPanel Orientation="Horizontal">
+            <TextBlock x:Name="LedCaps" Text="● Mayus  " Foreground="#556070" FontWeight="Bold" FontSize="13"/>
+            <TextBlock x:Name="LedNum" Text="● Num  " Foreground="#556070" FontWeight="Bold" FontSize="13"/>
+            <TextBlock x:Name="LedScroll" Text="● Despl" Foreground="#556070" FontWeight="Bold" FontSize="13"/>
+          </StackPanel></StackPanel>
+      </WrapPanel>
+    </Border>
+    <TextBlock x:Name="TxtMantenidas" DockPanel.Dock="Top" Text="Sostenidas ahora: (ninguna)  |  Mayor combinacion simultanea: (ninguna)" Foreground="#F5C518" FontSize="12" Margin="0,0,0,4" TextWrapping="Wrap"/>
+    <TextBlock x:Name="TxtFaltan" DockPanel.Dock="Top" Text="" Foreground="#FFB86B" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"/>
+    <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <CheckBox x:Name="ChkCalor" Content="🔥 Mapa de calor (teclas mas usadas)" Foreground="White" Margin="0,0,22,0" VerticalContentAlignment="Center"/>
+      <CheckBox x:Name="ChkSinProbar" Content="🎯 Resaltar teclas sin probar" Foreground="White" VerticalContentAlignment="Center"/>
+    </WrapPanel>
     <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
-      <Button x:Name="BtnReporteRebotes" Content="Reporte de errores" Width="150" Margin="0,0,8,0"/>
-      <Button x:Name="BtnReiniciarTeclado" Content="Reiniciar colores" Width="130" Margin="0,0,8,0"/>
+      <Button x:Name="BtnReporteRebotes" Content="Reporte completo" Width="150" Margin="0,0,8,0"/>
+      <Button x:Name="BtnReiniciarTeclado" Content="Reiniciar prueba" Width="130" Margin="0,0,8,0"/>
       <Button x:Name="BtnCerrarTeclado" Content="Cerrar" Width="100"/>
     </StackPanel>
     <StackPanel x:Name="PanelTeclado" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -4353,10 +4424,25 @@ function Iniciar-PruebaTecladoVisual {
         $txtProbadas = $winTec.FindName("TxtProbadas")
         $txtCodigoEspecial = $winTec.FindName("TxtCodigoEspecial")
         $txtRebotes = $winTec.FindName("TxtRebotes")
+        $statTotal = $winTec.FindName("StatTotal")
+        $statSimult = $winTec.FindName("StatSimult")
+        $statPps = $winTec.FindName("StatPps")
+        $statHold = $winTec.FindName("StatHold")
+        $statTop = $winTec.FindName("StatTop")
+        $statTiempo = $winTec.FindName("StatTiempo")
+        $ledCaps = $winTec.FindName("LedCaps")
+        $ledNum = $winTec.FindName("LedNum")
+        $ledScroll = $winTec.FindName("LedScroll")
+        $txtMantenidas = $winTec.FindName("TxtMantenidas")
+        $txtFaltan = $winTec.FindName("TxtFaltan")
+        $chkCalor = $winTec.FindName("ChkCalor")
+        $chkSinProbar = $winTec.FindName("ChkSinProbar")
         $txtDistribucion.Text = "Distribucion de teclado detectada: $nombreDistribucion"
 
         $mapaTeclas = @{}
         $mapaColorBase = @{}
+        $etiquetasTecla = @{}
+        $ordenTeclas = New-Object 'System.Collections.Generic.List[string]'
         # Colores con canal alfa (2 primeros digitos del hex) para el efecto
         # de "vidrio esmerilado": se deja ver un poco el fondo de la tarjeta
         # detras de cada tecla en vez de un color solido plano.
@@ -4565,7 +4651,11 @@ function Iniciar-PruebaTecladoVisual {
                 # teclas fisicas distintas volvieran a compartir el mismo
                 # nombre resuelto (como pasaba antes con Enter/NumEnter); con
                 # una lista se iluminan todos los bordes que correspondan.
-                if (-not $mapaTeclas.ContainsKey($tecla.K)) { $mapaTeclas[$tecla.K] = New-Object System.Collections.Generic.List[object] }
+                if (-not $mapaTeclas.ContainsKey($tecla.K)) {
+                    $mapaTeclas[$tecla.K] = New-Object System.Collections.Generic.List[object]
+                    $ordenTeclas.Add($tecla.K)
+                    $etiquetasTecla[$tecla.K] = (("$($tecla.L)" -split "`n")[-1])
+                }
                 $mapaTeclas[$tecla.K].Add($border) | Out-Null
                 $mapaColorBase[$tecla.K] = $colorBase
             }
@@ -4671,10 +4761,27 @@ function Iniciar-PruebaTecladoVisual {
         $ultimoLevantadaMs = @{}
         $registroRebotes = @{}
 
+        # --- Estadisticas en vivo (todo en objetos por referencia: dentro de
+        # los closures no se pueden reasignar variables simples) --------------
+        $est = @{ Total = 0; MaxSimult = 0; MaxSimultNombres = ''; PicoPps = 0; MaxConteo = 0; TopTecla = ''; SumaHold = [int64]0; NHold = 0; Inicio = [DateTime]::Now }
+        $conteos = @{}
+        $bajadaMs = @{}
+        $colaPps = New-Object 'System.Collections.Generic.Queue[int64]'
+        $modo = @{ Calor = $false; Resaltar = $false }
+        $pincelSinProbar = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#CC6B2430")
+        $colores = @{ Mantenida = $colorMantenida; Presionado = $colorPresionado; SinProbar = $pincelSinProbar; Base = $mapaColorBase }
+        $ctx = @{ Mapa = $mapaTeclas; Conteos = $conteos; Probadas = $teclasProbadas; Activas = $teclasActivas; Modo = $modo; Colores = $colores; Est = $est }
+        $pincelLedOn = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#4CE08A")
+        $pincelLedOff = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#556070")
+        $txtFaltan.Text = "Sin probar: $totalTeclas teclas (pulsa cada tecla de tu teclado)"
+
         $timerEspecial = New-Object System.Windows.Threading.DispatcherTimer
         $timerEspecial.Interval = [TimeSpan]::FromMilliseconds(50)
         $timerEspecial.Add_Tick({
             $datos = $null
+            $huboEventos = $false
+            $nuevaProbada = $false
+            $maxCambio = $false
             while ($null -ne ($datos = [DragonToolTecladoHook]::SacarSiguiente())) {
                 $vk = [int]$datos[0]
                 $sc = [int]$datos[1]
@@ -4692,9 +4799,10 @@ function Iniciar-PruebaTecladoVisual {
                 # depende del foco, asi que es la unica fuente de verdad.
                 $nombreTecla = Resolver-NombreTeclaFisica -Vk $vk -Sc $sc -EsExtendida $esExtendida
                 if ($nombreTecla -and $mapaTeclas.ContainsKey($nombreTecla)) {
+                    $huboEventos = $true
                     if ($esBajada) {
                         if ($teclasActivas.Contains($nombreTecla)) {
-                            Iluminar-Tecla -MapaTeclas $mapaTeclas -NombreTecla $nombreTecla -Color $colorMantenida
+                            Pintar-Tecla -Ctx $ctx -Nombre $nombreTecla
                         } else {
                             # Rebote: esta misma tecla ya estaba SUELTA (no
                             # sostenida) y se acaba de soltar hace muy poco.
@@ -4713,16 +4821,45 @@ function Iniciar-PruebaTecladoVisual {
                                 }
                             }
                             $teclasActivas.Add($nombreTecla) | Out-Null
-                            Iluminar-Tecla -MapaTeclas $mapaTeclas -NombreTecla $nombreTecla -Color $colorPresionado
                             if ($teclasProbadas.Add($nombreTecla)) {
                                 $txtProbadas.Text = "Teclas probadas: $($teclasProbadas.Count) / $totalTeclas"
+                                $nuevaProbada = $true
                             }
+                            # Estadisticas: total, conteo por tecla, tecla mas usada,
+                            # pulsaciones por segundo (ventana de 1 s con la hora del
+                            # hardware), teclas simultaneas (rollover).
+                            $est.Total = $est.Total + 1
+                            $conteos[$nombreTecla] = 1 + [int]$conteos[$nombreTecla]
+                            if ($conteos[$nombreTecla] -gt $est.MaxConteo) {
+                                $est.MaxConteo = $conteos[$nombreTecla]
+                                $est.TopTecla = $nombreTecla
+                                $maxCambio = $true
+                            }
+                            $bajadaMs[$nombreTecla] = [int64]$tiempo
+                            $colaPps.Enqueue([int64]$tiempo)
+                            while ($colaPps.Count -gt 0 -and (([int64]$tiempo - $colaPps.Peek()) -gt 1000)) { [void]$colaPps.Dequeue() }
+                            if ($colaPps.Count -gt $est.PicoPps) { $est.PicoPps = $colaPps.Count }
+                            if ($teclasActivas.Count -gt $est.MaxSimult) {
+                                $est.MaxSimult = $teclasActivas.Count
+                                $est.MaxSimultNombres = (@($teclasActivas | ForEach-Object { $etiquetasTecla[$_] }) -join ' + ')
+                            }
+                            $textoTip = "$($etiquetasTecla[$nombreTecla]): $($conteos[$nombreTecla]) pulsaciones"
+                            foreach ($bordeTip in $mapaTeclas[$nombreTecla]) { $bordeTip.ToolTip = $textoTip }
+                            if ($modo.Calor -and $maxCambio) { Pintar-TodasTeclas -Ctx $ctx } else { Pintar-Tecla -Ctx $ctx -Nombre $nombreTecla }
                         }
                         $txtUltimaTecla.Text = "Ultima tecla detectada: $nombreTecla"
                     } else {
                         $teclasActivas.Remove($nombreTecla) | Out-Null
                         $ultimoLevantadaMs[$nombreTecla] = $tiempo
-                        Iluminar-Tecla -MapaTeclas $mapaTeclas -NombreTecla $nombreTecla -Color $colorPresionado
+                        if ($bajadaMs.ContainsKey($nombreTecla)) {
+                            $durHold = [int64]$tiempo - [int64]$bajadaMs[$nombreTecla]
+                            if ($durHold -ge 0 -and $durHold -lt 2000) {
+                                $est.SumaHold = $est.SumaHold + $durHold
+                                $est.NHold = $est.NHold + 1
+                            }
+                            $bajadaMs.Remove($nombreTecla)
+                        }
+                        Pintar-Tecla -Ctx $ctx -Nombre $nombreTecla
                     }
                 }
                 if ($txtCodigoEspecial) {
@@ -4730,6 +4867,28 @@ function Iniciar-PruebaTecladoVisual {
                     $txtCodigoEspecial.Text = "Ultimo codigo detectado: VK=0x$('{0:X2}' -f $vk) ($vk)  ScanCode=0x$('{0:X2}' -f $sc) ($sc)  [$estadoTxt]"
                 }
             }
+            if ($huboEventos) {
+                $statTotal.Text = "$($est.Total)"
+                $statSimult.Text = "$($teclasActivas.Count) / $($est.MaxSimult)"
+                $statPps.Text = "$($est.PicoPps)"
+                if ($est.NHold -gt 0) { $statHold.Text = "$([int]($est.SumaHold / $est.NHold)) ms" }
+                if ($est.TopTecla) { $statTop.Text = "$($etiquetasTecla[$est.TopTecla]) ($($est.MaxConteo))" }
+                $sostenidas = @($teclasActivas | ForEach-Object { $etiquetasTecla[$_] }) -join ' + '
+                if (-not $sostenidas) { $sostenidas = '(ninguna)' }
+                $mayor = if ($est.MaxSimultNombres) { "$($est.MaxSimult) teclas: $($est.MaxSimultNombres)" } else { '(ninguna)' }
+                $txtMantenidas.Text = "Sostenidas ahora: $sostenidas  |  Mayor combinacion simultanea: $mayor"
+            }
+            if ($nuevaProbada) {
+                $txtFaltan.Text = Texto-TeclasFaltantes -Orden $ordenTeclas -Probadas $teclasProbadas -Etiquetas $etiquetasTecla
+                if ($modo.Resaltar) { Pintar-TodasTeclas -Ctx $ctx }
+            }
+            $statTiempo.Text = Formato-DuracionTeclado -T ([DateTime]::Now - $est.Inicio)
+            # Indicadores de Bloq Mayus / Bloq Num / Bloq Despl
+            try {
+                $ledCaps.Foreground = if ([System.Windows.Input.Keyboard]::IsKeyToggled([System.Windows.Input.Key]::CapsLock)) { $pincelLedOn } else { $pincelLedOff }
+                $ledNum.Foreground = if ([System.Windows.Input.Keyboard]::IsKeyToggled([System.Windows.Input.Key]::NumLock)) { $pincelLedOn } else { $pincelLedOff }
+                $ledScroll.Foreground = if ([System.Windows.Input.Keyboard]::IsKeyToggled([System.Windows.Input.Key]::Scroll)) { $pincelLedOn } else { $pincelLedOff }
+            } catch {}
         }.GetNewClosure())
         $timerEspecial.Start()
 
@@ -4744,47 +4903,71 @@ function Iniciar-PruebaTecladoVisual {
         }.GetNewClosure())
         $winTec.Add_PreviewKeyDown({
             param($s, $e)
-            $nombreTecla = $e.Key.ToString()
-            if ($e.IsRepeat) {
-                Iluminar-Tecla -MapaTeclas $mapaTeclas -NombreTecla $nombreTecla -Color $colorMantenida
-            } else {
-                Iluminar-Tecla -MapaTeclas $mapaTeclas -NombreTecla $nombreTecla -Color $colorPresionado
-            }
+            # El gancho global es la unica fuente de iluminacion; aqui solo se
+            # evita que la ventana reaccione a las teclas (atajos, sonidos).
             $e.Handled = $true
         }.GetNewClosure())
         $winTec.Add_PreviewKeyUp({
             param($s, $e)
-            $nombreTecla = $e.Key.ToString()
-            Iluminar-Tecla -MapaTeclas $mapaTeclas -NombreTecla $nombreTecla -Color $colorPresionado
             $e.Handled = $true
+        }.GetNewClosure())
+
+        $chkCalor.Add_Click({
+            $modo.Calor = [bool]$chkCalor.IsChecked
+            Pintar-TodasTeclas -Ctx $ctx
+        }.GetNewClosure())
+        $chkSinProbar.Add_Click({
+            $modo.Resaltar = [bool]$chkSinProbar.IsChecked
+            Pintar-TodasTeclas -Ctx $ctx
         }.GetNewClosure())
 
         $winTec.FindName("BtnReporteRebotes").Add_Click({
             # Los botones tambien corren dentro de un .GetNewClosure(), asi
             # que solo pueden llamar funciones Global: -- Show-Aviso ya lo es.
+            $dur = Formato-DuracionTeclado -T ([DateTime]::Now - $est.Inicio)
+            $media = if ($est.NHold -gt 0) { "$([int]($est.SumaHold / $est.NHold)) ms" } else { "-" }
+            $mayor = if ($est.MaxSimultNombres) { "$($est.MaxSimult) ($($est.MaxSimultNombres))" } else { "0" }
+            $top = if ($est.TopTecla) { "$($etiquetasTecla[$est.TopTecla]) ($($est.MaxConteo) veces)" } else { "-" }
+            $faltantes = Texto-TeclasFaltantes -Orden $ordenTeclas -Probadas $teclasProbadas -Etiquetas $etiquetasTecla -Maximo 200
+            $texto = "RESUMEN DE LA PRUEBA DE TECLADO`n`n" +
+                "Duracion: $dur`n" +
+                "Pulsaciones totales: $($est.Total)`n" +
+                "Teclas probadas: $($teclasProbadas.Count) / $totalTeclas`n" +
+                "Mayor cantidad de teclas simultaneas: $mayor`n" +
+                "Pico de velocidad: $($est.PicoPps) pulsaciones por segundo`n" +
+                "Tiempo medio de pulsacion: $media`n" +
+                "Tecla mas usada: $top`n`n" +
+                "$faltantes`n`n"
             if ($registroRebotes.Count -eq 0) {
-                Show-Aviso -Mensaje "No se detecto ninguna tecla con posible rebote de hardware en esta sesion de prueba." -Titulo "Reporte de teclado - The Dragon Tool"
+                $texto += "Rebote de hardware: no se detecto ninguno en esta sesion."
             } else {
                 $lineas = foreach ($nombre in ($registroRebotes.Keys | Sort-Object)) {
                     $info = $registroRebotes[$nombre]
                     "- $nombre : $($info.Conteo) veces (menor intervalo detectado: $($info.MenorIntervalo) ms)"
                 }
-                $texto = "Se detectaron posibles fallas de hardware (rebote) en estas teclas:`n`n" + ($lineas -join "`n") + "`n`nUn 'rebote' significa que, al presionar la tecla UNA sola vez, el interruptor mando la señal de pulsacion mas de una vez en menos de $umbralReboteMs ms -- algo que una persona no puede hacer fisicamente a proposito. Normalmente indica un interruptor de tecla desgastado o con suciedad debajo, y suele empeorar con el tiempo."
-                Show-Aviso -Mensaje $texto -Titulo "Reporte de teclado - The Dragon Tool"
+                $texto += "POSIBLES FALLAS DE HARDWARE (rebote):`n" + ($lineas -join "`n") + "`n`nUn 'rebote' significa que, al presionar la tecla UNA sola vez, el interruptor mando la señal de pulsacion mas de una vez en menos de $umbralReboteMs ms -- algo que una persona no puede hacer fisicamente a proposito. Normalmente indica un interruptor desgastado o con suciedad debajo, y suele empeorar con el tiempo."
             }
+            $texto += "`n`nConsejo: mantén pulsadas varias teclas a la vez; si una nueva deja de responder, ese es el limite de rollover de tu teclado."
+            Show-Aviso -Mensaje $texto -Titulo "Reporte de teclado - The Dragon Tool"
         }.GetNewClosure())
         $winTec.FindName("BtnReiniciarTeclado").Add_Click({
-            foreach ($k in $mapaTeclas.Keys) {
-                $fondoOriginal = Nuevo-FondoTecla -ColorBase $mapaColorBase[$k]
-                foreach ($b in $mapaTeclas[$k]) { $b.Background = $fondoOriginal }
-            }
             $teclasActivas.Clear()
             $teclasProbadas.Clear()
             $ultimoLevantadaMs.Clear()
             $registroRebotes.Clear()
+            $conteos.Clear()
+            $bajadaMs.Clear()
+            $colaPps.Clear()
+            $est.Total = 0; $est.MaxSimult = 0; $est.MaxSimultNombres = ''; $est.PicoPps = 0
+            $est.MaxConteo = 0; $est.TopTecla = ''; $est.SumaHold = [int64]0; $est.NHold = 0; $est.Inicio = [DateTime]::Now
+            foreach ($k in $mapaTeclas.Keys) { foreach ($b in $mapaTeclas[$k]) { $b.ToolTip = $null } }
+            Pintar-TodasTeclas -Ctx $ctx
             $txtProbadas.Text = "Teclas probadas: 0 / $totalTeclas"
             $txtUltimaTecla.Text = "Ultima tecla: (ninguna)"
             $txtRebotes.Text = ""
+            $statTotal.Text = "0"; $statSimult.Text = "0 / 0"; $statPps.Text = "0"; $statHold.Text = "-"; $statTop.Text = "-"
+            $txtMantenidas.Text = "Sostenidas ahora: (ninguna)  |  Mayor combinacion simultanea: (ninguna)"
+            $txtFaltan.Text = "Sin probar: $totalTeclas teclas (pulsa cada tecla de tu teclado)"
         }.GetNewClosure())
         $winTec.FindName("BtnCerrarTeclado").Add_Click({ $winTec.Close() })
         $winTec.Add_Closed({
@@ -4793,11 +4976,23 @@ function Iniciar-PruebaTecladoVisual {
         }.GetNewClosure())
 
         $winTec.ShowDialog() | Out-Null
-        if ($registroRebotes.Count -gt 0) {
-            $resumen = ($registroRebotes.Keys | Sort-Object | ForEach-Object { "$_ (x$($registroRebotes[$_].Conteo))" }) -join ", "
-            Write-DiagLog "Prueba de teclado finalizada. Posibles fallas de hardware (rebote) detectadas en: $resumen"
+        Write-DiagLog "Prueba de teclado finalizada ($(Formato-DuracionTeclado -T ([DateTime]::Now - $est.Inicio)))."
+        if ($est.Total -eq 0) {
+            Write-DiagLog "   • No se pulso ninguna tecla: la prueba no es concluyente."
         } else {
-            Write-DiagLog "Prueba de teclado finalizada. No se detectaron teclas con posible rebote de hardware."
+            if ($teclasProbadas.Count -ge $totalTeclas) {
+                Diag-Ok "Teclado: las $totalTeclas teclas respondieron correctamente."
+            } else {
+                Write-DiagLog "   • Teclas probadas: $($teclasProbadas.Count) / $totalTeclas. $(Texto-TeclasFaltantes -Orden $ordenTeclas -Probadas $teclasProbadas -Etiquetas $etiquetasTecla -Maximo 200)"
+            }
+            $mediaLog = if ($est.NHold -gt 0) { "$([int]($est.SumaHold / $est.NHold)) ms" } else { "-" }
+            Write-DiagLog "   • Teclas simultaneas maximas: $($est.MaxSimult) | Pico: $($est.PicoPps) pulsaciones/s | Pulsacion media: $mediaLog | Pulsaciones totales: $($est.Total)"
+            if ($registroRebotes.Count -gt 0) {
+                $resumen = ($registroRebotes.Keys | Sort-Object | ForEach-Object { "$_ (x$($registroRebotes[$_].Conteo))" }) -join ", "
+                Diag-Aviso "Teclado: posible falla de hardware (rebote) en: $resumen"
+            } else {
+                Diag-Ok "Teclado: sin rebote de hardware en las teclas pulsadas."
+            }
         }
     } catch {
         try { [DragonToolTecladoHook]::Desinstalar() } catch {}
@@ -13616,8 +13811,20 @@ function Accion-DescargarISO {
 # en una ventana emergente propia con el navegador integrado (WebView2),
 # para que selecciones tu modelo ahi igual que en su sitio real.
 
+# Abre la pagina del fabricante: dentro de la pestana Controladores (con boton
+# Volver al menu) cuando se pide -EnPestana, o en ventana emergente (usado por
+# las listas de controladores, que ya son ventanas modales).
+function Abrir-UrlControlador {
+    param([string]$Url, [string]$Titulo, [string]$Respaldo, [switch]$EnPestana)
+    if ($EnPestana -and $window -and $window.FindName("PanelNavegadorControladores")) {
+        Mostrar-NavegadorControladores -Url $Url -Titulo $Titulo -TextoRespaldo $Respaldo
+    } else {
+        Show-VentanaNavegador -Url $Url -Titulo $Titulo -TextoRespaldo $Respaldo
+    }
+}
+
 function Buscar-DriverGPU {
-    param([string]$Fabricante, [string]$ModeloDetectado = $null)
+    param([string]$Fabricante, [string]$ModeloDetectado = $null, [switch]$EnPestana)
     $url = switch ($Fabricante) {
         'NVIDIA' { "https://www.nvidia.com/Download/index.aspx" }
         'AMD'    { "https://www.amd.com/en/support/download/drivers.html" }
@@ -13626,7 +13833,7 @@ function Buscar-DriverGPU {
     }
     if (-not $url) { Write-Log "Selecciona un fabricante (NVIDIA, AMD o Intel)." -Tipo AVISO; return }
     $respaldo = if ($ModeloDetectado) { "$ModeloDetectado driver" } else { "$Fabricante graphics driver" }
-    Show-VentanaNavegador -Url $url -Titulo "Controladores $Fabricante" -TextoRespaldo $respaldo
+    Abrir-UrlControlador -Url $url -Titulo "Controladores $Fabricante" -Respaldo $respaldo -EnPestana:$EnPestana
 }
 
 $Script:UrlPlaca = @{
@@ -13640,10 +13847,10 @@ $Script:UrlPlaca = @{
 }
 
 function Buscar-DriverPlaca {
-    param([string]$Marca)
+    param([string]$Marca, [switch]$EnPestana)
     $url = $Script:UrlPlaca[$Marca]
     if (-not $url) { Write-Log "Selecciona la marca de la placa." -Tipo AVISO; return }
-    Show-VentanaNavegador -Url $url -Titulo "Controladores $Marca" -TextoRespaldo "$Marca motherboard driver"
+    Abrir-UrlControlador -Url $url -Titulo "Controladores $Marca" -Respaldo "$Marca motherboard driver" -EnPestana:$EnPestana
 }
 
 $Script:UrlLaptop = @{
@@ -13675,10 +13882,10 @@ $Script:UrlLaptop = @{
 }
 
 function Buscar-DriverLaptop {
-    param([string]$Fabricante)
+    param([string]$Fabricante, [switch]$EnPestana)
     $url = $Script:UrlLaptop[$Fabricante]
     if (-not $url) { Write-Log "Selecciona la marca del portatil." -Tipo AVISO; return }
-    Show-VentanaNavegador -Url $url -Titulo "Controladores $Fabricante" -TextoRespaldo "$Fabricante laptop driver"
+    Abrir-UrlControlador -Url $url -Titulo "Controladores $Fabricante" -Respaldo "$Fabricante laptop driver" -EnPestana:$EnPestana
 }
 
 # ---------------------------------------------------------------------------
@@ -14388,7 +14595,8 @@ Marcar-Arranque 'funciones y recursos'
             </TabItem>
 
             <TabItem Header="🧩 Controladores">
-                <DockPanel Margin="14">
+              <Grid>
+                <DockPanel x:Name="PanelMenuControladores" Margin="14">
                     <TextBlock DockPanel.Dock="Top" Text="Selecciona una opcion:" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
                     <ComboBox x:Name="CmbSeccionControladores" DockPanel.Dock="Top" Margin="0,0,0,14" Width="360" HorizontalAlignment="Left">
                         <ComboBoxItem Content="Buscador de controladores" IsSelected="True"/>
@@ -14475,7 +14683,7 @@ Marcar-Arranque 'funciones y recursos'
                                 </Border>
 
                                 <TextBlock Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap" Margin="4,0,4,10"
-                                           Text="Nota: cada búsqueda abre una ventana propia con el navegador. Si la página del fabricante no responde (ej. error 403), se redirige automáticamente a una búsqueda de respaldo."/>
+                                           Text="Nota: al elegir un fabricante, su página de descargas se abre en esta misma pestaña (botón Volver para regresar a este menú). Si la página no responde (ej. error 403), se redirige automáticamente a una búsqueda de respaldo."/>
                             </StackPanel>
 
                             <!-- Panel: Explorador de controladores instalados -->
@@ -14535,6 +14743,22 @@ Marcar-Arranque 'funciones y recursos'
                         </Grid>
                     </ScrollViewer>
                 </DockPanel>
+
+                <!-- Navegador integrado: se muestra EN LA MISMA pestana al elegir un fabricante; "Volver" regresa al menu -->
+                <DockPanel x:Name="PanelNavegadorControladores" Margin="14" Visibility="Collapsed">
+                    <Border DockPanel.Dock="Top" Background="#10141D" CornerRadius="10" Padding="8" Margin="0,0,0,8">
+                        <WrapPanel VerticalAlignment="Center">
+                            <Button x:Name="BtnNavCtrlVolver" Content="⬅  Volver" Width="110" Height="36" Margin="0,0,10,4"/>
+                            <Button x:Name="BtnNavCtrlAtras" Content="◀ Atrás" Width="90" Height="36" Margin="0,0,6,4"/>
+                            <Button x:Name="BtnNavCtrlRecargar" Content="🔄 Recargar" Width="110" Height="36" Margin="0,0,6,4"/>
+                            <Button x:Name="BtnNavCtrlGoogle" Content="🔍 Buscar en Google" Width="160" Height="36" Margin="0,0,6,4"/>
+                            <Button x:Name="BtnNavCtrlExterno" Content="🌍 Abrir en navegador externo" Width="210" Height="36" Margin="0,0,12,4"/>
+                            <TextBlock x:Name="TxtNavCtrlTitulo" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" VerticalAlignment="Center" Margin="0,0,0,4"/>
+                        </WrapPanel>
+                    </Border>
+                    <Border x:Name="BrowserControladoresContenedor" Background="#0A0E14" CornerRadius="8"/>
+                </DockPanel>
+              </Grid>
             </TabItem>
 
             <TabItem Header="📦 Programas">
@@ -16070,6 +16294,7 @@ $window.FindName("BtnRamExhaustiva").Add_Click({ Accion-LiberarRAM -Modo 'Exhaus
 # --- Pestaña Controladores (inline, sin ventanas emergentes para la navegacion de paneles) ---
 function Mostrar-SeccionControladores {
     param([string]$Seccion)
+    if ($window.FindName("BrowserControladoresContenedor").Child) { Cerrar-NavegadorControladores }
     $window.FindName("PanelBuscadorControladores").Visibility = if ($Seccion -eq 'Buscador') { 'Visible' } else { 'Collapsed' }
     $window.FindName("PanelExploradorControladores").Visibility = if ($Seccion -eq 'Explorador') { 'Visible' } else { 'Collapsed' }
 }
@@ -16087,6 +16312,59 @@ $window.FindName("BtnDetectarTodo").Add_Click({
     $window.FindName("TxtDetalleCompleto").Text = "Detectando..."
     $window.FindName("TxtDetalleCompleto").Text = Get-InfoCompleta
     Write-Log "Deteccion completa del equipo realizada." -Tipo OK
+})
+
+# --- Navegador de controladores dentro de la pestana ---
+$Global:NavCtrl = @{ Url = $null; Respaldo = $null; Browser = $null }
+
+function Cerrar-NavegadorControladores {
+    # Libera el navegador y vuelve al menu de seleccion de fabricante.
+    $cont = $window.FindName("BrowserControladoresContenedor")
+    try {
+        $host1 = $cont.Child
+        $cont.Child = $null
+        if ($host1) {
+            $wv = $host1.Child
+            $host1.Child = $null
+            if ($wv) { try { $wv.Dispose() } catch {} }
+            try { $host1.Dispose() } catch {}
+        }
+    } catch {}
+    $Global:NavCtrl.Browser = $null
+    $window.FindName("PanelNavegadorControladores").Visibility = 'Collapsed'
+    $window.FindName("PanelMenuControladores").Visibility = 'Visible'
+}
+
+function Mostrar-NavegadorControladores {
+    param([string]$Url, [string]$Titulo, [string]$TextoRespaldo = $null)
+    # Si ya habia una pagina abierta, se limpia antes de abrir la nueva.
+    $cont = $window.FindName("BrowserControladoresContenedor")
+    if ($cont.Child) { Cerrar-NavegadorControladores }
+    $urlRespaldo = if ($TextoRespaldo) { Get-UrlRespaldoBusqueda -Texto $TextoRespaldo } else { $null }
+    $Global:NavCtrl.Url = $Url
+    $Global:NavCtrl.Respaldo = $urlRespaldo
+    $window.FindName("TxtNavCtrlTitulo").Text = $Titulo
+    $window.FindName("PanelMenuControladores").Visibility = 'Collapsed'
+    $window.FindName("PanelNavegadorControladores").Visibility = 'Visible'
+    $br = New-NavegadorEmbebido -ContenedorBorder $cont -UrlRespaldo $urlRespaldo
+    $Global:NavCtrl.Browser = $br
+    Navegar-A -Browser $br -Url $Url
+}
+
+$window.FindName("BtnNavCtrlVolver").Add_Click({ Cerrar-NavegadorControladores })
+$window.FindName("BtnNavCtrlAtras").Add_Click({
+    try { $b = $Global:NavCtrl.Browser; if ($b -and $b.CanGoBack) { $b.GoBack() } } catch {}
+})
+$window.FindName("BtnNavCtrlRecargar").Add_Click({
+    if ($Global:NavCtrl.Url) { Navegar-A -Browser $Global:NavCtrl.Browser -Url $Global:NavCtrl.Url }
+})
+$window.FindName("BtnNavCtrlGoogle").Add_Click({
+    if ($Global:NavCtrl.Respaldo) { Navegar-A -Browser $Global:NavCtrl.Browser -Url $Global:NavCtrl.Respaldo }
+    else { Show-Aviso "No hay una busqueda de respaldo disponible para esta pagina." "Sin respaldo" }
+})
+$window.FindName("BtnNavCtrlExterno").Add_Click({
+    try { Start-Process $Global:NavCtrl.Url; Write-Log "Pagina abierta en el navegador externo predeterminado." -Tipo OK }
+    catch { Write-Log "No se pudo abrir el navegador externo: $($_.Exception.Message)" -Tipo ERROR }
 })
 
 function Mostrar-PanelBusquedaControladores {
@@ -16113,7 +16391,7 @@ $window.FindName("BtnBuscarGPU").Add_Click({
     $itemSel = $window.FindName("CmbFabricanteGPU").SelectedItem
     $vendor = if ($itemSel) { $itemSel.Content } else { $null }
     if (-not $vendor) { Write-Log "Selecciona un fabricante de video." -Tipo AVISO; return }
-    Buscar-DriverGPU -Fabricante $vendor
+    Buscar-DriverGPU -Fabricante $vendor -EnPestana
 })
 
 $window.FindName("BtnDetectarPlaca").Add_Click({
@@ -16127,7 +16405,7 @@ $window.FindName("BtnBuscarPlaca").Add_Click({
     $itemMarca = $window.FindName("CmbMarcaPlaca").SelectedItem
     $marca = if ($itemMarca) { $itemMarca.Content } else { $null }
     if (-not $marca) { Write-Log "Selecciona la marca de la placa." -Tipo AVISO; return }
-    Buscar-DriverPlaca -Marca $marca
+    Buscar-DriverPlaca -Marca $marca -EnPestana
 })
 
 $window.FindName("BtnDetectarLaptop").Add_Click({
@@ -16143,7 +16421,7 @@ $window.FindName("BtnBuscarLaptop").Add_Click({
     $itemSel = $window.FindName("CmbFabricanteLaptop").SelectedItem
     $fab = if ($itemSel) { $itemSel.Content } else { $null }
     if (-not $fab) { Write-Log "Selecciona la marca del portatil." -Tipo AVISO; return }
-    Buscar-DriverLaptop -Fabricante $fab
+    Buscar-DriverLaptop -Fabricante $fab -EnPestana
 })
 
 # Sub-seccion: Explorador de controladores instalados
