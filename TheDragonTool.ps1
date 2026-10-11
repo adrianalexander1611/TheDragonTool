@@ -12449,6 +12449,8 @@ $Global:GrafInicio = @{
     CPU = @{ Nombre = 'CPU'; Canvas = $null; Datos = $null; Extra = $null; Color = '#4FA8FF'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     RAM = @{ Nombre = 'RAM'; Canvas = $null; Datos = $null; Extra = $null; Color = '#B07CFF'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     DISCO = @{ Nombre = 'Disco'; Canvas = $null; Datos = $null; Extra = $null; Color = '#3DDC97'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
+    GPU = @{ Nombre = 'GPU'; Canvas = $null; Datos = $null; Extra = $null; Color = '#FF9F43'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
+    GpuCat = $null; GpuMem = $null; GpuPrev = @{}; GpuDisponible = $false; GpuDedicadaIntegrada = $false
     DiscosFisicos = $null; TickDiscos = 0
 }
 
@@ -12707,7 +12709,11 @@ function Global:Cargar-InfoEstaticaInicio {
         $w.FindName("TxtInicioRAMDetalle").Text = (@($ram.Linea2, $ram.Forma) | Where-Object { $_ }) -join "`n"
         if ($E.TbRamTip) { $E.TbRamTip.Text = "MEMORIA RAM`n$($ram.Titulo)`n$($ram.Linea2)`n$($ram.Forma)`n`n$($ram.Detalle)" }
     } catch {}
-    try { $w.FindName("TxtInicioGPU").Text = (Get-LineasGPU) -join "`n" } catch {}
+    try {
+        $lineasGpu = @(Get-LineasGPU)
+        $w.FindName("TxtInicioGPU").Text = $lineasGpu -join "`n"
+        $E.GpuDedicadaIntegrada = (($lineasGpu -join "`n") -match 'Dedicada') -and (($lineasGpu -join "`n") -match 'Integrada')
+    } catch {}
     try { $E.DiscosFisicos = @(Get-ListaDiscosFisicos); Dibujar-PanelDiscos } catch {}
 }
 
@@ -12797,9 +12803,50 @@ function Global:Dibujar-Grafico {
     }
 }
 
+# Uso de GPU: contadores "GPU Engine" (los mismos que usa el Administrador de
+# tareas). Por adaptador se toma el motor mas ocupado (3D, Copy, Video...).
+function Global:Leer-UsoGpu {
+    $E = $Global:GrafInicio
+    $cur = $E.GpuCat.ReadCategory()
+    $col = $cur['Utilization Percentage']
+    $prev = $E.GpuPrev
+    $nuevo = @{}
+    $motores = @{}
+    foreach ($k in $col.Keys) {
+        $muestra = $col[$k].Sample
+        $nuevo[$k] = $muestra
+        if ($prev.ContainsKey($k) -and ("$k" -match 'luid_(0x[0-9A-Fa-f]+_0x[0-9A-Fa-f]+).*engtype_(\w+)')) {
+            $clave = "$($Matches[1])|$($Matches[2])"
+            $v = [System.Diagnostics.CounterSampleCalculator]::ComputeCounterValue($prev[$k], $muestra)
+            $motores[$clave] = [double]$motores[$clave] + $v
+        }
+    }
+    $E.GpuPrev = $nuevo
+    $porLuid = @{}
+    foreach ($clave in $motores.Keys) {
+        $luid = $clave.Split('|')[0]
+        $v = [Math]::Min(100, $motores[$clave])
+        if (-not $porLuid.ContainsKey($luid) -or $v -gt $porLuid[$luid].Pct) {
+            $porLuid[$luid] = [PSCustomObject]@{ Luid = $luid; Pct = $v; Vram = [double]0 }
+        }
+    }
+    try {
+        $mem = $E.GpuMem.ReadCategory()['Dedicated Usage']
+        foreach ($k in $mem.Keys) {
+            if ("$k" -match 'luid_(0x[0-9A-Fa-f]+_0x[0-9A-Fa-f]+)') {
+                $luid = $Matches[1]
+                if (-not $porLuid.ContainsKey($luid)) { $porLuid[$luid] = [PSCustomObject]@{ Luid = $luid; Pct = [double]0; Vram = [double]0 } }
+                $porLuid[$luid].Vram += [double]$mem[$k].Sample.RawValue
+            }
+        }
+    } catch {}
+    # El de mas memoria dedicada en uso va primero (normalmente la tarjeta dedicada)
+    return @($porLuid.Values | Sort-Object -Property @{ Expression = { $_.Vram }; Descending = $true }, Luid)
+}
+
 function Global:Redibujar-GraficosInicio {
     $E = $Global:GrafInicio
-    foreach ($k in 'CPU', 'RAM', 'DISCO') { try { Dibujar-Grafico -G $E[$k] } catch {} }
+    foreach ($k in 'CPU', 'RAM', 'DISCO', 'GPU') { try { Dibujar-Grafico -G $E[$k] } catch {} }
 }
 
 function Global:Tick-GraficosInicio {
@@ -12839,6 +12886,27 @@ function Global:Tick-GraficosInicio {
             Agregar-MuestraGrafico -G $E.DISCO -Valor $act -Extra $extra
             $w.FindName("TxtInicioDiscoAct").Text = "$([math]::Round($act))%"
             $w.FindName("TxtInicioDiscoRW").Text = $extra
+        }
+    } catch {}
+    # GPU
+    try {
+        if ($E.GpuDisponible) {
+            $ad = @(Leer-UsoGpu)
+            if ($ad.Count -gt 0) {
+                $mayor = ($ad | Measure-Object -Property Pct -Maximum).Maximum
+                $partes = New-Object System.Collections.Generic.List[string]
+                $i = 0
+                foreach ($a in $ad) {
+                    $i++
+                    $nombre = if ($ad.Count -ge 2 -and $E.GpuDedicadaIntegrada) { if ($i -eq 1) { 'Dedicada' } elseif ($i -eq 2) { 'Integrada' } else { "GPU $i" } } elseif ($ad.Count -ge 2) { "GPU $i" } else { 'GPU' }
+                    $txtV = if ($a.Vram -gt 0) { " · VRAM {0:N1} GB" -f ($a.Vram / 1GB) } else { '' }
+                    $partes.Add(("{0}: {1:N0}%{2}" -f $nombre, $a.Pct, $txtV))
+                }
+                $det = $partes -join '  |  '
+                Agregar-MuestraGrafico -G $E.GPU -Valor $mayor -Extra $det
+                $w.FindName("TxtInicioGPUUso").Text = "$([math]::Round($mayor))%"
+                $w.FindName("TxtInicioGPUDet").Text = $det
+            }
         }
     } catch {}
     Redibujar-GraficosInicio
@@ -12896,6 +12964,17 @@ function Iniciar-GraficosInicio {
     Preparar-Grafico -G $E.CPU -Canvas $w.FindName("CanvasCPU") -TxtStats $w.FindName("TxtGrafCPU")
     Preparar-Grafico -G $E.RAM -Canvas $w.FindName("CanvasRAM") -TxtStats $w.FindName("TxtGrafRAM")
     Preparar-Grafico -G $E.DISCO -Canvas $w.FindName("CanvasDisco") -TxtStats $w.FindName("TxtGrafDisco")
+    Preparar-Grafico -G $E.GPU -Canvas $w.FindName("CanvasGPU") -TxtStats $w.FindName("TxtGrafGPU")
+    try {
+        if (-not [System.Diagnostics.PerformanceCounterCategory]::Exists("GPU Engine")) { throw "sin contadores GPU Engine" }
+        $E.GpuCat = New-Object System.Diagnostics.PerformanceCounterCategory("GPU Engine")
+        $E.GpuMem = New-Object System.Diagnostics.PerformanceCounterCategory("GPU Adapter Memory")
+        [void](Leer-UsoGpu)   # primera lectura: deja la muestra base
+        $E.GpuDisponible = $true
+    } catch {
+        $E.GpuDisponible = $false
+        $w.FindName("TxtGrafGPU").Text = "Uso de GPU no disponible (requiere Windows 10 1709 o superior con controlador de video WDDM 2.x)."
+    }
     # Contadores de rendimiento (nombres en ingles; funcionan en cualquier idioma de Windows)
     try {
         $E.CtrCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
@@ -15025,6 +15104,11 @@ Marcar-Arranque 'funciones y recursos'
                                 <StackPanel>
                                     <TextBlock Text="🎮 Tarjeta(s) de video" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
                                     <TextBlock x:Name="TxtInicioGPU" Text="Detectando..." Foreground="White" TextWrapping="Wrap"/>
+                                    <TextBlock Text="Uso de la GPU" Foreground="{StaticResource TextoSecundario}" FontSize="12" Margin="0,10,0,0"/>
+                                    <TextBlock x:Name="TxtInicioGPUUso" Text="--%" Foreground="White" FontWeight="Bold" FontSize="24"/>
+                                    <TextBlock x:Name="TxtInicioGPUDet" Text="" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap"/>
+                                    <Canvas x:Name="CanvasGPU" Height="110" Margin="0,8,0,4" Background="Transparent" ClipToBounds="True" Cursor="Cross"/>
+                                    <TextBlock x:Name="TxtGrafGPU" Foreground="{StaticResource TextoSecundario}" FontSize="11"/>
                                 </StackPanel>
                             </Border>
                             <Border Grid.Column="1" Style="{StaticResource TarjetaSeccion}" Margin="0,0,0,14">
