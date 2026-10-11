@@ -407,7 +407,7 @@ function Global:Crear-PincelNeonAnimado {
         $tr.ApplyAnimationClock($props[$i], $rl)
         [void]$relojes.Add($rl)
     }
-    return @{ Pincel = $n; Transform = $tr; Relojes = $relojes }
+    return @{ Pincel = $n.PSObject.BaseObject; Transform = $tr.PSObject.BaseObject; Relojes = $relojes }
 }
 
 # Devuelve el pincel neon (animado) de un elemento. Cada elemento recibe su propio pincel, que se guarda como
@@ -423,11 +423,11 @@ function Global:Obtener-PincelNeon {
     if ($p -is [System.Windows.Media.LinearGradientBrush]) {
         try {
             $info = Crear-PincelNeonAnimado -Original $p
-            $n = $info.Pincel
+            $n = $info.Pincel.PSObject.BaseObject
             $Global:NeonInfo[[string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($n)] = $info
-            $Elemento.Resources[$Clave] = $n
-            $Global:NeonPorElemento[$claveReg] = $n
-            return $n
+            $Elemento.Resources[$Clave] = $n.PSObject.BaseObject
+            $Global:NeonPorElemento[$claveReg] = $n.PSObject.BaseObject
+            return $n.PSObject.BaseObject
         } catch {
             $Global:ErrorPincelNeon = "$($_.Exception.GetType().Name): $($_.Exception.Message)"
             return $p
