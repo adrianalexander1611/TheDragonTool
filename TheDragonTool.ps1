@@ -12451,7 +12451,7 @@ $Global:GrafInicio = @{
     DISCO = @{ Nombre = 'Disco'; Canvas = $null; Datos = $null; Extra = $null; Color = '#3DDC97'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     GPU = @{ Nombre = 'GPU'; Canvas = $null; Datos = $null; Extra = $null; Color = '#FF9F43'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     TempPS = $null; TempAR = $null; TickTemp = 99; TempMax = @{}; TbTempDisco = @{}; TempDiscosInfo = @{}
-    GpuCat = $null; GpuMem = $null; GpuPrev = @{}; GpuDisponible = $false; GpuDedicadaIntegrada = $false
+    GpuCat = $null; GpuMem = $null; GpuPrev = @{}; GpuDisponible = $false; GpuAdaptadores = @()
     DiscosFisicos = $null; TickDiscos = 0
 }
 
@@ -12541,7 +12541,7 @@ function Global:Get-InfoRamResumen {
 
 function Global:Get-LineasGPU {
     $vcs = @(); try { $vcs = @(Get-CimInstance Win32_VideoController -ErrorAction Stop) } catch {}
-    $reales = @($vcs | Where-Object { $_.Name -and $_.Name -notmatch 'Basic Display|Remote Display|Virtual|Mirror|Citrix|Parsec|Hyper-V|Meta ' })
+    $reales = @($vcs | Where-Object { $_.Name -and $_.Name -notmatch 'Basic Display|Remote Display|Virtual|Mirror|Citrix|Parsec|Hyper-V|Meta |IDDCX|Fresco|Indirect|DisplayLink|USB Display' })
     if ($reales.Count -eq 0) { $reales = $vcs }
     if ($reales.Count -eq 0) { return @('No se detecto ninguna tarjeta de video.') }
     $claves = $null
@@ -12719,7 +12719,6 @@ function Global:Cargar-InfoEstaticaInicio {
     try {
         $lineasGpu = @(Get-LineasGPU)
         $w.FindName("TxtInicioGPU").Text = $lineasGpu -join "`n"
-        $E.GpuDedicadaIntegrada = (($lineasGpu -join "`n") -match 'Dedicada') -and (($lineasGpu -join "`n") -match 'Integrada')
     } catch {}
     try { $E.DiscosFisicos = @(Get-ListaDiscosFisicos); Dibujar-PanelDiscos } catch {}
 }
@@ -12894,6 +12893,7 @@ function Global:Procesar-Temperaturas {
     $lineas = New-Object System.Collections.Generic.List[string]
     $peor = 3
     foreach ($g in @($R.Gpus)) {
+        if ([double]$g.Temp -le 0) { $lineas.Add("🌡 $($g.Nombre): sin lectura (GPU en reposo)"); continue }
         $mx = Registrar-MaxTemp -Clave "GPU|$($g.Nombre)" -Valor ([double]$g.Temp)
         $lineas.Add(("🌡 {0}: {1:N0} °C  ·  Máx (sesión): {2:N0} °C" -f $g.Nombre, $g.Temp, $mx))
         $n = Nivel-Temp -Valor ([double]$g.Temp) -Tipo 'GPU'
@@ -12935,6 +12935,78 @@ function Global:Gestionar-LecturaTemperaturas {
     }
 }
 
+# Lista de adaptadores graficos reales (DXGI, la misma fuente que usa el
+# Administrador de tareas) con su LUID: permite saber que contador de uso
+# pertenece a la GPU integrada y cual a la dedicada.
+function Global:Asegurar-TipoDxgi {
+    if ('DragonDxgi' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class DragonDxgi {
+    [DllImport("dxgi.dll")]
+    static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr ppFactory);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct DXGI_ADAPTER_DESC1 {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string Description;
+        public uint VendorId; public uint DeviceId; public uint SubSysId; public uint Revision;
+        public UIntPtr DedicatedVideoMemory; public UIntPtr DedicatedSystemMemory; public UIntPtr SharedSystemMemory;
+        public uint LuidLow; public int LuidHigh; public uint Flags;
+    }
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int EnumAdapters1Fn(IntPtr self, uint index, out IntPtr adapter);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetDesc1Fn(IntPtr self, out DXGI_ADAPTER_DESC1 desc);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate uint ReleaseFn(IntPtr self);
+    static void Liberar(IntPtr obj) {
+        if (obj == IntPtr.Zero) { return; }
+        IntPtr vt = Marshal.ReadIntPtr(obj);
+        ReleaseFn rel = (ReleaseFn)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(vt, 2 * IntPtr.Size), typeof(ReleaseFn));
+        rel(obj);
+    }
+    public static string[] Listar() {
+        System.Collections.Generic.List<string> res = new System.Collections.Generic.List<string>();
+        Guid iid = new Guid("770aae78-f26f-4dba-a829-253c83d1b387");
+        IntPtr factory;
+        if (CreateDXGIFactory1(ref iid, out factory) != 0 || factory == IntPtr.Zero) { return res.ToArray(); }
+        try {
+            IntPtr vt = Marshal.ReadIntPtr(factory);
+            EnumAdapters1Fn enumFn = (EnumAdapters1Fn)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(vt, 12 * IntPtr.Size), typeof(EnumAdapters1Fn));
+            for (uint i = 0; i < 16; i++) {
+                IntPtr ad;
+                if (enumFn(factory, i, out ad) != 0 || ad == IntPtr.Zero) { break; }
+                try {
+                    IntPtr avt = Marshal.ReadIntPtr(ad);
+                    GetDesc1Fn getDesc = (GetDesc1Fn)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(avt, 10 * IntPtr.Size), typeof(GetDesc1Fn));
+                    DXGI_ADAPTER_DESC1 d;
+                    if (getDesc(ad, out d) == 0) {
+                        res.Add(string.Format("0x{0:x8}_0x{1:x8}|{2}|{3}|{4}|{5}", d.LuidHigh, d.LuidLow, d.Description, d.VendorId, (ulong)d.DedicatedVideoMemory / (1024UL * 1024UL), d.Flags));
+                    }
+                } finally { Liberar(ad); }
+            }
+        } finally { Liberar(factory); }
+        return res.ToArray();
+    }
+}
+"@ -ErrorAction Stop
+}
+
+function Global:Get-AdaptadoresDxgi {
+    Asegurar-TipoDxgi
+    $res = New-Object System.Collections.Generic.List[object]
+    foreach ($ln in @([DragonDxgi]::Listar())) {
+        $p = "$ln".Split('|')
+        if ($p.Count -lt 5) { continue }
+        $nombre = ($p[1] -replace '\s+', ' ').Trim()
+        $ded = [double]$p[3]
+        if (([int]$p[4] -band 2) -ne 0) { continue }   # adaptador por software
+        if ($nombre -match 'Basic Render|Basic Display|Remote Display|Virtual|IDDCX|Fresco|Indirect|DisplayLink|Parsec|Hyper-V|Mirror') { continue }
+        $tipo = if ($nombre -match 'GeForce|RTX|GTX|Quadro|NVIDIA|Radeon RX|Radeon Pro|Arc\b') { 'Dedicada' }
+                elseif ($nombre -match 'Intel|UHD|Iris|HD Graphics|Radeon\(TM\) Graphics|Radeon Graphics|Vega \d') { 'Integrada' }
+                elseif ($ded -ge 1024) { 'Dedicada' } else { '' }
+        $res.Add([PSCustomObject]@{ Key = $p[0].ToLower(); Nombre = $nombre; Tipo = $tipo })
+    }
+    return $res.ToArray()
+}
+
 # Uso de GPU: contadores "GPU Engine" (los mismos que usa el Administrador de
 # tareas). Por adaptador se toma el motor mas ocupado (3D, Copy, Video...).
 function Global:Leer-UsoGpu {
@@ -12948,7 +13020,7 @@ function Global:Leer-UsoGpu {
         $muestra = $col[$k].Sample
         $nuevo[$k] = $muestra
         if ($prev.ContainsKey($k) -and ("$k" -match 'luid_(0x[0-9A-Fa-f]+_0x[0-9A-Fa-f]+).*engtype_(\w+)')) {
-            $clave = "$($Matches[1])|$($Matches[2])"
+            $clave = "$($Matches[1].ToLower())|$($Matches[2])"
             $v = [System.Diagnostics.CounterSampleCalculator]::ComputeCounterValue($prev[$k], $muestra)
             $motores[$clave] = [double]$motores[$clave] + $v
         }
@@ -12966,14 +13038,25 @@ function Global:Leer-UsoGpu {
         $mem = $E.GpuMem.ReadCategory()['Dedicated Usage']
         foreach ($k in $mem.Keys) {
             if ("$k" -match 'luid_(0x[0-9A-Fa-f]+_0x[0-9A-Fa-f]+)') {
-                $luid = $Matches[1]
+                $luid = $Matches[1].ToLower()
                 if (-not $porLuid.ContainsKey($luid)) { $porLuid[$luid] = [PSCustomObject]@{ Luid = $luid; Pct = [double]0; Vram = [double]0 } }
                 $porLuid[$luid].Vram += [double]$mem[$k].Sample.RawValue
             }
         }
     } catch {}
-    # El de mas memoria dedicada en uso va primero (normalmente la tarjeta dedicada)
-    return @($porLuid.Values | Sort-Object -Property @{ Expression = { $_.Vram }; Descending = $true }, Luid)
+    # Se identifica cada adaptador por su LUID (nombre real segun DXGI)
+    $ads = @($E.GpuAdaptadores)
+    $res = New-Object System.Collections.Generic.List[object]
+    if ($ads.Count -gt 0) {
+        foreach ($a in $ads) {
+            $x = $porLuid[$a.Key]
+            $res.Add([PSCustomObject]@{ Luid = $a.Key; Nombre = $a.Nombre; Tipo = $a.Tipo; Pct = $(if ($x) { $x.Pct } else { [double]0 }); Vram = $(if ($x) { $x.Vram } else { [double]0 }) })
+        }
+    } else {
+        $i = 0
+        foreach ($x in @($porLuid.Values | Sort-Object Luid)) { $i++; $res.Add([PSCustomObject]@{ Luid = $x.Luid; Nombre = "GPU $i"; Tipo = ''; Pct = $x.Pct; Vram = $x.Vram }) }
+    }
+    return $res.ToArray()
 }
 
 function Global:Redibujar-GraficosInicio {
@@ -13027,15 +13110,16 @@ function Global:Tick-GraficosInicio {
             if ($ad.Count -gt 0) {
                 $mayor = ($ad | Measure-Object -Property Pct -Maximum).Maximum
                 $partes = New-Object System.Collections.Generic.List[string]
-                $i = 0
+                $activo = $null
                 foreach ($a in $ad) {
-                    $i++
-                    $nombre = if ($ad.Count -ge 2 -and $E.GpuDedicadaIntegrada) { if ($i -eq 1) { 'Dedicada' } elseif ($i -eq 2) { 'Integrada' } else { "GPU $i" } } elseif ($ad.Count -ge 2) { "GPU $i" } else { 'GPU' }
-                    $txtV = if ($a.Vram -gt 0) { " · VRAM {0:N1} GB" -f ($a.Vram / 1GB) } else { '' }
-                    $partes.Add(("{0}: {1:N0}%{2}" -f $nombre, $a.Pct, $txtV))
+                    $nom = if ($a.Tipo) { "$($a.Nombre) ($($a.Tipo))" } else { "$($a.Nombre)" }
+                    $txtV = if ($a.Vram -ge 1GB) { " · VRAM {0:N1} GB" -f ($a.Vram / 1GB) } elseif ($a.Vram -gt 0) { " · VRAM {0:N0} MB" -f ($a.Vram / 1MB) } else { '' }
+                    $partes.Add(("{0}: {1:N0}%{2}" -f $nom, $a.Pct, $txtV))
+                    if (-not $activo -or $a.Pct -gt $activo.Pct) { $activo = $a }
                 }
-                $det = $partes -join '  |  '
-                Agregar-MuestraGrafico -G $E.GPU -Valor $mayor -Extra $det
+                $nomActivo = if ($activo.Tipo) { "$($activo.Nombre) ($($activo.Tipo))" } else { "$($activo.Nombre)" }
+                $det = if ($ad.Count -gt 1) { "Mas activa ahora: $nomActivo`n" + ($partes -join "`n") } else { $partes[0] }
+                Agregar-MuestraGrafico -G $E.GPU -Valor $mayor -Extra ("{0}: {1:N0}%" -f $nomActivo, $mayor)
                 $w.FindName("TxtInicioGPUUso").Text = "$([math]::Round($mayor))%"
                 $w.FindName("TxtInicioGPUDet").Text = $det
             }
@@ -13102,6 +13186,7 @@ function Iniciar-GraficosInicio {
         if (-not [System.Diagnostics.PerformanceCounterCategory]::Exists("GPU Engine")) { throw "sin contadores GPU Engine" }
         $E.GpuCat = New-Object System.Diagnostics.PerformanceCounterCategory("GPU Engine")
         $E.GpuMem = New-Object System.Diagnostics.PerformanceCounterCategory("GPU Adapter Memory")
+        try { $E.GpuAdaptadores = @(Get-AdaptadoresDxgi) } catch { $E.GpuAdaptadores = @() }
         [void](Leer-UsoGpu)   # primera lectura: deja la muestra base
         $E.GpuDisponible = $true
     } catch {
