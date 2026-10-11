@@ -11507,82 +11507,6 @@ function Accion-PantallaBloqueoOn {
     } catch { Write-Log "No se pudo reactivar la pantalla de bloqueo." -Tipo AVISO }
 }
 
-# ---------------------------------------------------------------------------
-#  PERSONALIZACION: fondo de pantalla, tema claro/oscuro, protector, sonidos
-# ---------------------------------------------------------------------------
-
-$Script:TipoWallpaperListo = $false
-function Ensure-TipoWallpaper {
-    if ($Script:TipoWallpaperListo) { return }
-    $codigo = @"
-using System;
-using System.Runtime.InteropServices;
-public class DragonToolWallpaper {
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    public static extern int SystemParametersInfo(int uAction, int uParam, string lpvParam, int fuWinIni);
-}
-"@
-    Add-Type -TypeDefinition $codigo -ErrorAction Stop
-    $Script:TipoWallpaperListo = $true
-}
-
-function Accion-CambiarFondoPantalla {
-    try { Ensure-TipoWallpaper } catch {
-        Write-Log "No se pudo preparar el cambio de fondo de pantalla: $($_.Exception.Message)" -Tipo ERROR
-        return
-    }
-    Add-Type -AssemblyName System.Windows.Forms
-    $dialogo = New-Object System.Windows.Forms.OpenFileDialog
-    $dialogo.Title = "Selecciona la imagen para el fondo de pantalla"
-    $dialogo.Filter = "Imagenes (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp"
-    if ($dialogo.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
-    try {
-        $SPI_SETDESKWALLPAPER = 0x0014
-        $SPIF_UPDATEINIFILE = 0x01
-        $SPIF_SENDCHANGE = 0x02
-        [DragonToolWallpaper]::SystemParametersInfo($SPI_SETDESKWALLPAPER, 0, $dialogo.FileName, ($SPIF_UPDATEINIFILE -bor $SPIF_SENDCHANGE)) | Out-Null
-        Write-Log "Fondo de pantalla cambiado a: $($dialogo.FileName)" -Tipo OK
-    } catch {
-        Write-Log "No se pudo cambiar el fondo de pantalla: $($_.Exception.Message)" -Tipo ERROR
-    }
-}
-
-function Accion-TemaOscuroOn {
-    try {
-        $ruta = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        Set-ItemProperty -Path $ruta -Name "AppsUseLightTheme" -Value 0 -Type DWord
-        Set-ItemProperty -Path $ruta -Name "SystemUsesLightTheme" -Value 0 -Type DWord
-        Restart-ExplorerSilencioso
-        Write-Log "Tema oscuro activado (apps y sistema)." -Tipo OK
-    } catch { Write-Log "No se pudo activar el tema oscuro." -Tipo AVISO }
-}
-function Accion-TemaClaroOn {
-    try {
-        $ruta = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        Set-ItemProperty -Path $ruta -Name "AppsUseLightTheme" -Value 1 -Type DWord
-        Set-ItemProperty -Path $ruta -Name "SystemUsesLightTheme" -Value 1 -Type DWord
-        Restart-ExplorerSilencioso
-        Write-Log "Tema claro activado (apps y sistema)." -Tipo OK
-    } catch { Write-Log "No se pudo activar el tema claro." -Tipo AVISO }
-}
-
-function Accion-AbrirConfigPersonalizacion {
-    Start-Process "ms-settings:personalization"
-    Write-Log "Configuracion de personalizacion de Windows abierta (colores, temas, fondo)." -Tipo OK
-}
-function Accion-AbrirConfigPantallaBloqueo {
-    Start-Process "ms-settings:lockscreen"
-    Write-Log "Configuracion de pantalla de bloqueo abierta." -Tipo OK
-}
-function Accion-AbrirConfigSonidos {
-    Start-Process "mmsys.cpl"
-    Write-Log "Configuracion de sonidos del sistema abierta." -Tipo OK
-}
-function Accion-AbrirConfigCursor {
-    Start-Process "main.cpl"
-    Write-Log "Configuracion del puntero del mouse abierta." -Tipo OK
-}
-
 # --- Explorador de archivos (ampliado) ---
 
 function Accion-RutaCompletaOn {
@@ -12592,37 +12516,6 @@ function Global:Get-InfoRamResumen {
               elseif ($nSold -eq 0) { "RAM en modulo $($formasMod -join '/') con SPD (reemplazable / ampliable)" }
               else { "RAM MIXTA: $nSold soldada(s) + $nMod modulo(s) con SPD" }
     return [PSCustomObject]@{ Titulo = $titulo; Linea2 = $linea2; Forma = $forma2; Detalle = ($det -join "`n") }
-}
-
-function Global:Get-LineasGPU {
-    $vcs = @(); try { $vcs = @(Get-CimInstance Win32_VideoController -ErrorAction Stop) } catch {}
-    $reales = @($vcs | Where-Object { $_.Name -and $_.Name -notmatch 'Basic Display|Remote Display|Virtual|Mirror|Citrix|Parsec|Hyper-V|Meta |IDDCX|Fresco|Indirect|DisplayLink|USB Display' })
-    if ($reales.Count -eq 0) { $reales = $vcs }
-    if ($reales.Count -eq 0) { return @('No se detecto ninguna tarjeta de video.') }
-    $claves = $null
-    try { $claves = @(Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue }) } catch {}
-    $lineas = New-Object System.Collections.Generic.List[string]
-    $i = 0
-    foreach ($g in $reales) {
-        $i++
-        $tipo = if ($g.Name -match 'GeForce|RTX|GTX|Quadro|Radeon RX|Radeon Pro|Arc\b') { 'Dedicada' }
-                elseif ($g.Name -match 'UHD|Iris|HD Graphics|Radeon\(TM\) Graphics|Radeon Graphics|Vega \d|Intel') { 'Integrada' } else { '' }
-        $vram = $null
-        try {
-            foreach ($p in $claves) {
-                if ($p.DriverDesc -eq $g.Name -and $p.'HardwareInformation.qwMemorySize') { $vram = [math]::Round([double]$p.'HardwareInformation.qwMemorySize' / 1GB, 1); break }
-            }
-        } catch {}
-        if (-not $vram -and $g.AdapterRAM -and [double]$g.AdapterRAM -gt 0) { $vram = [math]::Round([double]$g.AdapterRAM / 1GB, 1) }
-        $partes = New-Object System.Collections.Generic.List[string]
-        if ($tipo) { $partes.Add($tipo) }
-        if ($vram -and $vram -gt 0) { $partes.Add("$vram GB") }
-        if ($g.DriverVersion) { $partes.Add("Driver $($g.DriverVersion)") }
-        $prefijo = if ($reales.Count -gt 1) { "GPU $i`: " } else { '' }
-        $lineas.Add("$prefijo$($g.Name)" + $(if ($partes.Count -gt 0) { "  ·  " + ($partes -join '  ·  ') } else { '' }))
-    }
-    if ($reales.Count -gt 1) { $lineas.Insert(0, "Se detectaron $($reales.Count) tarjetas de video:") }
-    return $lineas.ToArray()
 }
 
 function Global:Get-ListaDiscosFisicos {
@@ -19670,7 +19563,6 @@ $window.FindName("BtnActualizarErrores").Add_Click({ Cargar-RegistroErrores })
 $window.FindName("BtnDetalleError").Add_Click({ try { Mostrar-DetalleError -Entrada $window.FindName("GridRegistroErrores").SelectedItem } catch { Registrar-FalloInterno 'ventana de detalle' $_ } })
 $window.FindName("BtnAutoverificar").Add_Click({ try { Iniciar-Autoverificacion } catch { Registrar-FalloInterno 'autoverificacion' $_ } })
 $window.FindName("GridRegistroErrores").Add_MouseDoubleClick({ try { $it = $window.FindName("GridRegistroErrores").SelectedItem; if ($it) { Mostrar-DetalleError -Entrada $it } } catch { Registrar-FalloInterno 'doble clic en el registro' $_ } })
-$window.FindName("GridRegistroErrores").Add_SelectionChanged({ try { $window.FindName("BtnDetalleError").IsEnabled = [bool]($window.FindName("GridRegistroErrores").SelectedItem) } catch {} })
 $window.FindName("CmbFiltroCategoriaError").Add_SelectionChanged({ Cargar-RegistroErrores })
 $window.FindName("CmbFiltroTipoError").Add_SelectionChanged({ Cargar-RegistroErrores })
 $window.FindName("TxtBuscarError").Add_TextChanged({ Cargar-RegistroErrores })
@@ -19683,6 +19575,7 @@ $window.FindName("ChkMonitorLentitud").Add_Unchecked({ $Global:MonActivo = $fals
 
 $window.FindName("GridRegistroErrores").Add_SelectionChanged({
     $it = $window.FindName("GridRegistroErrores").SelectedItem
+    try { $window.FindName("BtnDetalleError").IsEnabled = [bool]$it } catch {}
     $caja = $window.FindName("TxtDetalleError")
     if (-not $it) { $caja.Text = "Selecciona un registro de la lista para ver que paso y como solucionarlo."; return }
     $t = "[$($it.Tipo)]  $($it.Categoria)  -  $($it.Origen)`r`nCuando: $($it.Fecha)   |   Repeticiones: $($it.Veces)`r`n`r`nQUE PASO:`r`n$($it.Mensaje)`r`n`r`nQUE HACER:`r`n$($it.Solucion)"
