@@ -12438,12 +12438,525 @@ function Get-InfoEquipo {
 }
 
 # --- Panel de Inicio: resumen en vivo del equipo ---
-function Actualizar-PanelInicio {
+# ===========================================================================
+#  RESUMEN DEL EQUIPO: GPU(s), discos, CPU (nucleos), RAM y graficos en vivo
+# ===========================================================================
+$Global:GrafInicio = @{
+    Iniciado = $false; Pausa = $false; Ventana = 60; Maximo = 300
+    ContadoresCpu = $false; CtrCpu = $null; CtrNucleos = @(); ValNucleos = @()
+    CtrDiscoAct = $null; CtrDiscoLec = $null; CtrDiscoEsc = $null
+    CpuInfo = $null; TbNucleos = $null; TbRamTip = $null
+    CPU = @{ Nombre = 'CPU'; Canvas = $null; Datos = $null; Extra = $null; Color = '#4FA8FF'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
+    RAM = @{ Nombre = 'RAM'; Canvas = $null; Datos = $null; Extra = $null; Color = '#B07CFF'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
+    DISCO = @{ Nombre = 'Disco'; Canvas = $null; Datos = $null; Extra = $null; Color = '#3DDC97'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
+    DiscosFisicos = $null; TickDiscos = 0
+}
+
+function Global:Asegurar-TipoMemoriaInicio {
+    if ('DragonMem' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class DragonMem {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    public class MEMORYSTATUSEX {
+        public uint dwLength; public uint dwMemoryLoad;
+        public ulong ullTotalPhys; public ulong ullAvailPhys;
+        public ulong ullTotalPageFile; public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual; public ulong ullAvailVirtual; public ulong ullAvailExtendedVirtual;
+        public MEMORYSTATUSEX() { dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX)); }
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
+    public static double[] Leer() {
+        MEMORYSTATUSEX m = new MEMORYSTATUSEX();
+        if (!GlobalMemoryStatusEx(m)) { return null; }
+        return new double[] { m.dwMemoryLoad, m.ullTotalPhys, m.ullAvailPhys };
+    }
+}
+"@ -ErrorAction Stop
+}
+
+# ---------- Informacion estatica ----------
+
+function Global:Get-InfoCpuResumen {
     try {
-        $cpuInfo = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction SilentlyContinue
-        $cpuPct = if ($cpuInfo) { [math]::Round($cpuInfo.PercentProcessorTime) } else { $null }
-        $window.FindName("TxtInicioCPU").Text = if ($null -ne $cpuPct) { "$cpuPct%" } else { "N/D" }
+        $cpus = @(Get-CimInstance Win32_Processor -ErrorAction Stop)
+        if ($cpus.Count -eq 0) { return $null }
+        $nuc = 0; $hil = 0; $mhz = 0
+        foreach ($c in $cpus) { $nuc += [int]$c.NumberOfCores; $hil += [int]$c.NumberOfLogicalProcessors; if ([int]$c.MaxClockSpeed -gt $mhz) { $mhz = [int]$c.MaxClockSpeed } }
+        return [PSCustomObject]@{ Nombre = (("$($cpus[0].Name)") -replace '\s+', ' ').Trim(); Nucleos = $nuc; Hilos = $hil; MHz = $mhz }
+    } catch { return $null }
+}
+
+function Global:Get-InfoRamResumen {
+    param($Modulos = $null, $Arreglos = $null)
+    if ($null -eq $Modulos) { try { $Modulos = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop) } catch { $Modulos = @() } }
+    if ($null -eq $Arreglos) { try { $Arreglos = @(Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction Stop) } catch { $Arreglos = @() } }
+    $Modulos = @($Modulos); $Arreglos = @($Arreglos)
+    if ($Modulos.Count -eq 0) {
+        return [PSCustomObject]@{ Titulo = 'No se pudo leer el detalle de la memoria'; Linea2 = ''; Forma = ''; Detalle = 'Windows no entrego el detalle de los modulos de RAM (SMBIOS).' }
+    }
+    $nombresTipo = @{ 18 = 'DDR'; 19 = 'DDR2'; 20 = 'DDR2 FB-DIMM'; 24 = 'DDR3'; 26 = 'DDR4'; 27 = 'LPDDR'; 28 = 'LPDDR2'; 29 = 'LPDDR3'; 30 = 'LPDDR4'; 34 = 'DDR5'; 35 = 'LPDDR5' }
+    $totalBytes = [double]0; $nSold = 0; $nMod = 0; $tipoMem = ''; $velMax = 0
+    $caps = New-Object System.Collections.Generic.List[string]
+    $det = New-Object System.Collections.Generic.List[string]
+    $formasMod = New-Object System.Collections.Generic.List[string]
+    foreach ($m in $Modulos) {
+        $ff = [int]$m.FormFactor
+        $t = [int]$m.SMBIOSMemoryType
+        if ($t -le 2) { $t = [int]$m.MemoryType }
+        $loc = "$($m.DeviceLocator) $($m.BankLabel)"
+        $lp = ($t -in 27, 28, 29, 30, 35)
+        $soldada = $lp -or ($ff -in 9, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23) -or ($loc -match 'onboard|on-board|on board|memory down|soldered|system memory')
+        $capGB = [math]::Round([double]$m.Capacity / 1GB, 1)
+        $totalBytes += [double]$m.Capacity
+        $vel = [int]$m.ConfiguredClockSpeed
+        if ($vel -le 0) { $vel = [int]$m.Speed }
+        if ($vel -gt $velMax) { $velMax = $vel }
+        $tipoTxt = if ($nombresTipo.ContainsKey($t)) { $nombresTipo[$t] } else { '' }
+        if (-not $tipoMem -and $tipoTxt) { $tipoMem = $tipoTxt }
+        $forma = if ($soldada) { 'Soldada' } elseif ($ff -eq 12) { 'SO-DIMM' } elseif ($ff -eq 8) { 'DIMM' } else { 'Modulo' }
+        if ($soldada) { $nSold++ } else { $nMod++; if (-not $formasMod.Contains($forma)) { $formasMod.Add($forma) } }
+        $caps.Add("$capGB GB")
+        $fab = ("$($m.Manufacturer) $($m.PartNumber)").Trim()
+        $desc = if ($soldada) { 'soldada a la placa' } else { "$forma con SPD" }
+        $det.Add("• $($m.DeviceLocator): $capGB GB $tipoTxt $(if ($vel -gt 0) { "$vel MHz" }) — $desc$(if ($fab) { " — $fab" })".Replace('  ', ' '))
+    }
+    $totalGB = [math]::Round($totalBytes / 1GB, 1)
+    $titulo = "$totalGB GB" + $(if ($tipoMem) { " · $tipoMem" } else { '' }) + $(if ($velMax -gt 0) { " · $velMax MHz" } else { '' })
+    $slots = 0
+    foreach ($a in $Arreglos) { if ([int]$a.Use -eq 3 -or $Arreglos.Count -eq 1) { $slots += [int]$a.MemoryDevices } }
+    $linea2 = "$($Modulos.Count) memoria(s): " + ($caps -join ' + ')
+    if ($nMod -gt 0 -and $slots -gt 0) { $linea2 += " · $nMod de $slots ranuras ocupadas" }
+    $forma2 = if ($nSold -gt 0 -and $nMod -eq 0) { 'RAM SOLDADA a la placa (no ampliable ni reemplazable)' }
+              elseif ($nSold -eq 0) { "RAM en modulo $($formasMod -join '/') con SPD (reemplazable / ampliable)" }
+              else { "RAM MIXTA: $nSold soldada(s) + $nMod modulo(s) con SPD" }
+    return [PSCustomObject]@{ Titulo = $titulo; Linea2 = $linea2; Forma = $forma2; Detalle = ($det -join "`n") }
+}
+
+function Global:Get-LineasGPU {
+    $vcs = @(); try { $vcs = @(Get-CimInstance Win32_VideoController -ErrorAction Stop) } catch {}
+    $reales = @($vcs | Where-Object { $_.Name -and $_.Name -notmatch 'Basic Display|Remote Display|Virtual|Mirror|Citrix|Parsec|Hyper-V|Meta ' })
+    if ($reales.Count -eq 0) { $reales = $vcs }
+    if ($reales.Count -eq 0) { return @('No se detecto ninguna tarjeta de video.') }
+    $claves = $null
+    try { $claves = @(Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue }) } catch {}
+    $lineas = New-Object System.Collections.Generic.List[string]
+    $i = 0
+    foreach ($g in $reales) {
+        $i++
+        $tipo = if ($g.Name -match 'GeForce|RTX|GTX|Quadro|Radeon RX|Radeon Pro|Arc\b') { 'Dedicada' }
+                elseif ($g.Name -match 'UHD|Iris|HD Graphics|Radeon\(TM\) Graphics|Radeon Graphics|Vega \d|Intel') { 'Integrada' } else { '' }
+        $vram = $null
+        try {
+            foreach ($p in $claves) {
+                if ($p.DriverDesc -eq $g.Name -and $p.'HardwareInformation.qwMemorySize') { $vram = [math]::Round([double]$p.'HardwareInformation.qwMemorySize' / 1GB, 1); break }
+            }
+        } catch {}
+        if (-not $vram -and $g.AdapterRAM -and [double]$g.AdapterRAM -gt 0) { $vram = [math]::Round([double]$g.AdapterRAM / 1GB, 1) }
+        $partes = New-Object System.Collections.Generic.List[string]
+        if ($tipo) { $partes.Add($tipo) }
+        if ($vram -and $vram -gt 0) { $partes.Add("$vram GB") }
+        if ($g.DriverVersion) { $partes.Add("Driver $($g.DriverVersion)") }
+        $prefijo = if ($reales.Count -gt 1) { "GPU $i`: " } else { '' }
+        $lineas.Add("$prefijo$($g.Name)" + $(if ($partes.Count -gt 0) { "  ·  " + ($partes -join '  ·  ') } else { '' }))
+    }
+    if ($reales.Count -gt 1) { $lineas.Insert(0, "Se detectaron $($reales.Count) tarjetas de video:") }
+    return $lineas.ToArray()
+}
+
+function Global:Get-ListaDiscosFisicos {
+    $res = New-Object System.Collections.Generic.List[object]
+    try {
+        $pds = @(Get-PhysicalDisk -ErrorAction Stop | Sort-Object { [int]$_.DeviceId })
+        foreach ($pd in $pds) {
+            $letras = @()
+            try { $letras = @(Get-Partition -DiskNumber ([int]$pd.DeviceId) -ErrorAction Stop | Where-Object { $_.DriveLetter } | ForEach-Object { [string]$_.DriveLetter }) } catch {}
+            $tipo = "$($pd.MediaType)"; if ($tipo -in '', 'Unspecified') { $tipo = '' }
+            $res.Add([PSCustomObject]@{ Nombre = ("$($pd.FriendlyName)").Trim(); Tam = [double]$pd.Size; Tipo = $tipo; Bus = "$($pd.BusType)"; Letras = $letras })
+        }
+    } catch { $res.Clear() }
+    if ($res.Count -eq 0) {
+        try {
+            foreach ($d in @(Get-CimInstance Win32_DiskDrive -ErrorAction Stop)) {
+                $letras = @()
+                try {
+                    foreach ($p in @(Get-CimAssociatedInstance -InputObject $d -ResultClassName Win32_DiskPartition -ErrorAction SilentlyContinue)) {
+                        foreach ($ld in @(Get-CimAssociatedInstance -InputObject $p -ResultClassName Win32_LogicalDisk -ErrorAction SilentlyContinue)) { $letras += ("$($ld.DeviceID)").TrimEnd(':') }
+                    }
+                } catch {}
+                $tipo = if ("$($d.Model)" -match 'SSD|NVMe|NVME') { 'SSD' } else { '' }
+                $res.Add([PSCustomObject]@{ Nombre = ("$($d.Model)").Trim(); Tam = [double]$d.Size; Tipo = $tipo; Bus = "$($d.InterfaceType)"; Letras = $letras })
+            }
+        } catch {}
+    }
+    return $res.ToArray()
+}
+
+function Global:Formato-TamDisco {
+    param([double]$Bytes)
+    if ($Bytes -ge 1TB) { return ('{0:N1} TB' -f ($Bytes / 1TB)) }
+    return ('{0:N0} GB' -f ($Bytes / 1GB))
+}
+
+function Global:Dibujar-PanelDiscos {
+    $w = $Global:VentanaPrincipal
+    $panel = $w.FindName("PanelInicioDiscos")
+    if (-not $panel) { return }
+    $discos = @($Global:GrafInicio.DiscosFisicos)
+    $vols = @{}
+    try { foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop)) { $vols[("$($v.DeviceID)").TrimEnd(':')] = $v } } catch {}
+    $conv = New-Object System.Windows.Media.BrushConverter
+    $panel.Children.Clear()
+    $usadas = @{}
+    if ($discos.Count -eq 0) {
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = "No se pudo leer la lista de discos."; $tb.Foreground = [System.Windows.Media.Brushes]::Orange
+        $panel.Children.Add($tb) | Out-Null
+    }
+    $n = 0
+    foreach ($d in $discos) {
+        $n++
+        $caja = New-Object System.Windows.Controls.Border
+        $caja.Background = $conv.ConvertFromString("#33000000"); $caja.CornerRadius = 8; $caja.Padding = "10,8"; $caja.Margin = "0,0,0,8"
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $tit = New-Object System.Windows.Controls.TextBlock
+        $extra = @(); if ($d.Tipo) { $extra += $d.Tipo }; if ($d.Bus) { $extra += $d.Bus }
+        $tit.Text = "💽 Disco $($n - 1): $($d.Nombre)  ·  $(Formato-TamDisco $d.Tam)" + $(if ($extra.Count -gt 0) { "  ·  " + ($extra -join ' ') } else { '' })
+        $tit.Foreground = [System.Windows.Media.Brushes]::White; $tit.FontWeight = "Bold"; $tit.TextWrapping = "Wrap"
+        $sp.Children.Add($tit) | Out-Null
+        $letrasDisco = @($d.Letras)
+        if ($letrasDisco.Count -eq 0) {
+            $sin = New-Object System.Windows.Controls.TextBlock
+            $sin.Text = "Sin letra de unidad asignada (sin particiones montadas)"; $sin.FontSize = 11; $sin.Foreground = $conv.ConvertFromString("#7C93BD"); $sin.Margin = "0,4,0,0"
+            $sp.Children.Add($sin) | Out-Null
+        }
+        foreach ($l in $letrasDisco) {
+            $usadas[$l] = $true
+            if (-not $vols.ContainsKey($l)) { continue }
+            $v = $vols[$l]
+            if ([double]$v.Size -le 0) { continue }
+            $pct = [math]::Round((([double]$v.Size - [double]$v.FreeSpace) / [double]$v.Size) * 100)
+            $fila = New-Object System.Windows.Controls.TextBlock
+            $fila.Text = "$l`:  $(Formato-TamDisco ([double]$v.FreeSpace)) libres de $(Formato-TamDisco ([double]$v.Size))  ($pct% usado)" + $(if ($v.VolumeName) { "  ·  $($v.VolumeName)" } else { '' })
+            $fila.Foreground = [System.Windows.Media.Brushes]::White; $fila.FontSize = 12; $fila.Margin = "0,6,0,2"
+            $barra = New-Object System.Windows.Controls.ProgressBar
+            $barra.Minimum = 0; $barra.Maximum = 100; $barra.Value = $pct; $barra.Height = 8
+            $barra.Background = $conv.ConvertFromString("#33FFFFFF"); $barra.BorderThickness = 0
+            $barra.Foreground = if ($pct -ge 92) { $conv.ConvertFromString("#FF5C5C") } elseif ($pct -ge 80) { $conv.ConvertFromString("#FFB84D") } else { $conv.ConvertFromString("#4FA8FF") }
+            $sp.Children.Add($fila) | Out-Null
+            $sp.Children.Add($barra) | Out-Null
+        }
+        $caja.Child = $sp
+        $panel.Children.Add($caja) | Out-Null
+    }
+    # Unidades locales que no se pudieron asociar a ningun disco
+    foreach ($k in ($vols.Keys | Sort-Object)) {
+        if ($usadas.ContainsKey($k)) { continue }
+        $v = $vols[$k]
+        if ([double]$v.Size -le 0) { continue }
+        $pct = [math]::Round((([double]$v.Size - [double]$v.FreeSpace) / [double]$v.Size) * 100)
+        $fila = New-Object System.Windows.Controls.TextBlock
+        $fila.Text = "💽 Unidad $k`:  $(Formato-TamDisco ([double]$v.FreeSpace)) libres de $(Formato-TamDisco ([double]$v.Size))  ($pct% usado)"
+        $fila.Foreground = [System.Windows.Media.Brushes]::White; $fila.FontSize = 12; $fila.Margin = "0,2,0,4"
+        $panel.Children.Add($fila) | Out-Null
+    }
+}
+
+function Global:Texto-NucleosCpu {
+    param($Info, $Valores)
+    $l = New-Object System.Collections.Generic.List[string]
+    if ($Info) {
+        $l.Add("Nucleos fisicos: $($Info.Nucleos)   |   Hilos logicos: $($Info.Hilos)")
+        if ($Info.MHz -gt 0) { $l.Add("Velocidad maxima: $($Info.MHz) MHz") }
+    } else { $l.Add("Nucleos: dato no disponible") }
+    $n = @($Valores).Count
+    if ($n -gt 0) {
+        $l.Add("")
+        $filas = New-Object System.Collections.Generic.List[string]
+        for ($i = 0; $i -lt $n; $i++) {
+            $v = [int][Math]::Round([double]$Valores[$i])
+            $b = [int][Math]::Min(10, [Math]::Max(0, [Math]::Round($v / 10)))
+            $filas.Add(("Hilo {0,2}  {1}  {2,3}%" -f $i, (('█' * $b) + ('░' * (10 - $b))), $v))
+        }
+        if ($n -gt 16) {
+            $mitad = [int][Math]::Ceiling($n / 2)
+            for ($i = 0; $i -lt $mitad; $i++) {
+                $der = if (($i + $mitad) -lt $n) { $filas[$i + $mitad] } else { '' }
+                $l.Add("$($filas[$i])      $der")
+            }
+        } else { foreach ($f in $filas) { $l.Add($f) } }
+    }
+    return ($l -join "`n")
+}
+
+function Global:Cargar-InfoEstaticaInicio {
+    $w = $Global:VentanaPrincipal
+    $E = $Global:GrafInicio
+    try {
+        $E.CpuInfo = Get-InfoCpuResumen
+        if ($E.CpuInfo) {
+            $w.FindName("TxtInicioCPUModelo").Text = "$($E.CpuInfo.Nombre)  ·  $($E.CpuInfo.Nucleos) nucleos / $($E.CpuInfo.Hilos) hilos"
+        }
     } catch {}
+    try {
+        $ram = Get-InfoRamResumen
+        $w.FindName("TxtInicioRAMTitulo").Text = $ram.Titulo
+        $w.FindName("TxtInicioRAMDetalle").Text = (@($ram.Linea2, $ram.Forma) | Where-Object { $_ }) -join "`n"
+        if ($E.TbRamTip) { $E.TbRamTip.Text = "MEMORIA RAM`n$($ram.Titulo)`n$($ram.Linea2)`n$($ram.Forma)`n`n$($ram.Detalle)" }
+    } catch {}
+    try { $w.FindName("TxtInicioGPU").Text = (Get-LineasGPU) -join "`n" } catch {}
+    try { $E.DiscosFisicos = @(Get-ListaDiscosFisicos); Dibujar-PanelDiscos } catch {}
+}
+
+# ---------- Graficos en vivo ----------
+
+function Global:Agregar-MuestraGrafico {
+    param($G, [double]$Valor, [string]$Extra = '')
+    $G.Datos.Add($Valor); $G.Extra.Add($Extra)
+    while ($G.Datos.Count -gt $Global:GrafInicio.Maximo) { $G.Datos.RemoveAt(0); $G.Extra.RemoveAt(0) }
+}
+
+function Global:Dibujar-Grafico {
+    param($G)
+    $cv = $G.Canvas
+    if (-not $cv -or -not $cv.IsVisible) { return }
+    $w = $cv.ActualWidth; $h = $cv.ActualHeight
+    if ($w -lt 20 -or $h -lt 20) { return }
+    $cv.Children.Clear()
+    $n = [int]$Global:GrafInicio.Ventana
+    $datos = $G.Datos
+    $total = $datos.Count
+    $cant = [Math]::Min($n, $total)
+    $paso = $w / [Math]::Max(1, ($n - 1))
+    # Rejilla
+    foreach ($frac in 0.25, 0.5, 0.75) {
+        $y = $h - $frac * ($h - 6) - 3
+        $ln = New-Object System.Windows.Shapes.Line
+        $ln.X1 = 0; $ln.X2 = $w; $ln.Y1 = $y; $ln.Y2 = $y
+        $ln.Stroke = $G.PincelRejilla; $ln.StrokeThickness = 1; $ln.StrokeDashArray = $G.Guiones
+        $cv.Children.Add($ln) | Out-Null
+    }
+    $et = New-Object System.Windows.Controls.TextBlock
+    $et.Text = "$($G.Max)$($G.Unidad)"; $et.FontSize = 9; $et.Foreground = $G.PincelRejilla
+    [System.Windows.Controls.Canvas]::SetLeft($et, 3); [System.Windows.Controls.Canvas]::SetTop($et, 0)
+    $cv.Children.Add($et) | Out-Null
+    if ($cant -lt 2) {
+        $G.TxtStats.Text = "Recopilando datos..."
+        return
+    }
+    $ini = $total - $cant
+    $pts = New-Object System.Windows.Media.PointCollection
+    $min = [double]::MaxValue; $max = [double]0; $suma = [double]0
+    for ($i = 0; $i -lt $cant; $i++) {
+        $v = [Math]::Min([double]$G.Max, [Math]::Max([double]0, [double]$datos[$ini + $i]))
+        if ($v -lt $min) { $min = $v }; if ($v -gt $max) { $max = $v }; $suma += $v
+        $x = $w - ($cant - 1 - $i) * $paso
+        $y = $h - ($v / $G.Max) * ($h - 6) - 3
+        $pts.Add([System.Windows.Point]::new($x, $y))
+    }
+    $ptsArea = [System.Windows.Media.PointCollection]$pts.Clone()
+    $ptsArea.Add([System.Windows.Point]::new($w, $h))
+    $ptsArea.Add([System.Windows.Point]::new($w - ($cant - 1) * $paso, $h))
+    $area = New-Object System.Windows.Shapes.Polygon
+    $area.Points = $ptsArea; $area.Fill = $G.PincelArea
+    $cv.Children.Add($area) | Out-Null
+    $poli = New-Object System.Windows.Shapes.Polyline
+    $poli.Points = $pts; $poli.Stroke = $G.PincelLinea; $poli.StrokeThickness = 1.8; $poli.StrokeLineJoin = 'Round'
+    $cv.Children.Add($poli) | Out-Null
+    $G.TxtStats.Text = ("Min {0:N0}{3}  ·  Prom {1:N0}{3}  ·  Max {2:N0}{3}" -f $min, ($suma / $cant), $max, $G.Unidad) + $(if ($Global:GrafInicio.Pausa) { "   ⏸ en pausa" } else { '' })
+    # Cursor interactivo
+    if ($G.HoverX -ge 0) {
+        $inicioX = $w - ($cant - 1) * $paso
+        $idx = [int][Math]::Round(($G.HoverX - $inicioX) / $paso)
+        $idx = [Math]::Max(0, [Math]::Min($cant - 1, $idx))
+        $vx = $w - ($cant - 1 - $idx) * $paso
+        $vv = [Math]::Min([double]$G.Max, [Math]::Max([double]0, [double]$datos[$ini + $idx]))
+        $vy = $h - ($vv / $G.Max) * ($h - 6) - 3
+        $lv = New-Object System.Windows.Shapes.Line
+        $lv.X1 = $vx; $lv.X2 = $vx; $lv.Y1 = 0; $lv.Y2 = $h; $lv.Stroke = $G.PincelCursor; $lv.StrokeThickness = 1
+        $cv.Children.Add($lv) | Out-Null
+        $pt = New-Object System.Windows.Shapes.Ellipse
+        $pt.Width = 9; $pt.Height = 9; $pt.Fill = [System.Windows.Media.Brushes]::White; $pt.Stroke = $G.PincelLinea; $pt.StrokeThickness = 2
+        [System.Windows.Controls.Canvas]::SetLeft($pt, $vx - 4.5); [System.Windows.Controls.Canvas]::SetTop($pt, $vy - 4.5)
+        $cv.Children.Add($pt) | Out-Null
+        $seg = $cant - 1 - $idx
+        $extra = "$($G.Extra[$ini + $idx])"
+        $txt = ("{0:N0}{1}" -f $vv, $G.Unidad) + $(if ($extra) { "  ($extra)" } else { '' }) + "`n" + $(if ($seg -eq 0) { 'ahora' } else { "hace $seg s" })
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = $txt; $tb.Foreground = [System.Windows.Media.Brushes]::White; $tb.FontSize = 11
+        $caja = New-Object System.Windows.Controls.Border
+        $caja.Background = $G.PincelEtiqueta; $caja.CornerRadius = 6; $caja.Padding = "6,3"; $caja.Child = $tb
+        $caja.Measure([System.Windows.Size]::new([double]::PositiveInfinity, [double]::PositiveInfinity))
+        $lw = $caja.DesiredSize.Width
+        $izq = $vx + 10; if (($izq + $lw) -gt $w) { $izq = $vx - $lw - 10 }; if ($izq -lt 0) { $izq = 0 }
+        [System.Windows.Controls.Canvas]::SetLeft($caja, $izq); [System.Windows.Controls.Canvas]::SetTop($caja, 14)
+        $cv.Children.Add($caja) | Out-Null
+    }
+}
+
+function Global:Redibujar-GraficosInicio {
+    $E = $Global:GrafInicio
+    foreach ($k in 'CPU', 'RAM', 'DISCO') { try { Dibujar-Grafico -G $E[$k] } catch {} }
+}
+
+function Global:Tick-GraficosInicio {
+    $E = $Global:GrafInicio
+    $w = $Global:VentanaPrincipal
+    if (-not $E.Iniciado -or $E.Pausa -or -not $w) { return }
+    # CPU total y por hilo logico
+    try {
+        if ($E.CtrCpu) {
+            $cpu = [Math]::Min(100, [Math]::Max(0, [double]$E.CtrCpu.NextValue()))
+            Agregar-MuestraGrafico -G $E.CPU -Valor $cpu
+            $w.FindName("TxtInicioCPU").Text = "$([math]::Round($cpu))%"
+            $vals = New-Object System.Collections.Generic.List[double]
+            foreach ($c in $E.CtrNucleos) { try { $vals.Add([double]$c.NextValue()) } catch { $vals.Add([double]0) } }
+            $E.ValNucleos = $vals.ToArray()
+            if ($E.TbNucleos) { $E.TbNucleos.Text = Texto-NucleosCpu -Info $E.CpuInfo -Valores $E.ValNucleos }
+        }
+    } catch {}
+    # RAM
+    try {
+        $m = [DragonMem]::Leer()
+        if ($m) {
+            $usadoGB = ($m[1] - $m[2]) / 1GB; $totalGB = $m[1] / 1GB
+            $extra = ('{0:N1} de {1:N1} GB' -f $usadoGB, $totalGB)
+            Agregar-MuestraGrafico -G $E.RAM -Valor $m[0] -Extra $extra
+            $w.FindName("TxtInicioRAM").Text = "$([int]$m[0])%"
+            $w.FindName("TxtInicioRAMUso").Text = "$extra en uso"
+        }
+    } catch {}
+    # Actividad de disco
+    try {
+        if ($E.CtrDiscoAct) {
+            $act = [Math]::Min(100, [Math]::Max(0, [double]$E.CtrDiscoAct.NextValue()))
+            $lec = [double]$E.CtrDiscoLec.NextValue() / 1MB
+            $esc = [double]$E.CtrDiscoEsc.NextValue() / 1MB
+            $extra = ('Lectura {0:N1} MB/s · Escritura {1:N1} MB/s' -f $lec, $esc)
+            Agregar-MuestraGrafico -G $E.DISCO -Valor $act -Extra $extra
+            $w.FindName("TxtInicioDiscoAct").Text = "$([math]::Round($act))%"
+            $w.FindName("TxtInicioDiscoRW").Text = $extra
+        }
+    } catch {}
+    Redibujar-GraficosInicio
+    # Espacio libre de los discos: se refresca cada ~30 s
+    $E.TickDiscos = $E.TickDiscos + 1
+    if ($E.TickDiscos -ge 30) { $E.TickDiscos = 0; try { Dibujar-PanelDiscos } catch {} }
+}
+
+function Global:Preparar-Grafico {
+    param($G, $Canvas, $TxtStats)
+    $conv = New-Object System.Windows.Media.BrushConverter
+    $col = [System.Windows.Media.ColorConverter]::ConvertFromString($G.Color)
+    $lg = New-Object System.Windows.Media.LinearGradientBrush
+    $lg.StartPoint = [System.Windows.Point]::new(0, 0); $lg.EndPoint = [System.Windows.Point]::new(0, 1)
+    $s1 = New-Object System.Windows.Media.GradientStop; $s1.Color = [System.Windows.Media.Color]::FromArgb(120, $col.R, $col.G, $col.B); $s1.Offset = 0
+    $s2 = New-Object System.Windows.Media.GradientStop; $s2.Color = [System.Windows.Media.Color]::FromArgb(8, $col.R, $col.G, $col.B); $s2.Offset = 1
+    $lg.GradientStops.Add($s1) | Out-Null; $lg.GradientStops.Add($s2) | Out-Null
+    $G.PincelArea = $lg
+    $G.PincelLinea = New-Object System.Windows.Media.SolidColorBrush $col
+    $G.PincelRejilla = $conv.ConvertFromString("#3A7C93BD")
+    $G.PincelCursor = $conv.ConvertFromString("#99FFFFFF")
+    $G.PincelEtiqueta = $conv.ConvertFromString("#E6101A2E")
+    $dc = New-Object System.Windows.Media.DoubleCollection; $dc.Add(3); $dc.Add(3)
+    $G.Guiones = $dc
+    $G.Datos = New-Object 'System.Collections.Generic.List[double]'
+    $G.Extra = New-Object 'System.Collections.Generic.List[string]'
+    $G.Canvas = $Canvas; $G.TxtStats = $TxtStats
+    # Interaccion: mover el mouse muestra el valor exacto; clic pausa/reanuda
+    $Canvas.Add_MouseMove({
+        param($s, $e)
+        $G.HoverX = $e.GetPosition($s).X
+        Dibujar-Grafico -G $G
+    }.GetNewClosure())
+    $Canvas.Add_MouseLeave({
+        $G.HoverX = -1.0
+        Dibujar-Grafico -G $G
+    }.GetNewClosure())
+    $Canvas.Add_SizeChanged({ Dibujar-Grafico -G $G }.GetNewClosure())
+    $Canvas.Add_MouseLeftButtonDown({ Alternar-PausaGraficos }.GetNewClosure())
+}
+
+function Global:Alternar-PausaGraficos {
+    $E = $Global:GrafInicio
+    $E.Pausa = -not $E.Pausa
+    $btn = $Global:VentanaPrincipal.FindName("BtnPausaGraficos")
+    if ($btn) { $btn.Content = if ($E.Pausa) { "▶ Reanudar" } else { "⏸ Pausar" } }
+    Redibujar-GraficosInicio
+}
+
+function Iniciar-GraficosInicio {
+    $E = $Global:GrafInicio
+    $w = $window
+    $Global:VentanaPrincipal = $w
+    try { Asegurar-TipoMemoriaInicio } catch { Write-Log "Resumen: no se pudo preparar la lectura de RAM en vivo: $($_.Exception.Message)" -Tipo AVISO }
+    Preparar-Grafico -G $E.CPU -Canvas $w.FindName("CanvasCPU") -TxtStats $w.FindName("TxtGrafCPU")
+    Preparar-Grafico -G $E.RAM -Canvas $w.FindName("CanvasRAM") -TxtStats $w.FindName("TxtGrafRAM")
+    Preparar-Grafico -G $E.DISCO -Canvas $w.FindName("CanvasDisco") -TxtStats $w.FindName("TxtGrafDisco")
+    # Contadores de rendimiento (nombres en ingles; funcionan en cualquier idioma de Windows)
+    try {
+        $E.CtrCpu = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total")
+        [void]$E.CtrCpu.NextValue()
+        $inst = @((New-Object System.Diagnostics.PerformanceCounterCategory("Processor")).GetInstanceNames() | Where-Object { $_ -ne '_Total' } |
+            Sort-Object { if ($_ -match '^(\d+),(\d+)$') { [int]$Matches[1] * 1000 + [int]$Matches[2] } elseif ($_ -match '^\d+$') { [int]$_ } else { 99999 } })
+        $lista = New-Object System.Collections.Generic.List[object]
+        foreach ($i in $inst) { $c = New-Object System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", $i); [void]$c.NextValue(); $lista.Add($c) }
+        $E.CtrNucleos = $lista.ToArray()
+        $E.ContadoresCpu = $true
+    } catch { $E.CtrCpu = $null; $w.FindName("TxtGrafCPU").Text = "Contadores de rendimiento no disponibles en este equipo." }
+    try {
+        $E.CtrDiscoAct = New-Object System.Diagnostics.PerformanceCounter("PhysicalDisk", "% Disk Time", "_Total"); [void]$E.CtrDiscoAct.NextValue()
+        $E.CtrDiscoLec = New-Object System.Diagnostics.PerformanceCounter("PhysicalDisk", "Disk Read Bytes/sec", "_Total"); [void]$E.CtrDiscoLec.NextValue()
+        $E.CtrDiscoEsc = New-Object System.Diagnostics.PerformanceCounter("PhysicalDisk", "Disk Write Bytes/sec", "_Total"); [void]$E.CtrDiscoEsc.NextValue()
+    } catch { $E.CtrDiscoAct = $null; $w.FindName("TxtGrafDisco").Text = "Contadores de disco no disponibles en este equipo." }
+
+    # Tooltips: nucleos de la CPU (solo al pasar el mouse) y detalle de la RAM
+    $conv = New-Object System.Windows.Media.BrushConverter
+    $crear = {
+        param($Tarjeta)
+        $tt = New-Object System.Windows.Controls.ToolTip
+        $tt.Background = $conv.ConvertFromString("#F2101A2E"); $tt.BorderBrush = $conv.ConvertFromString("#4FA8FF"); $tt.Padding = "10"
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Foreground = [System.Windows.Media.Brushes]::White; $tb.FontFamily = New-Object System.Windows.Media.FontFamily("Consolas"); $tb.FontSize = 12
+        $tt.Content = $tb
+        $Tarjeta.ToolTip = $tt
+        [System.Windows.Controls.ToolTipService]::SetShowDuration($Tarjeta, 120000)
+        [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($Tarjeta, 150)
+        return $tb
+    }
+    $E.TbNucleos = & $crear $w.FindName("CardInicioCPU")
+    $E.TbNucleos.Text = "Nucleos: reuniendo datos..."
+    $E.TbRamTip = & $crear $w.FindName("CardInicioRAM")
+    $E.TbRamTip.Text = "Memoria RAM: reuniendo datos..."
+
+    $w.FindName("CmbVentanaGraficos").Add_SelectionChanged({
+        $sel = $Global:VentanaPrincipal.FindName("CmbVentanaGraficos").SelectedIndex
+        $Global:GrafInicio.Ventana = switch ($sel) { 1 { 120 } 2 { 300 } default { 60 } }
+        Redibujar-GraficosInicio
+    })
+    $w.FindName("BtnPausaGraficos").Add_Click({ Alternar-PausaGraficos })
+
+    $E.Iniciado = $true
+    $Script:TimerGraficos = New-Object System.Windows.Threading.DispatcherTimer
+    $Script:TimerGraficos.Interval = [TimeSpan]::FromSeconds(1)
+    $Script:TimerGraficos.Add_Tick({ Tick-GraficosInicio })
+    $Script:TimerGraficos.Start()
+    Cargar-InfoEstaticaInicio
+}
+
+function Actualizar-PanelInicio {
+    # La CPU y la RAM se actualizan cada segundo desde los graficos en vivo;
+    # esta consulta (mas lenta) solo se usa si los contadores no estan disponibles.
+    if (-not $Global:GrafInicio.ContadoresCpu) {
+        try {
+            $cpuInfo = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+            $cpuPct = if ($cpuInfo) { [math]::Round($cpuInfo.PercentProcessorTime) } else { $null }
+            $window.FindName("TxtInicioCPU").Text = if ($null -ne $cpuPct) { "$cpuPct%" } else { "N/D" }
+        } catch {}
+    }
 
     try {
         $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
@@ -12463,7 +12976,7 @@ function Actualizar-PanelInicio {
         $discoC = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
         if ($discoC -and $discoC.Size -gt 0) {
             $pctUsado = [math]::Round((($discoC.Size - $discoC.FreeSpace) / $discoC.Size) * 100)
-            $window.FindName("TxtInicioDisco").Text = "$pctUsado%"
+            $window.FindName("TxtInicioDisco").Text = "Unidad C: usada al $pctUsado%"
         }
     } catch {}
 }
@@ -14457,32 +14970,77 @@ Marcar-Arranque 'funciones y recursos'
                     <StackPanel Margin="14">
                         <TextBlock Text="Resumen del equipo" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="18" Margin="0,0,0,14"/>
 
-                        <UniformGrid Columns="4" Rows="1" Margin="0,0,0,14">
-                            <Border Style="{StaticResource TarjetaSeccion}" Margin="0,0,8,0">
+                        <DockPanel Margin="0,0,0,8">
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                <TextBlock Text="Ventana:" Foreground="{StaticResource TextoSecundario}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <ComboBox x:Name="CmbVentanaGraficos" Width="110">
+                                    <ComboBoxItem Content="1 minuto" IsSelected="True"/>
+                                    <ComboBoxItem Content="2 minutos"/>
+                                    <ComboBoxItem Content="5 minutos"/>
+                                </ComboBox>
+                                <Button x:Name="BtnPausaGraficos" Content="⏸ Pausar" Width="110" Height="30" Margin="8,0,0,0" FontSize="12"/>
+                            </StackPanel>
+                            <TextBlock Text="📈 Graficos en tiempo real  —  pasa el mouse sobre un grafico para ver el valor exacto; clic para pausar" Foreground="{StaticResource TextoSecundario}" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                        </DockPanel>
+
+                        <UniformGrid Columns="3" Rows="1" Margin="0,0,0,0">
+                            <Border x:Name="CardInicioCPU" Style="{StaticResource TarjetaSeccion}" Margin="0,0,8,14">
                                 <StackPanel>
-                                    <TextBlock Text="🧮 CPU" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
-                                    <TextBlock x:Name="TxtInicioCPU" Text="--%" Foreground="White" FontWeight="Bold" FontSize="22" Margin="0,4,0,0"/>
+                                    <TextBlock Text="🧮 CPU  (pasa el mouse para ver los nucleos)" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
+                                    <TextBlock x:Name="TxtInicioCPU" Text="--%" Foreground="White" FontWeight="Bold" FontSize="24" Margin="0,4,0,0"/>
+                                    <TextBlock x:Name="TxtInicioCPUModelo" Text="" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap"/>
+                                    <Canvas x:Name="CanvasCPU" Height="110" Margin="0,8,0,4" Background="Transparent" ClipToBounds="True" Cursor="Cross"/>
+                                    <TextBlock x:Name="TxtGrafCPU" Foreground="{StaticResource TextoSecundario}" FontSize="11"/>
                                 </StackPanel>
                             </Border>
-                            <Border Style="{StaticResource TarjetaSeccion}" Margin="0,0,8,0">
+                            <Border x:Name="CardInicioRAM" Style="{StaticResource TarjetaSeccion}" Margin="0,0,8,14">
                                 <StackPanel>
-                                    <TextBlock Text="🧠 RAM" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
-                                    <TextBlock x:Name="TxtInicioRAM" Text="--%" Foreground="White" FontWeight="Bold" FontSize="22" Margin="0,4,0,0"/>
+                                    <TextBlock Text="🧠 RAM  (pasa el mouse para ver los modulos)" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
+                                    <TextBlock x:Name="TxtInicioRAM" Text="--%" Foreground="White" FontWeight="Bold" FontSize="24" Margin="0,4,0,0"/>
+                                    <TextBlock x:Name="TxtInicioRAMUso" Text="" Foreground="{StaticResource TextoSecundario}" FontSize="11"/>
+                                    <TextBlock x:Name="TxtInicioRAMTitulo" Text="" Foreground="#C9A6FF" FontWeight="SemiBold" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                    <TextBlock x:Name="TxtInicioRAMDetalle" Text="" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap"/>
+                                    <Canvas x:Name="CanvasRAM" Height="110" Margin="0,8,0,4" Background="Transparent" ClipToBounds="True" Cursor="Cross"/>
+                                    <TextBlock x:Name="TxtGrafRAM" Foreground="{StaticResource TextoSecundario}" FontSize="11"/>
                                 </StackPanel>
                             </Border>
-                            <Border Style="{StaticResource TarjetaSeccion}" Margin="0,0,8,0">
+                            <Border Style="{StaticResource TarjetaSeccion}" Margin="0,0,0,14">
                                 <StackPanel>
-                                    <TextBlock Text="💽 Disco (C:)" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
-                                    <TextBlock x:Name="TxtInicioDisco" Text="--%" Foreground="White" FontWeight="Bold" FontSize="22" Margin="0,4,0,0"/>
+                                    <TextBlock Text="💽 Actividad de disco" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
+                                    <TextBlock x:Name="TxtInicioDiscoAct" Text="--%" Foreground="White" FontWeight="Bold" FontSize="24" Margin="0,4,0,0"/>
+                                    <TextBlock x:Name="TxtInicioDiscoRW" Text="" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="TxtInicioDisco" Text="" Foreground="#8FE38F" FontSize="11" TextWrapping="Wrap"/>
+                                    <Canvas x:Name="CanvasDisco" Height="110" Margin="0,8,0,4" Background="Transparent" ClipToBounds="True" Cursor="Cross"/>
+                                    <TextBlock x:Name="TxtGrafDisco" Foreground="{StaticResource TextoSecundario}" FontSize="11"/>
                                 </StackPanel>
                             </Border>
-                            <Border Style="{StaticResource TarjetaSeccion}">
+                        </UniformGrid>
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Style="{StaticResource TarjetaSeccion}" Margin="0,0,8,14">
+                                <StackPanel>
+                                    <TextBlock Text="🎮 Tarjeta(s) de video" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
+                                    <TextBlock x:Name="TxtInicioGPU" Text="Detectando..." Foreground="White" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Grid.Column="1" Style="{StaticResource TarjetaSeccion}" Margin="0,0,0,14">
                                 <StackPanel>
                                     <TextBlock Text="⏱️ Tiempo activo" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
                                     <TextBlock x:Name="TxtInicioUptime" Text="--" Foreground="White" FontWeight="Bold" FontSize="18" Margin="0,4,0,0"/>
                                 </StackPanel>
                             </Border>
-                        </UniformGrid>
+                        </Grid>
+
+                        <Border Style="{StaticResource TarjetaSeccion}">
+                            <StackPanel>
+                                <TextBlock Text="💽 Discos del equipo" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
+                                <StackPanel x:Name="PanelInicioDiscos"/>
+                            </StackPanel>
+                        </Border>
 
                         <Border Style="{StaticResource TarjetaSeccion}">
                             <StackPanel>
@@ -17224,13 +17782,14 @@ $window.FindName("BtnInicioLimpiarTemp").Add_Click({ Accion-LimpiarTemporales; A
 $window.FindName("BtnInicioLiberarRAM").Add_Click({ Accion-LiberarRAM -Modo 'Basica'; Actualizar-PanelInicio })
 $window.FindName("BtnInicioPerfilBajo").Add_Click({ Perfil-BajoConsumo; Actualizar-PanelInicio })
 $window.FindName("BtnInicioDiagnostico").Add_Click({ Accion-DiagnosticoCompletoEquipo })
-$window.FindName("BtnInicioActualizar").Add_Click({ Actualizar-PanelInicio })
+$window.FindName("BtnInicioActualizar").Add_Click({ Actualizar-PanelInicio; Cargar-InfoEstaticaInicio })
 
 $Script:TimerInicio = New-Object System.Windows.Threading.DispatcherTimer
 $Script:TimerInicio.Interval = [TimeSpan]::FromSeconds(3)
 $Script:TimerInicio.Add_Tick({ Actualizar-PanelInicio })
 $Script:TimerInicio.Start()
 Actualizar-PanelInicio
+try { Iniciar-GraficosInicio } catch { Write-Log "Resumen del equipo: no se pudieron iniciar los graficos en vivo: $($_.Exception.Message)" -Tipo ERROR }
 
 $window.Dispatcher.add_UnhandledException({
     param($s, $e)
