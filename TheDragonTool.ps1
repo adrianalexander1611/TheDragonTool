@@ -379,62 +379,79 @@ $Global:RecursosGridXaml = @'
     </Style>
 '@
 
-# Hace "correr" el degradado del pincel neon: el patron de colores se repite y se desplaza
-# sin parar, asi los colores fluyen alrededor de todos los bordes (una sola animacion mueve
-# todos los bordes a la vez). -Detener la congela. Devuelve $false si no se pudo animar.
-# Devuelve el pincel neon de un elemento en una version NO congelada (WPF congela los pinceles de los recursos y
-# un pincel congelado no se puede animar); si esta congelado se clona y se reemplaza en el elemento.
+# Crea un pincel neon NUEVO y lo anima ANTES de publicarlo. Un objeto con una animacion en curso no se puede
+# congelar (WPF solo congela lo que no esta animado), asi que nunca queda "sellado/inmovilizado".
+# La animacion usa relojes propios (AnimationClock): detener/reanudar = pausar/reanudar el reloj.
+function Global:Crear-PincelNeonAnimado {
+    param($Original)
+    $n = New-Object System.Windows.Media.LinearGradientBrush
+    $n.MappingMode = $Original.MappingMode
+    $n.StartPoint = $Original.StartPoint
+    $n.EndPoint = $Original.EndPoint
+    $n.SpreadMethod = $Original.SpreadMethod
+    foreach ($gs in @($Original.GradientStops)) {
+        [void]$n.GradientStops.Add((New-Object System.Windows.Media.GradientStop($gs.Color, $gs.Offset)))
+    }
+    $tr = New-Object System.Windows.Media.TranslateTransform(0, 0)
+    $n.RelativeTransform = $tr
+    $relojes = New-Object System.Collections.ArrayList
+    $props = @([System.Windows.Media.TranslateTransform]::XProperty, [System.Windows.Media.TranslateTransform]::YProperty)
+    for ($i = 0; $i -lt $props.Count; $i++) {
+        $an = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $an.From = [double]0
+        $an.To = [double]0.5
+        $an.Duration = New-Object System.Windows.Duration([TimeSpan]::FromMilliseconds(2500))
+        $an.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        $rl = $an.CreateClock() -as [System.Windows.Media.Animation.AnimationClock]
+        if (-not $rl) { throw "no se pudo crear el reloj de animacion" }
+        $tr.ApplyAnimationClock($props[$i], $rl)
+        [void]$relojes.Add($rl)
+    }
+    return @{ Pincel = $n; Transform = $tr; Relojes = $relojes }
+}
+
+# Devuelve el pincel neon (animado) de un elemento. Cada elemento recibe su propio pincel, que se guarda como
+# recurso del elemento. -Rehacer fuerza crear uno nuevo.
 function Global:Obtener-PincelNeon {
-    param($Elemento, [string]$Clave = "NeonBrush")
+    param($Elemento, [string]$Clave = "NeonBrush", [switch]$Rehacer)
     $p = $Elemento.FindResource($Clave)
-    # Si ya se creo el pincel animable de este elemento, se reutiliza (para poder detener la misma animacion).
     if (-not $Global:NeonPorElemento) { $Global:NeonPorElemento = @{} }
+    if (-not $Global:NeonInfo) { $Global:NeonInfo = @{} }
     $claveReg = $Clave + "|" + [string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Elemento)
     $previo = $Global:NeonPorElemento[$claveReg]
-    if ($previo -and ([object]::ReferenceEquals($previo, $p.PSObject.BaseObject))) { return $previo }
-    # Siempre se construye un pincel NUEVO (y su transformacion propia, guardada aparte) para tener la
-    # certeza de que nada esta sellado/inmovilizado; la animacion se aplica a ESA transformacion directamente.
+    if (-not $Rehacer -and $previo -and ([object]::ReferenceEquals($previo, $p.PSObject.BaseObject))) { return $previo }
     if ($p -is [System.Windows.Media.LinearGradientBrush]) {
-        $n = New-Object System.Windows.Media.LinearGradientBrush
-        $n.MappingMode = $p.MappingMode
-        $n.StartPoint = $p.StartPoint
-        $n.EndPoint = $p.EndPoint
-        $n.SpreadMethod = $p.SpreadMethod
-        foreach ($gs in @($p.GradientStops)) {
-            [void]$n.GradientStops.Add((New-Object System.Windows.Media.GradientStop($gs.Color, $gs.Offset)))
+        try {
+            $info = Crear-PincelNeonAnimado -Original $p
+            $n = $info.Pincel
+            $Global:NeonInfo[[string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($n)] = $info
+            $Elemento.Resources[$Clave] = $n
+            $Global:NeonPorElemento[$claveReg] = $n
+            return $n
+        } catch {
+            $Global:ErrorPincelNeon = "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+            return $p
         }
-        $tr = New-Object System.Windows.Media.TranslateTransform(0, 0)
-        $n.RelativeTransform = $tr
-        if (-not $Global:NeonTransformes) { $Global:NeonTransformes = @{} }
-        $Global:NeonTransformes[[string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($n)] = $tr
-        $Elemento.Resources[$Clave] = $n.PSObject.BaseObject
-        $Global:NeonPorElemento[$claveReg] = $n.PSObject.BaseObject
-        return $n
     }
     return $p
 }
 
+# Inicia (o con -Detener pausa) el giro del borde neon. Devuelve $false si el pincel no tiene animacion.
 function Global:Animar-PincelNeon {
     param($Pincel, [switch]$Detener)
     if (-not $Pincel) { return $false }
     try {
-        $mov = $null
-        if ($Global:NeonTransformes) {
-            $mov = $Global:NeonTransformes[[string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Pincel.PSObject.BaseObject)]
+        $clave = [string][System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Pincel.PSObject.BaseObject)
+        $info = $null
+        if ($Global:NeonInfo) { $info = $Global:NeonInfo[$clave] }
+        if (-not $info) {
+            if (-not $Global:ErrorPincelNeon) { $Global:ErrorPincelNeon = 'el pincel no tiene animacion asociada' }
+            return $false
         }
-        if (-not $mov) { $mov = $Pincel.RelativeTransform }
-        if ($Detener) {
-            $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null)
-            $mov.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty, $null)
-            return $true
-        }
-        foreach ($propiedad in @([System.Windows.Media.TranslateTransform]::XProperty, [System.Windows.Media.TranslateTransform]::YProperty)) {
-            $flujo = New-Object System.Windows.Media.Animation.DoubleAnimation
-            $flujo.From = 0
-            $flujo.To = 0.5
-            $flujo.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(2500))
-            $flujo.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-            $mov.BeginAnimation($propiedad, $flujo)
+        foreach ($rl in @($info.Relojes)) {
+            try {
+                if ($Detener) { $rl.Controller.Pause() } else { $rl.Controller.Resume() }
+            } catch {}
         }
         return $true
     } catch {
@@ -12765,6 +12782,23 @@ function Global:Agregar-MuestraGrafico {
     while ($G.Datos.Count -gt $Global:GrafInicio.Maximo) { $G.Datos.RemoveAt(0); $G.Extra.RemoveAt(0) }
 }
 
+# Registra un fallo interno (una vez por zona) con linea y pila, sin notificacion flotante
+function Global:Registrar-FalloInterno {
+    param([string]$Zona, $Err, [string]$Solucion = '')
+    try {
+        if (-not $Global:FallosInternosVistos) { $Global:FallosInternosVistos = @{} }
+        if ($Global:FallosInternosVistos.ContainsKey($Zona)) { return }
+        $Global:FallosInternosVistos[$Zona] = $true
+        $msg = "$($Err.Exception.Message)"
+        $det = "Zona: $Zona`nMensaje: $msg`nTipo: $($Err.Exception.GetType().FullName)"
+        if ($Err.InvocationInfo) { $det += "`nLinea del script: $($Err.InvocationInfo.ScriptLineNumber)`nInstruccion: $(("$($Err.InvocationInfo.Line)").Trim())" }
+        if ($Err.ScriptStackTrace) { $det += "`n`nPILA DE POWERSHELL:`n$($Err.ScriptStackTrace)" }
+        if ($Err.Exception.InnerException) { $det += "`n`nERROR INTERNO: $($Err.Exception.InnerException.Message)" }
+        if (-not $Solucion) { $Solucion = 'No afecta tus datos. Reinicia el programa; si se repite, usa el boton "Mas informacion y solucion" y envia el detalle tecnico al desarrollador.' }
+        Add-RegistroError -Tipo 'AVISO' -Categoria 'Programa general' -Origen "Interfaz ($Zona)" -Mensaje "Fallo en $Zona`: $msg" -Solucion $Solucion -Detalle $det -Notif 0
+    } catch {}
+}
+
 # Registra (una sola vez por zona) un fallo de los graficos/temperaturas con linea y pila, sin molestar con notificaciones
 function Global:Registrar-FalloGrafico {
     param([string]$Zona, $Err)
@@ -16564,6 +16598,7 @@ Marcar-Arranque 'funciones y recursos'
                                     <ComboBoxItem Content="Bateria / energia"/>
                                     <ComboBoxItem Content="Aplicacion / servicio"/>
                                     <ComboBoxItem Content="Controlador (driver)"/>
+                                    <ComboBoxItem Content="Autoverificacion"/>
                                 </ComboBox>
                                 <TextBlock Text="Tipo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <ComboBox x:Name="CmbFiltroTipoError" Width="140">
@@ -16574,6 +16609,8 @@ Marcar-Arranque 'funciones y recursos'
                             </WrapPanel>
                             <WrapPanel>
                                 <Button x:Name="BtnActualizarErrores" Content="🔄 Actualizar" Width="140" Height="42" FontSize="12"/>
+                                <Button x:Name="BtnDetalleError" Content="🔎 Mas informacion y solucion" Width="240" Height="42" FontSize="12" BorderBrush="#4FA8FF" IsEnabled="False"/>
+                                <Button x:Name="BtnAutoverificar" Content="✅ Verificar pestañas y opciones ahora" Width="290" Height="42" FontSize="12" BorderBrush="#4CD964"/>
                                 <Button x:Name="BtnEscanearHardware" Content="🔬 Escanear hardware ahora" Width="210" Height="42" FontSize="12" BorderBrush="#2F7CF6"/>
                                 <Button x:Name="BtnInformeLentitud" Content="🐢 Informe de lentitud ahora" Width="210" Height="42" FontSize="12" BorderBrush="#FFC857"/>
                                 <Button x:Name="BtnCopiarErrores" Content="📋 Copiar todo" Width="140" Height="42" FontSize="12"/>
@@ -16584,6 +16621,7 @@ Marcar-Arranque 'funciones y recursos'
                             <CheckBox x:Name="ChkMonitoreoVivo" Content="📡 Monitoreo en tiempo real con notificaciones flotantes (errores de programas, controladores y hardware, apagados por falta de energia o bateria, congelamientos y problemas de carga de la bateria)" Foreground="White" Margin="0,12,0,0" FontSize="12"/>
                             <CheckBox x:Name="ChkMonitorLentitud" IsChecked="True" Content="🐢 Detectar lentitud automaticamente (al abrir el programa, en la interfaz y en cada prueba) e indicar que la causa" Foreground="White" Margin="0,8,0,0" FontSize="12"/>
                             <TextBlock x:Name="TxtEstadoMonitor" Foreground="#7C93BD" FontSize="12" Margin="0,4,0,0" Text="Monitoreo en tiempo real: iniciando..."/>
+                            <TextBlock x:Name="TxtAutoverificacion" Foreground="#7C93BD" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap" Text="Autoverificacion de pestañas y opciones: se ejecuta unos segundos despues de abrir el programa..."/>
                             <TextBlock x:Name="TxtResumenErrores" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" Margin="0,8,0,0"/>
                         </StackPanel>
                     </Border>
@@ -18793,7 +18831,387 @@ function Global:Texto-RegistroError {
     "$($e.Fecha) [$($e.Tipo)] $($e.Categoria) - $($e.Origen): $($e.Mensaje) (x$($e.Veces))`r`n    Solucion sugerida: $($e.Solucion)"
 }
 
+# ---------------------------------------------------------------------------
+#  DETALLE Y SOLUCION DE UN REGISTRO DE ERRORES
+# ---------------------------------------------------------------------------
+function Global:Get-CausaProbableError {
+    param($E)
+    $m = "$($E.Mensaje) $($E.Detalle)"
+    if ($m -match '(?i)sellado|inmovilizado|frozen|immutable') { return 'WPF marco como inmutable (congelado) un objeto grafico que el programa intentaba animar. Es solo un efecto visual: el programa sigue funcionando.' }
+    if ($m -match '(?i)tipos de argumentos no coinciden|argument types do not match') { return 'Fallo interno de PowerShell 5.1 al ejecutar un bloque del programa (ocurre segun la version de Windows/.NET). No daña datos; el programa usa una via alternativa.' }
+    if ($m -match '(?i)acceso denegado|access.*denied|unauthorized') { return 'La accion necesita permisos de administrador o el archivo/clave esta bloqueado por otro programa o por el antivirus.' }
+    if ($m -match '(?i)winget') { return 'winget (Instalador de aplicaciones) no esta instalado, esta desactualizado o su origen de paquetes no responde.' }
+    if ($m -match '(?i)descarg|webexception|dns|proxy|timed out|tiempo de espera|conexion|internet') { return 'Sin conexion estable a Internet, o un firewall/antivirus/proxy bloquea la descarga.' }
+    if ($m -match '(?i)camara') { return 'La camara esta en uso por otra aplicacion, bloqueada en Privacidad de Windows o sin controlador.' }
+    if ($m -match '(?i)disco|ntfs|chkdsk|sector|smart') { return 'El disco o el sistema de archivos reporta problemas (sectores danados, cable, controlador o desgaste).' }
+    if ($m -match '(?i)bateria|energia|apagado|kernel-power|ac adapter|cargador') { return 'Problema de alimentacion: cargador, bateria degradada o corte de energia.' }
+    if ($m -match '(?i)controlador|driver') { return 'Controlador ausente, danado o incompatible con esta version de Windows.' }
+    if ($m -match '(?i)autoverificacion') { return 'La verificacion automatica de pestañas y opciones detecto un componente que no responde como se espera.' }
+    switch ("$($E.Categoria)") {
+        'Hardware' { return 'Un componente fisico (disco, RAM, CPU, GPU) o su controlador reporto un error al sistema.' }
+        'Apagado inesperado' { return 'El equipo se apago sin cerrar Windows: corte de energia, bateria agotada, sobrecalentamiento o fallo de hardware.' }
+        'Pantalla azul' { return 'Windows se detuvo por un error grave (normalmente un controlador o la RAM).' }
+        'Congelamiento' { return 'El sistema dejo de responder: poca RAM, disco lento/danado o un controlador colgado.' }
+        'Programa (excepcion)' { return 'Error no controlado dentro del programa. Se evito el cierre.' }
+        'Rendimiento (lentitud)' { return 'Uso alto de CPU, RAM o disco en ese momento.' }
+    }
+    return 'No hay una causa unica identificada; revisa el detalle tecnico.'
+}
+
+function Global:Get-PasosSolucionError {
+    param($E)
+    $p = New-Object System.Collections.Generic.List[string]
+    switch ("$($E.Categoria)") {
+        'Hardware' { $p.Add('Abre "Diagnosticar equipo" y ejecuta la prueba del componente indicado (disco, RAM, CPU, GPU).'); $p.Add('Revisa temperaturas, cables y que el equipo tenga ventilacion libre.'); $p.Add('Actualiza el controlador del componente (pestaña Controladores).'); $p.Add('Pulsa "Escanear hardware ahora" para confirmar si el problema sigue.') }
+        'Apagado inesperado' { $p.Add('Conecta el cargador original y comprueba que la toma funcione.'); $p.Add('En "Diagnosticar equipo > Energia" revisa el desgaste de la bateria.'); $p.Add('Revisa temperaturas: un equipo que se calienta se apaga para protegerse.'); $p.Add('Si ocurre con cargador y bateria buena, prueba la fuente/placa en un taller.') }
+        'Pantalla azul' { $p.Add('Abre la pestaña BSOD y analiza el ultimo volcado para ver el controlador culpable.'); $p.Add('Actualiza o revierte ese controlador.'); $p.Add('Ejecuta la prueba de RAM en "Diagnosticar equipo".') }
+        'Congelamiento' { $p.Add('Abre "Memoria y rendimiento" y revisa que proceso consume mas RAM/CPU/disco.'); $p.Add('Ejecuta el diagnostico del disco (S.M.A.R.T.).'); $p.Add('Actualiza los controladores de video y almacenamiento.') }
+        'Bateria / energia' { $p.Add('Prueba otro cargador y otra toma de corriente.'); $p.Add('Revisa en "Diagnosticar equipo > Energia" la capacidad real de la bateria.'); $p.Add('Actualiza BIOS y controladores de energia/chipset.') }
+        'Aplicacion / servicio' { $p.Add('Reinstala o repara la aplicacion indicada en "Origen".'); $p.Add('Revisa si el servicio se inicia en Servicios de Windows (services.msc).'); $p.Add('Ejecuta sfc /scannow desde la pestaña Sistema.') }
+        'Controlador (driver)' { $p.Add('Abre la pestaña Controladores y actualiza el dispositivo indicado.'); $p.Add('Si falla, descarga el controlador del fabricante e instalalo manualmente.') }
+        'Controladores' { $p.Add('Reintenta la instalacion como administrador.'); $p.Add('Descarga el controlador desde el sitio del fabricante.') }
+        'Instalar/Desinstalar programas' { $p.Add('Actualiza "Instalador de aplicaciones" en Microsoft Store (winget).'); $p.Add('Cierra el programa que quieres instalar si esta abierto y reintenta como administrador.'); $p.Add('Revisa tu conexion a Internet.') }
+        'Descarga de archivos' { $p.Add('Comprueba tu conexion a Internet.'); $p.Add('Desactiva temporalmente VPN/proxy o prueba otra red.'); $p.Add('Reintenta la descarga.') }
+        'Registro de Windows' { $p.Add('Ejecuta el programa como administrador.'); $p.Add('Crea un punto de restauracion antes de tocar el Registro.') }
+        'Camara' { $p.Add('Configuracion > Privacidad y seguridad > Camara: permite el acceso a aplicaciones de escritorio.'); $p.Add('Cierra otras apps que usen la camara (Teams, Zoom, navegador).'); $p.Add('Actualiza el controlador de la camara.') }
+        'Prueba de diagnostico' { $p.Add('Repite la prueba como administrador.'); $p.Add('Si falla siempre, el componente puede no existir en este equipo o estar sin controlador.') }
+        'Rendimiento (lentitud)' { $p.Add('Pulsa "Informe de lentitud ahora" para ver la causa exacta.'); $p.Add('Cierra programas pesados y usa "Liberar RAM".') }
+        'Autoverificacion' { $p.Add('Lee el mensaje: indica la pestaña y la opcion afectada.'); $p.Add('Si falta una herramienta de Windows (winget, sfc, DISM...), repara Windows o instala la herramienta.'); $p.Add('Si es un boton sin accion, avisa al desarrollador con el detalle tecnico.'); $p.Add('Pulsa "Verificar pestañas y opciones ahora" para comprobar que quedo resuelto.') }
+        default { $p.Add('Cierra el programa y vuelvelo a abrir como administrador (clic derecho > Ejecutar como administrador).'); $p.Add('Repite la accion que provoco el aviso.'); $p.Add('Si se repite, pulsa "Copiar informacion" aqui y enviala al desarrollador junto con una captura.') }
+    }
+    return $p.ToArray()
+}
+
+function Global:Texto-DetalleCompletoError {
+    param($E)
+    $L = New-Object System.Collections.Generic.List[string]
+    $L.Add("[$($E.Tipo)]  $($E.Categoria)  -  $($E.Origen)")
+    $L.Add("Cuando: $($E.Fecha)   |   Repeticiones: $($E.Veces)")
+    $L.Add('')
+    $L.Add('QUE PASO')
+    $L.Add("$($E.Mensaje)")
+    $L.Add('')
+    $L.Add('CAUSA PROBABLE')
+    $L.Add((Get-CausaProbableError -E $E))
+    $L.Add('')
+    $L.Add('SOLUCION RECOMENDADA')
+    if ($E.Solucion) { $L.Add("$($E.Solucion)") }
+    $n = 0
+    foreach ($paso in @(Get-PasosSolucionError -E $E)) { $n++; $L.Add("  $n. $paso") }
+    if ($E.Detalle) { $L.Add(''); $L.Add('DETALLE TECNICO'); $L.Add("$($E.Detalle)") }
+    $L.Add('')
+    $L.Add('ENTORNO')
+    $admin = 'desconocido'; try { $admin = if (Test-Admin) { 'si' } else { 'no' } } catch {}
+    $os = ''; try { $os = [Environment]::OSVersion.VersionString } catch {}
+    $L.Add("Windows: $os   |   PowerShell: $($PSVersionTable.PSVersion)   |   Administrador: $admin   |   Programa: The Dragon Tool ($($Script:Autor))")
+    return ($L -join "`r`n")
+}
+
+function Global:Mostrar-DetalleError {
+    param($Entrada)
+    if (-not $Entrada) { Show-Aviso 'Selecciona primero un registro de la lista.' 'Registro de errores'; return }
+    [xml]$xamlDet = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Detalle y solucion del registro" Height="660" Width="880"
+        WindowStartupLocation="CenterOwner" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="14">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+    <TextBlock x:Name="TxtTituloDetalle" DockPanel.Dock="Top" Foreground="White" FontWeight="Bold" FontSize="15" TextWrapping="Wrap" Margin="0,0,0,8"/>
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="BtnCopiarDetalle" Content="📋 Copiar informacion" Width="190" Height="36" Margin="0,0,8,0"/>
+      <Button x:Name="BtnCerrarDetalle" Content="Cerrar" Width="110" Height="36"/>
+    </StackPanel>
+    <TextBox x:Name="TxtDetalleCompleto" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" Background="#070A10" Foreground="#CFE3FF"
+             FontFamily="Consolas" FontSize="12.5" VerticalScrollBarVisibility="Auto" Padding="10"/>
+  </DockPanel>
+</Window>
+"@
+    $reader = New-Object System.Xml.XmlNodeReader $xamlDet
+    $dlg = [Windows.Markup.XamlReader]::Load($reader)
+    try { Iniciar-EfectosNeon -Ventana $dlg } catch { Registrar-FalloInterno 'efectos de la ventana de detalle' $_ }
+    $texto = Texto-DetalleCompletoError -E $Entrada
+    $dlg.FindName('TxtTituloDetalle').Text = "$($Entrada.Tipo): $($Entrada.Origen)"
+    $dlg.FindName('TxtDetalleCompleto').Text = $texto
+    $dlg.FindName('BtnCerrarDetalle').Add_Click({ $dlg.Close() }.GetNewClosure())
+    $dlg.FindName('BtnCopiarDetalle').Add_Click({
+        try { Set-Clipboard -Value $texto -ErrorAction Stop; Write-Log 'Informacion del registro copiada al portapapeles.' -Tipo OK -SinRegistro }
+        catch { Write-Log "No se pudo copiar al portapapeles: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
+    }.GetNewClosure())
+    try { $dlg.Owner = $window } catch {}
+    [void]$dlg.ShowDialog()
+}
+
+# ---------------------------------------------------------------------------
+#  AUTOVERIFICACION DE PESTAÑAS Y OPCIONES (al abrir el programa)
+#  1) Recorre cada pestaña y cada boton: comprueba que existe y que tiene una accion asignada.
+#  2) En un hilo aparte ejecuta comprobaciones de solo lectura de lo que necesita cada pestaña
+#     (herramientas de Windows, consultas WMI, servicios, conexion...). Lo que falla se anota en
+#     el Registro de errores (categoria "Autoverificacion") con su solucion.
+# ---------------------------------------------------------------------------
+$Global:AutoVer = @{ Corriendo = $false; Tabs = @(); Idx = 0; Controles = 0; Botones = 0; Pruebas = 0; Info = 0; Obs = (New-Object System.Collections.ArrayList); PS = $null; AR = $null; T0 = $null; Timer = $null; Poll = $null; ReflOk = $false }
+$Global:AutoVerProp = $null
+
+$Script:ProbesSB = {
+    $res = New-Object System.Collections.Generic.List[object]
+    function Probar {
+        param([string]$Tab, [string]$Nombre, [scriptblock]$Prueba, [string]$Solucion, [string]$Nivel = 'AVISO')
+        $ok = $false; $det = ''
+        try { $r = & $Prueba; $ok = [bool]$r; if (-not $ok) { $det = 'La comprobacion no devolvio resultado.' } }
+        catch { $ok = $false; $det = "$($_.Exception.GetType().Name): $($_.Exception.Message)" }
+        $res.Add([PSCustomObject]@{ Tab = $Tab; Nombre = $Nombre; Ok = $ok; Nivel = $Nivel; Detalle = $det; Solucion = $Solucion })
+    }
+    function Existe { param([string]$n) return [bool](Get-Command $n -ErrorAction SilentlyContinue) }
+    $sysAdm = 'Ejecuta el programa como administrador y repara Windows (sfc /scannow y DISM /Online /Cleanup-Image /RestoreHealth) si la herramienta falta.'
+    # Inicio
+    Probar 'Inicio' 'Contadores de rendimiento (CPU)' { $c = New-Object System.Diagnostics.PerformanceCounter('Processor', '% Processor Time', '_Total'); [void]$c.NextValue(); $true } 'Reconstruye los contadores: abre cmd como administrador y ejecuta  lodctr /r'
+    Probar 'Inicio' 'Informacion del sistema (WMI)' { @(Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Count -gt 0 } 'Repara WMI: net stop winmgmt y  winmgmt /salvagerepository  (como administrador).'
+    Probar 'Inicio' 'Lectura de discos fisicos' { @(Get-PhysicalDisk -ErrorAction Stop).Count -gt 0 } 'Ejecuta el programa como administrador. Si persiste, repara el servicio "Almacenamiento" (Storage Management).'
+    Probar 'Inicio' 'Sensor de temperatura de la placa (opcional)' { @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop).Count -gt 0 } 'Muchos equipos no exponen este sensor; no es un problema.' 'INFO'
+    # Optimizar Windows
+    Probar 'Optimizar Windows' 'powercfg.exe' { Existe 'powercfg.exe' } $sysAdm
+    Probar 'Optimizar Windows' 'reg.exe' { Existe 'reg.exe' } $sysAdm
+    Probar 'Optimizar Windows' 'Servicios de Windows' { @(Get-Service -ErrorAction Stop).Count -gt 0 } 'Repara el servicio de control de servicios o reinicia Windows.'
+    Probar 'Optimizar Windows' 'Tareas programadas' { $x = Get-ScheduledTask -ErrorAction Stop | Select-Object -First 1; $null -ne $x } 'Inicia el servicio "Programador de tareas" (Schedule).'
+    Probar 'Optimizar Windows' 'Punto de restauracion (Checkpoint-Computer)' { Existe 'Checkpoint-Computer' } 'Activa la Proteccion del sistema en Propiedades del sistema > Proteccion del sistema.'
+    # Controladores
+    Probar 'Controladores' 'pnputil.exe' { Existe 'pnputil.exe' } $sysAdm
+    Probar 'Controladores' 'Lectura de controladores instalados' { $x = Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop | Select-Object -First 1; $null -ne $x } 'Repara WMI (winmgmt /salvagerepository) o ejecuta el programa como administrador.'
+    Probar 'Controladores' 'Dispositivos con problemas (PnP)' { $x = Get-CimInstance Win32_PnPEntity -Filter 'ConfigManagerErrorCode<>0' -ErrorAction Stop; $true } 'Repara WMI o ejecuta el programa como administrador.'
+    # Programas
+    Probar 'Programas' 'winget instalado' { Existe 'winget' } 'Instala o actualiza "Instalador de aplicaciones" desde Microsoft Store.'
+    Probar 'Programas' 'winget responde' { $v = (& winget --version 2>&1 | Out-String).Trim(); $v -match '\d' } 'Actualiza "Instalador de aplicaciones" desde Microsoft Store o ejecuta  winget source reset --force  como administrador.'
+    Probar 'Programas' 'Conexion a Internet (descargas)' { @([System.Net.Dns]::GetHostAddresses('github.com')).Count -gt 0 } 'Revisa tu conexion, el DNS, el proxy/VPN o el firewall.'
+    # Disco y almacenamiento
+    Probar 'Disco y almacenamiento' 'cleanmgr.exe' { Existe 'cleanmgr.exe' } $sysAdm
+    Probar 'Disco y almacenamiento' 'chkdsk.exe' { Existe 'chkdsk.exe' } $sysAdm
+    Probar 'Disco y almacenamiento' 'defrag.exe' { Existe 'defrag.exe' } $sysAdm
+    Probar 'Disco y almacenamiento' 'Volumenes del sistema' { @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop).Count -gt 0 } 'Repara WMI (winmgmt /salvagerepository).'
+    Probar 'Disco y almacenamiento' 'Estado S.M.A.R.T. del disco' { $d = Get-PhysicalDisk -ErrorAction Stop | Select-Object -First 1; $r = $d | Get-StorageReliabilityCounter -ErrorAction Stop; $null -ne $r } 'Ejecuta el programa como administrador; algunos discos/USB no exponen S.M.A.R.T.' 'INFO'
+    # Memoria y rendimiento
+    Probar 'Memoria y rendimiento' 'Modulos de RAM (WMI)' { @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop).Count -gt 0 } 'Repara WMI (winmgmt /salvagerepository).'
+    Probar 'Memoria y rendimiento' 'mdsched.exe (diagnostico de memoria)' { Existe 'mdsched.exe' } $sysAdm
+    Probar 'Memoria y rendimiento' 'Lista de procesos' { @(Get-Process).Count -gt 0 } 'Reinicia Windows.'
+    # Windows Update
+    Probar 'Windows Update' 'Servicio Windows Update (wuauserv)' { $null -ne (Get-Service wuauserv -ErrorAction Stop) } 'Repara Windows (sfc /scannow y DISM) o reinstala componentes de Windows Update.'
+    Probar 'Windows Update' 'Servicio de transferencia (BITS)' { $null -ne (Get-Service bits -ErrorAction Stop) } 'Repara Windows (sfc /scannow y DISM).'
+    Probar 'Windows Update' 'Agente de Windows Update (COM)' { $null -ne (New-Object -ComObject Microsoft.Update.Session) } 'Reinicia el servicio wuauserv o repara Windows Update.'
+    # Red y seguridad
+    Probar 'Red y seguridad' 'Adaptadores de red' { @(Get-NetAdapter -ErrorAction Stop).Count -gt 0 } 'Ejecuta como administrador; si no hay adaptadores, revisa el controlador de red.'
+    Probar 'Red y seguridad' 'netsh.exe' { Existe 'netsh.exe' } $sysAdm
+    Probar 'Red y seguridad' 'ipconfig.exe' { Existe 'ipconfig.exe' } $sysAdm
+    Probar 'Red y seguridad' 'Firewall de Windows' { $x = Get-NetFirewallProfile -ErrorAction Stop; $null -ne $x } 'Inicia el servicio "Firewall de Windows Defender" (MpsSvc).'
+    Probar 'Red y seguridad' 'Antivirus de Windows Defender (opcional)' { $null -ne (Get-MpComputerStatus -ErrorAction Stop) } 'Si usas otro antivirus es normal que Defender no responda.' 'INFO'
+    # Sistema
+    Probar 'Sistema' 'sfc.exe' { Existe 'sfc.exe' } $sysAdm
+    Probar 'Sistema' 'DISM.exe' { Existe 'DISM.exe' } $sysAdm
+    Probar 'Sistema' 'systeminfo.exe' { Existe 'systeminfo.exe' } $sysAdm
+    Probar 'Sistema' 'Informacion del BIOS' { @(Get-CimInstance Win32_BIOS -ErrorAction Stop).Count -gt 0 } 'Repara WMI (winmgmt /salvagerepository).'
+    Probar 'Sistema' 'Permisos de administrador' { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } 'Cierra el programa y abrelo con clic derecho > Ejecutar como administrador. Sin esos permisos muchas opciones no funcionaran.'
+    # Registro de Windows
+    Probar 'Registro de Windows' 'reg.exe' { Existe 'reg.exe' } $sysAdm
+    Probar 'Registro de Windows' 'Lectura del Registro' { Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion' } 'Ejecuta el programa como administrador.'
+    Probar 'Registro de Windows' 'Escritura en el Registro (HKCU)' { $k = 'HKCU:\Software\TheDragonToolPrueba'; New-Item -Path $k -Force -ErrorAction Stop | Out-Null; Remove-Item -Path $k -Force -ErrorAction Stop; $true } 'Una directiva o un antivirus bloquea la escritura en el Registro. Ejecuta como administrador.'
+    # BSOD
+    Probar 'BSOD' 'Visor de sucesos (System)' { $x = Get-WinEvent -LogName System -MaxEvents 1 -ErrorAction Stop; $null -ne $x } 'Inicia el servicio "Registro de eventos de Windows" (EventLog).'
+    Probar 'BSOD' 'Configuracion de volcado de memoria' { @(Get-CimInstance Win32_OSRecoveryConfiguration -ErrorAction Stop).Count -gt 0 } 'Repara WMI (winmgmt /salvagerepository).'
+    Probar 'BSOD' 'Carpeta de minivolcados (opcional)' { Test-Path "$env:SystemRoot\Minidump" } 'Si no hay pantallas azules recientes es normal que no exista.' 'INFO'
+    # Diagnosticar equipo
+    Probar 'Diagnosticar equipo' 'Dispositivos de audio' { @(Get-CimInstance Win32_SoundDevice -ErrorAction Stop).Count -gt 0 } 'Instala el controlador de audio (Controladores).' 'INFO'
+    Probar 'Diagnosticar equipo' 'Camara (opcional)' { @(Get-PnpDevice -Class Camera, Image -ErrorAction Stop | Where-Object { $_.Status -eq 'OK' }).Count -gt 0 } 'Si el equipo no tiene camara o esta desactivada, la prueba de camara no estara disponible.' 'INFO'
+    Probar 'Diagnosticar equipo' 'Bateria (opcional)' { @(Get-CimInstance Win32_Battery -ErrorAction Stop).Count -gt 0 } 'Los equipos de escritorio no tienen bateria.' 'INFO'
+    Probar 'Diagnosticar equipo' 'Wi-Fi (opcional)' { @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.PhysicalMediaType -like '*802.11*' -or $_.Name -like '*Wi-Fi*' }).Count -gt 0 } 'Los equipos sin Wi-Fi no pueden hacer las pruebas Wi-Fi.' 'INFO'
+    Probar 'Diagnosticar equipo' 'Dispositivos USB' { $x = Get-CimInstance Win32_USBHub -ErrorAction Stop; $true } 'Repara WMI (winmgmt /salvagerepository).'
+    Probar 'Diagnosticar equipo' 'Libreria grafica para informes PDF' { Add-Type -AssemblyName System.Drawing -ErrorAction Stop; $true } 'Instala .NET Framework 4.8 desde Windows Update.'
+    Probar 'Diagnosticar equipo' 'Conexion para la prueba de velocidad' { @([System.Net.Dns]::GetHostAddresses('www.google.com')).Count -gt 0 } 'Revisa tu conexion a Internet.'
+    # Registro de errores
+    Probar 'Registro de errores' 'Guardar configuracion del programa' { $d = Join-Path $env:LOCALAPPDATA 'TheDragonTool'; if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; $f = Join-Path $d 'prueba.tmp'; 'ok' | Set-Content -LiteralPath $f -ErrorAction Stop; Remove-Item -LiteralPath $f -Force; $true } 'Comprueba permisos en %LOCALAPPDATA%\TheDragonTool o libera espacio en disco.'
+    Probar 'Registro de errores' 'Portapapeles (Set-Clipboard)' { Existe 'Set-Clipboard' } 'Actualiza Windows PowerShell 5.1.'
+    Probar 'Registro de errores' 'Lectura de eventos de hardware (WHEA)' { try { $x = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WHEA-Logger' } -MaxEvents 1 -ErrorAction Stop; $true } catch { if ("$($_.Exception.Message)" -match 'No events|No se encontr') { $true } else { throw } } } 'Inicia el servicio "Registro de eventos de Windows" (EventLog).'
+    # Modificacion
+    Probar 'Modificacion' 'Pantallas (adaptador de video)' { @(Get-CimInstance Win32_VideoController -ErrorAction Stop).Count -gt 0 } 'Instala el controlador de video (Controladores).'
+    Probar 'Modificacion' 'Configuracion del teclado en el Registro' { Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout' } 'Ejecuta el programa como administrador.'
+    Probar 'Modificacion' 'Lectura de discos (Get-Disk)' { @(Get-Disk -ErrorAction Stop).Count -gt 0 } 'Ejecuta como administrador; repara el servicio "Almacenamiento virtual" (vds).'
+    # Acerca de
+    Probar 'Acerca de' 'Acceso a GitHub (actualizaciones)' { @([System.Net.Dns]::GetHostAddresses('raw.githubusercontent.com')).Count -gt 0 } 'Revisa tu conexion a Internet.' 'INFO'
+    $res.ToArray()
+}
+
+function Global:Recorrer-ArbolLogico {
+    param($Raiz, $Salida)
+    $pila = New-Object 'System.Collections.Generic.Stack[object]'
+    $pila.Push($Raiz)
+    while ($pila.Count -gt 0) {
+        $o = $pila.Pop()
+        if ($o -isnot [System.Windows.DependencyObject]) { continue }
+        [void]$Salida.Add($o)
+        foreach ($h in [System.Windows.LogicalTreeHelper]::GetChildren($o)) { $pila.Push($h) }
+    }
+}
+
+function Global:Contar-ManejadoresClick {
+    param($Btn)
+    try {
+        if ($Btn.Command) { return 1 }
+        if ($null -eq $Global:AutoVerProp) {
+            $fl = [System.Reflection.BindingFlags]'NonPublic,Public,Instance'
+            $Global:AutoVerProp = [System.Windows.UIElement].GetProperty('EventHandlersStore', $fl)
+        }
+        if ($null -eq $Global:AutoVerProp) { return -1 }
+        $store = $Global:AutoVerProp.GetValue($Btn, $null)
+        if ($null -eq $store) { return 0 }
+        $mt = $store.GetType().GetMethod('GetRoutedEventHandlers')
+        if ($null -eq $mt) { return -1 }
+        $h = $mt.Invoke($store, @([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))
+        if ($null -eq $h) { return 0 }
+        return @($h).Count
+    } catch { return -1 }
+}
+
+function Global:AutoVer-Obs {
+    param([string]$Tab, [string]$Mensaje, [string]$Solucion, [string]$Detalle = '')
+    [void]$Global:AutoVer.Obs.Add([PSCustomObject]@{ Tab = $Tab; Mensaje = $Mensaje; Solucion = $Solucion; Detalle = $Detalle })
+}
+
+function Global:AutoVer-ProcesarPestana {
+    $A = $Global:AutoVer
+    $ti = $A.Tabs[$A.Idx]
+    $nombre = ("$($ti.Header)" -replace '^\S+\s+', '').Trim()
+    $lista = New-Object System.Collections.ArrayList
+    if ($null -eq $ti.Content) {
+        AutoVer-Obs -Tab $nombre -Mensaje "La pestaña '$nombre' no tiene contenido." -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.'
+        return
+    }
+    Recorrer-ArbolLogico -Raiz $ti.Content -Salida $lista
+    $sinAccion = New-Object System.Collections.ArrayList
+    foreach ($o in $lista) {
+        $A.Controles = $A.Controles + 1
+        if ($o -is [System.Windows.Controls.Button] -and $o.Name) {
+            $A.Botones = $A.Botones + 1
+            if ($A.ReflOk) {
+                $n = Contar-ManejadoresClick -Btn $o
+                if ($n -eq 0) { [void]$sinAccion.Add("$($o.Name) ('$($o.Content)')") }
+            }
+        }
+    }
+    foreach ($b in $sinAccion) {
+        AutoVer-Obs -Tab $nombre -Mensaje "El boton $b de la pestaña '$nombre' no tiene ninguna accion asignada." -Solucion 'El boton no hara nada al pulsarlo. Avisa al desarrollador con el detalle tecnico.' -Detalle "Pestaña: $nombre`nControl: $b"
+    }
+    # Contenido que debe haberse cargado
+    switch ($nombre) {
+        'Optimizar Windows' { if (@($Script:_checkboxesOptimizacionRegistro).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'La lista de optimizaciones esta vacia.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
+        'Registro de Windows' { if (@($Script:_checkboxesRegistro).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'La lista de ajustes del Registro esta vacia.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
+        'Programas' { if (@($Script:_checkboxesProgramas).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'El catalogo de programas esta vacio.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
+        'Inicio' {
+            $E = $Global:GrafInicio
+            if (-not $E.Iniciado) { AutoVer-Obs -Tab $nombre -Mensaje 'Los graficos en vivo del Resumen no se iniciaron.' -Solucion 'Reinicia el programa; revisa el registro por "Resumen del equipo".' }
+            elseif ($E.CtrCpu -and $E.CPU.Datos -and $E.CPU.Datos.Count -lt 2) { AutoVer-Obs -Tab $nombre -Mensaje 'El grafico de CPU no esta recibiendo datos.' -Solucion 'Reconstruye los contadores de rendimiento: lodctr /r (como administrador) y reinicia el programa.' }
+        }
+    }
+}
+
+function Global:AutoVer-Finalizar {
+    $A = $Global:AutoVer
+    foreach ($t in @($A.Timer, $A.Poll)) { try { if ($t) { $t.Stop() } } catch {} }
+    # controles de ayuda que ya no existen
+    try {
+        if ($Global:AyudasFaltan -and $Global:AyudasFaltan.Count -gt 0) {
+            $lista = @($Global:AyudasFaltan | Select-Object -First 15) -join ', '
+            AutoVer-Obs -Tab 'Interfaz' -Mensaje "Hay $($Global:AyudasFaltan.Count) control(es) esperados que no existen en la ventana: $lista" -Solucion 'Avisa al desarrollador: alguna opcion cambio de nombre o se elimino.'
+        }
+    } catch {}
+    $nObs = $A.Obs.Count
+    foreach ($o in $A.Obs) {
+        $sol = $o.Solucion
+        Add-RegistroError -Tipo 'AVISO' -Categoria 'Autoverificacion' -Origen "Autoverificacion - $($o.Tab)" -Mensaje $o.Mensaje -Solucion $sol -Detalle $o.Detalle -Notif 0
+    }
+    $resumen = "Autoverificacion: $($A.Tabs.Count) pestañas, $($A.Controles) controles ($($A.Botones) botones) y $($A.Pruebas) comprobaciones revisadas"
+    if ($A.Info -gt 0) { $resumen += " ($($A.Info) opcionales no disponibles en este equipo)" }
+    if ($nObs -gt 0) { $resumen += " - $nObs observacion(es) en el Registro de errores." } else { $resumen += ' - todo funciona correctamente.' }
+    try { $tb = $window.FindName('TxtAutoverificacion'); if ($tb) { $tb.Text = "$resumen  (" + (Get-Date).ToString('HH:mm:ss') + ")" } } catch {}
+    if ($nObs -gt 0) {
+        Write-Log $resumen -Tipo AVISO -SinRegistro
+        Add-RegistroError -Tipo 'AVISO' -Categoria 'Autoverificacion' -Origen 'Autoverificacion - resumen' -Mensaje "La autoverificacion de pestañas y opciones encontro $nObs observacion(es). Abre cada fila de categoria Autoverificacion para ver la solucion." -Solucion 'Selecciona cada fila y pulsa "Mas informacion y solucion". Despues pulsa "Verificar pestañas y opciones ahora" para confirmar.' -Detalle $resumen -Notif 1
+    } else {
+        Write-Log $resumen -Tipo OK -SinRegistro
+    }
+    try { Cargar-RegistroErrores } catch {}
+    $A.Corriendo = $false
+    $bt = $window.FindName('BtnAutoverificar'); if ($bt) { $bt.IsEnabled = $true }
+}
+
+function Global:Iniciar-Autoverificacion {
+    $A = $Global:AutoVer
+    if ($A.Corriendo) { return }
+    $A.Corriendo = $true
+    $A.Obs = New-Object System.Collections.ArrayList
+    $A.Controles = 0; $A.Botones = 0; $A.Pruebas = 0; $A.Info = 0; $A.Idx = 0
+    $tc = $window.FindName('TabControlPrincipal')
+    $A.Tabs = @($tc.Items)
+    $bt = $window.FindName('BtnAutoverificar'); if ($bt) { $bt.IsEnabled = $false }
+    $tb = $window.FindName('TxtAutoverificacion'); if ($tb) { $tb.Text = 'Autoverificacion en curso: revisando pestañas y opciones...' }
+    # La lectura de manejadores solo se usa si funciona con un boton que sabemos que tiene accion
+    $A.ReflOk = $false
+    try { $ref = $window.FindName('BtnActualizarErrores'); $A.ReflOk = ((Contar-ManejadoresClick -Btn $ref) -gt 0) } catch {}
+    if (-not $A.ReflOk) { Write-Log 'Autoverificacion: no se pudo leer los manejadores de los botones en este equipo; se omite esa comprobacion.' -Tipo INFO -SinRegistro }
+    # Paso 1: una pestaña por ciclo para no congelar la ventana
+    $A.Timer = New-Object System.Windows.Threading.DispatcherTimer
+    $A.Timer.Interval = [TimeSpan]::FromMilliseconds(120)
+    $A.Timer.Add_Tick({
+        try {
+            $a2 = $Global:AutoVer
+            if ($a2.Idx -lt $a2.Tabs.Count) {
+                try { AutoVer-ProcesarPestana } catch { Registrar-FalloInterno 'autoverificacion de pestaña' $_ }
+                $a2.Idx = $a2.Idx + 1
+            } else {
+                $a2.Timer.Stop()
+                # Paso 2: comprobaciones en un hilo aparte
+                $ps = [powershell]::Create()
+                [void]$ps.AddScript($Script:ProbesSB.ToString())
+                $a2.PS = $ps
+                $a2.T0 = Get-Date
+                $a2.AR = $ps.BeginInvoke()
+                $a2.Poll.Start()
+            }
+        } catch { Registrar-FalloInterno 'autoverificacion (ciclo)' $_; try { AutoVer-Finalizar } catch {} }
+    })
+    $A.Poll = New-Object System.Windows.Threading.DispatcherTimer
+    $A.Poll.Interval = [TimeSpan]::FromMilliseconds(600)
+    $A.Poll.Add_Tick({
+        try {
+            $a2 = $Global:AutoVer
+            $vencido = ((Get-Date) - $a2.T0).TotalSeconds -gt 150
+            if ($a2.AR -and ($a2.AR.IsCompleted -or $vencido)) {
+                $a2.Poll.Stop()
+                $res = @()
+                if ($a2.AR.IsCompleted) {
+                    try { $res = @($a2.PS.EndInvoke($a2.AR)) } catch { Registrar-FalloInterno 'autoverificacion (comprobaciones)' $_ }
+                    try { $a2.PS.Dispose() } catch {}
+                } else {
+                    AutoVer-Obs -Tab 'General' -Mensaje 'Las comprobaciones del sistema tardaron mas de 150 segundos y se cancelaron.' -Solucion 'Windows esta lento o una consulta WMI esta bloqueada. Reinicia el equipo y repite la verificacion.'
+                    try { $a2.PS.Stop() } catch {}
+                }
+                foreach ($r in $res) {
+                    if ($null -eq $r -or -not $r.Nombre) { continue }
+                    $a2.Pruebas = $a2.Pruebas + 1
+                    if (-not $r.Ok) {
+                        if ($r.Nivel -eq 'INFO') { $a2.Info = $a2.Info + 1 }
+                        else { AutoVer-Obs -Tab $r.Tab -Mensaje "La comprobacion '$($r.Nombre)' de la pestaña '$($r.Tab)' fallo." -Solucion $r.Solucion -Detalle "Pestaña: $($r.Tab)`nComprobacion: $($r.Nombre)`nResultado: $($r.Detalle)" }
+                    }
+                }
+                AutoVer-Finalizar
+            }
+        } catch { Registrar-FalloInterno 'autoverificacion (resultado)' $_; try { AutoVer-Finalizar } catch {} }
+    })
+    $A.Timer.Start()
+}
+
 $window.FindName("BtnActualizarErrores").Add_Click({ Cargar-RegistroErrores })
+$window.FindName("BtnDetalleError").Add_Click({ try { Mostrar-DetalleError -Entrada $window.FindName("GridRegistroErrores").SelectedItem } catch { Registrar-FalloInterno 'ventana de detalle' $_ } })
+$window.FindName("BtnAutoverificar").Add_Click({ try { Iniciar-Autoverificacion } catch { Registrar-FalloInterno 'autoverificacion' $_ } })
+$window.FindName("GridRegistroErrores").Add_MouseDoubleClick({ try { $it = $window.FindName("GridRegistroErrores").SelectedItem; if ($it) { Mostrar-DetalleError -Entrada $it } } catch { Registrar-FalloInterno 'doble clic en el registro' $_ } })
+$window.FindName("GridRegistroErrores").Add_SelectionChanged({ try { $window.FindName("BtnDetalleError").IsEnabled = [bool]($window.FindName("GridRegistroErrores").SelectedItem) } catch {} })
 $window.FindName("CmbFiltroCategoriaError").Add_SelectionChanged({ Cargar-RegistroErrores })
 $window.FindName("CmbFiltroTipoError").Add_SelectionChanged({ Cargar-RegistroErrores })
 $window.FindName("TxtBuscarError").Add_TextChanged({ Cargar-RegistroErrores })
@@ -18891,6 +19309,15 @@ $Script:TimerArranqueMonitor.Add_Tick({
     } catch { Write-Log "No se pudo iniciar el monitoreo en tiempo real: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
 })
 $Script:TimerArranqueMonitor.Start()
+
+# Autoverificacion de todas las pestañas y opciones, unos segundos despues de abrir
+$Script:TimerAutoVer = New-Object System.Windows.Threading.DispatcherTimer
+$Script:TimerAutoVer.Interval = [TimeSpan]::FromSeconds(8)
+$Script:TimerAutoVer.Add_Tick({
+    $Script:TimerAutoVer.Stop()
+    try { Iniciar-Autoverificacion } catch { Registrar-FalloInterno 'autoverificacion' $_ }
+})
+$Script:TimerAutoVer.Start()
 
 $window.Dispatcher.add_UnhandledException({
     param($s, $e)
@@ -19047,9 +19474,13 @@ try {
 # los colores alrededor de todos los botones y bordes a la vez (muy barato de dibujar).
 try {
     $pincelNeon = Obtener-PincelNeon -Elemento $window
-    if (-not (Animar-PincelNeon -Pincel $pincelNeon)) { throw "el pincel no admite animacion ($($Global:ErrorPincelNeon))" }
+    if (-not (Animar-PincelNeon -Pincel $pincelNeon)) {
+        # segundo intento: pincel nuevo (animado antes de publicarse)
+        $pincelNeon = Obtener-PincelNeon -Elemento $window -Rehacer
+        if (-not (Animar-PincelNeon -Pincel $pincelNeon)) { throw "el pincel no admite animacion ($($Global:ErrorPincelNeon))" }
+    }
 } catch {
-    Write-Log "No se pudo animar el borde neon (se muestra estatico): $($_.Exception.Message)" -Tipo AVISO
+    Registrar-FalloInterno 'borde neon (se muestra estatico)' $_ 'Es solo un efecto visual. Actualiza el controlador de video o reinicia el programa; el resto funciona igual.'
 }
 
 # --- Ajuste automatico a la pantalla (tamaño inicial + escala al maximizar) ---
@@ -19387,6 +19818,9 @@ $Global:AyudaControles = @{
     'BtnExportarErrores' = 'Guarda el registro de errores en un archivo de texto.'
     'BtnExportarPdfErrores' = 'Genera un informe PDF con los errores y sus soluciones.'
     'BtnLimpiarErrores' = 'Vacia por completo el registro de errores (no se puede deshacer).'
+    'BtnDetalleError' = 'Abre una ventana con la explicacion completa del registro seleccionado: que paso, causa probable, solucion paso a paso y detalle tecnico. Tambien con doble clic sobre la fila.'
+    'BtnAutoverificar' = 'Revisa ahora todas las pestanas y opciones del programa (botones con accion, herramientas de Windows, servicios y conexion) y anota en el registro lo que no funcione.'
+    'TxtAutoverificacion' = 'Resultado de la ultima autoverificacion de pestanas y opciones.'
     'ChkMonitoreoVivo' = 'Activa o desactiva la vigilancia en tiempo real con notificaciones flotantes. Tu eleccion se recuerda.'
     'ChkMonitorLentitud' = 'Avisa cuando el programa o una prueba va lento e indica la causa probable.'
     # --- Modificacion ---
@@ -19444,41 +19878,73 @@ function Global:Nuevo-TextoAyuda {
     return $tb
 }
 
-function Global:Aplicar-AyudasInterfaz {
-    try {
-        [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($window, 350)
-        [System.Windows.Controls.ToolTipService]::SetShowDuration($window, 25000)
-        [System.Windows.Controls.ToolTipService]::SetBetweenShowDelay($window, 150)
-        [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($window, $true)
-    } catch {}
-    $faltan = New-Object System.Collections.ArrayList
-    foreach ($k in @($Global:AyudaControles.Keys)) {
-        try {
-            $c = $window.FindName($k)
-            if ($c) {
-                if (-not $c.ToolTip) { $c.ToolTip = (Nuevo-TextoAyuda $Global:AyudaControles[$k]) }
-                elseif ($c.ToolTip -is [string]) { $c.ToolTip = (Nuevo-TextoAyuda $c.ToolTip) }
-            }
-            else { [void]$faltan.Add($k) }
-        } catch {}
-    }
-    foreach ($lista in @($Script:_checkboxesRegistro, $Script:_checkboxesOptimizacionRegistro, $Script:_checkboxesProgramas)) {
-        foreach ($cb in @($lista)) { try { if ($cb -and $cb.Tag -and -not $cb.ToolTip) { $cb.ToolTip = (Nuevo-TextoAyuda (Texto-AyudaItem $cb.Tag)) } } catch {} }
-    }
-    # Menu lateral: cada pestaña lista sus opciones
-    try {
-        $cont = $window.FindName('ContenedorNav')
-        foreach ($rb in @($cont.Children)) {
-            $h = "$($rb.Tag.Header)"
-            foreach ($k in @($Global:AyudaPestanas.Keys)) {
-                if ($h.EndsWith($k)) { $rb.ToolTip = (Nuevo-TextoAyuda $Global:AyudaPestanas[$k]); break }
-            }
-        }
-    } catch {}
-    if ($faltan.Count -gt 0) { Write-Log "Ayudas: controles sin encontrar: $($faltan -join ', ')" -Tipo INFO -SinRegistro }
+function Global:Ayudas-Retardos {
+    [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($window, 350)
+    [System.Windows.Controls.ToolTipService]::SetShowDuration($window, 25000)
+    [System.Windows.Controls.ToolTipService]::SetBetweenShowDelay($window, 150)
+    [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($window, $true)
 }
 
-try { Aplicar-AyudasInterfaz } catch { Write-Log "No se pudieron activar las ayudas emergentes: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
+function Global:Ayudas-Controles {
+    $claves = @($Global:AyudaControles.Keys)
+    $fallos = 0
+    for ($i = 0; $i -lt $claves.Count; $i++) {
+        $k = [string]$claves[$i]
+        try {
+            $c = $window.FindName($k)
+            if ($null -eq $c) { [void]$Global:AyudasFaltan.Add($k); continue }
+            $actual = $c.ToolTip
+            if ($null -eq $actual) { $c.ToolTip = (Nuevo-TextoAyuda ([string]$Global:AyudaControles[$k])) }
+            elseif ($actual -is [string]) { $c.ToolTip = (Nuevo-TextoAyuda $actual) }
+        } catch {
+            $fallos++
+            if ($fallos -eq 1) { Registrar-FalloInterno "ayuda del control $k" $_ }
+        }
+    }
+}
+
+function Global:Ayudas-Listas {
+    $listas = @($Script:_checkboxesRegistro, $Script:_checkboxesOptimizacionRegistro, $Script:_checkboxesProgramas)
+    $fallos = 0
+    for ($j = 0; $j -lt $listas.Count; $j++) {
+        $items = @($listas[$j])
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $cb = $items[$i]
+            try {
+                if ($null -ne $cb -and $null -ne $cb.Tag -and $null -eq $cb.ToolTip) { $cb.ToolTip = (Nuevo-TextoAyuda (Texto-AyudaItem $cb.Tag)) }
+            } catch {
+                $fallos++
+                if ($fallos -eq 1) { Registrar-FalloInterno 'ayuda de casillas' $_ }
+            }
+        }
+    }
+}
+
+function Global:Ayudas-Menu {
+    $cont = $window.FindName('ContenedorNav')
+    $botones = @($cont.Children)
+    $claves = @($Global:AyudaPestanas.Keys)
+    for ($i = 0; $i -lt $botones.Count; $i++) {
+        $rb = $botones[$i]
+        $h = [string]$rb.Tag.Header
+        $texto = $null
+        for ($j = 0; $j -lt $claves.Count; $j++) {
+            if ($null -eq $texto -and $h.EndsWith([string]$claves[$j])) { $texto = [string]$Global:AyudaPestanas[$claves[$j]] }
+        }
+        if ($texto) { $rb.ToolTip = (Nuevo-TextoAyuda $texto) }
+    }
+}
+
+function Global:Aplicar-AyudasInterfaz {
+    $Global:AyudasFaltan = New-Object System.Collections.ArrayList
+    try { Ayudas-Retardos } catch { Registrar-FalloInterno 'ayudas: retardos' $_ }
+    try { Ayudas-Controles } catch { Registrar-FalloInterno 'ayudas: controles' $_ }
+    try { Ayudas-Listas } catch { Registrar-FalloInterno 'ayudas: listas' $_ }
+    try { Ayudas-Menu } catch { Registrar-FalloInterno 'ayudas: menu lateral' $_ }
+    if ($Global:AyudasFaltan.Count -gt 0) { Write-Log ("Ayudas: controles sin encontrar: " + ($Global:AyudasFaltan -join ', ')) -Tipo INFO -SinRegistro }
+}
+
+try { Aplicar-AyudasInterfaz } catch { Registrar-FalloInterno 'ayudas emergentes' $_ }
 Marcar-Arranque 'enlace de controles y efectos'
 $Global:ArranqueReportado = $false
 $window.Add_ContentRendered({
