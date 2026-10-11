@@ -228,13 +228,6 @@ $Global:RecursosNeonXaml = @'
       <Setter Property="BorderThickness" Value="0"/>
       <Setter Property="HasDropShadow" Value="False"/>
       <Setter Property="Foreground" Value="#FFFFFF"/>
-      <Setter Property="ContentTemplate">
-        <Setter.Value>
-          <DataTemplate>
-            <TextBlock Text="{Binding}" TextWrapping="Wrap" MaxWidth="400" Foreground="#FFFFFF" FontSize="12" LineHeight="18"/>
-          </DataTemplate>
-        </Setter.Value>
-      </Setter>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ToolTip">
@@ -1367,7 +1360,8 @@ function Global:Revisar-EscaneoHardware {
     $res = $null
     try { $res = $s.PS.EndInvoke($s.H) } catch { Write-Log "El escaneo de hardware fallo: $($_.Exception.Message)" -Tipo AVISO }
     finally { try { $s.PS.Dispose() } catch {}; $Script:HwScan = $null; $Script:HwTimerPoll.Stop() }
-    $n = Procesar-ResultadosHardware -Lista $res -Resumen (-not $s.Manual)
+    $n = 0
+    try { $n = Procesar-ResultadosHardware -Lista $res -Resumen (-not $s.Manual) } catch { Write-Log "No se pudieron procesar los resultados del escaneo de hardware: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
     if ($s.Manual) { Write-Log "Escaneo de hardware completado: $n hallazgo(s) nuevo(s)." -Tipo $(if ($n -gt 0) { 'AVISO' } else { 'OK' }) }
     try { Cargar-RegistroErrores } catch {}
     if ($s.Manual) {
@@ -11330,7 +11324,7 @@ function Show-VentanaManual {
             $cb.Foreground = [System.Windows.Media.Brushes]::White
             $cb.Margin = "4"
             $cb.Tag = $item
-            try { $cb.ToolTip = (Texto-AyudaItem $item) } catch {}
+            try { $cb.ToolTip = (Nuevo-TextoAyuda (Texto-AyudaItem $item)) } catch {}
             $sp.Children.Add($cb) | Out-Null
             $checkboxes.Add($cb) | Out-Null
         }
@@ -15082,13 +15076,6 @@ Marcar-Arranque 'funciones y recursos'
       <Setter Property="BorderThickness" Value="0"/>
       <Setter Property="HasDropShadow" Value="False"/>
       <Setter Property="Foreground" Value="#FFFFFF"/>
-      <Setter Property="ContentTemplate">
-        <Setter.Value>
-          <DataTemplate>
-            <TextBlock Text="{Binding}" TextWrapping="Wrap" MaxWidth="400" Foreground="#FFFFFF" FontSize="12" LineHeight="18"/>
-          </DataTemplate>
-        </Setter.Value>
-      </Setter>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ToolTip">
@@ -17966,12 +17953,15 @@ function Global:Notificar-Antiguos {
             $r.Timer = New-Object System.Windows.Threading.DispatcherTimer
             $r.Timer.Interval = [TimeSpan]::FromSeconds(4)
             $r.Timer.Add_Tick({
-                $q = $Global:ResumenAntiguos
-                $q.Timer.Stop()
-                $n = [int]$q.N; $e = [int]$q.Err; $q.N = 0; $q.Err = 0
-                if ($n -gt 0) {
-                    Show-NotificacionError -Tipo $(if ($e -gt 0) { 'ERROR' } else { 'AVISO' }) -Titulo 'Problemas detectados en las ultimas horas' -Mensaje "Se registraron $n problema(s) recientes del equipo ($e error(es)). Haz clic para revisarlos y ver como solucionarlos."
-                }
+                try {
+                    $q = $Global:ResumenAntiguos
+                    $q.Timer.Stop()
+                    $cuantos = [int]$q.N; $conError = [int]$q.Err; $q.N = 0; $q.Err = 0
+                    if ($cuantos -gt 0) {
+                        $tipoResumen = if ($conError -gt 0) { 'ERROR' } else { 'AVISO' }
+                        Show-NotificacionError -Tipo $tipoResumen -Titulo 'Problemas detectados en las ultimas horas' -Mensaje "Se registraron $cuantos problema(s) recientes del equipo ($conError error(es)). Haz clic para revisarlos y ver como solucionarlos."
+                    }
+                } catch {}
             })
         }
         $r.Timer.Stop(); $r.Timer.Start()
@@ -18210,7 +18200,7 @@ function Global:Iniciar-EscaneoVivo {
         if (-not $Script:VivoPoll) {
             $Script:VivoPoll = New-Object System.Windows.Threading.DispatcherTimer
             $Script:VivoPoll.Interval = [TimeSpan]::FromMilliseconds(500)
-            $Script:VivoPoll.Add_Tick({ Revisar-EscaneoVivo })
+            $Script:VivoPoll.Add_Tick({ try { Revisar-EscaneoVivo } catch {} })
         }
         $Script:VivoPoll.Start()
     } catch {
@@ -18252,12 +18242,12 @@ function Global:Iniciar-MonitoreoVivo {
     if (-not $Script:HwTimerVivo) {
         $Script:HwTimerVivo = New-Object System.Windows.Threading.DispatcherTimer
         $Script:HwTimerVivo.Interval = [TimeSpan]::FromMinutes(3)
-        $Script:HwTimerVivo.Add_Tick({ Iniciar-EscaneoHardware -Horas 2 -Manual $false -IncluirEstado $true; Actualizar-EstadoMonitoreo })
+        $Script:HwTimerVivo.Add_Tick({ try { Iniciar-EscaneoHardware -Horas 2 -Manual $false -IncluirEstado $true; Actualizar-EstadoMonitoreo } catch {} })
     }
     if (-not $Script:VivoTimer) {
         $Script:VivoTimer = New-Object System.Windows.Threading.DispatcherTimer
         $Script:VivoTimer.Interval = [TimeSpan]::FromSeconds(30)
-        $Script:VivoTimer.Add_Tick({ Iniciar-EscaneoVivo })
+        $Script:VivoTimer.Add_Tick({ try { Iniciar-EscaneoVivo } catch {} })
     }
     $Script:HwTimerVivo.Start()
     $Script:VivoTimer.Start()
@@ -18831,6 +18821,13 @@ $window.Dispatcher.add_UnhandledException({
     param($s, $e)
     try {
         $det = "$($e.Exception.GetType().FullName)`r`n$($e.Exception.StackTrace)"
+        try {
+            $reg = $null
+            if ($e.Exception -is [System.Management.Automation.IContainsErrorRecord]) { $reg = $e.Exception.ErrorRecord }
+            elseif ($e.Exception.InnerException -is [System.Management.Automation.IContainsErrorRecord]) { $reg = $e.Exception.InnerException.ErrorRecord }
+            if ($reg) { $det += "`r`n`r`nPILA DE POWERSHELL:`r`n$($reg.ScriptStackTrace)`r`n$($reg.InvocationInfo.PositionMessage)" }
+            if ($e.Exception.InnerException) { $det += "`r`n`r`nEXCEPCION INTERNA: $($e.Exception.InnerException.GetType().FullName): $($e.Exception.InnerException.Message)" }
+        } catch {}
         Add-RegistroError -Tipo 'ERROR' -Categoria 'Programa (excepcion)' -Origen 'Interfaz (excepcion no controlada)' -Mensaje "Error inesperado no controlado: $($e.Exception.Message)" -Detalle $det
     } catch {}
     $e.Handled = $true
@@ -19360,6 +19357,18 @@ function Global:Texto-AyudaItem {
     return "$n`nMarca la casilla y pulsa el boton de aplicar para ejecutar este ajuste. Si no estas seguro, crea antes un punto de restauracion."
 }
 
+# Convierte un texto en el contenido de un tooltip (con ajuste de linea)
+function Global:Nuevo-TextoAyuda {
+    param([string]$Texto)
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Text = $Texto
+    $tb.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $tb.MaxWidth = 400
+    $tb.FontSize = 12
+    $tb.Foreground = [System.Windows.Media.Brushes]::White
+    return $tb
+}
+
 function Global:Aplicar-AyudasInterfaz {
     try {
         [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($window, 350)
@@ -19371,12 +19380,15 @@ function Global:Aplicar-AyudasInterfaz {
     foreach ($k in @($Global:AyudaControles.Keys)) {
         try {
             $c = $window.FindName($k)
-            if ($c) { if (-not $c.ToolTip) { $c.ToolTip = $Global:AyudaControles[$k] } }
+            if ($c) {
+                if (-not $c.ToolTip) { $c.ToolTip = (Nuevo-TextoAyuda $Global:AyudaControles[$k]) }
+                elseif ($c.ToolTip -is [string]) { $c.ToolTip = (Nuevo-TextoAyuda $c.ToolTip) }
+            }
             else { [void]$faltan.Add($k) }
         } catch {}
     }
     foreach ($lista in @($Script:_checkboxesRegistro, $Script:_checkboxesOptimizacionRegistro, $Script:_checkboxesProgramas)) {
-        foreach ($cb in @($lista)) { try { if ($cb -and $cb.Tag -and -not $cb.ToolTip) { $cb.ToolTip = (Texto-AyudaItem $cb.Tag) } } catch {} }
+        foreach ($cb in @($lista)) { try { if ($cb -and $cb.Tag -and -not $cb.ToolTip) { $cb.ToolTip = (Nuevo-TextoAyuda (Texto-AyudaItem $cb.Tag)) } } catch {} }
     }
     # Menu lateral: cada pestaña lista sus opciones
     try {
@@ -19384,7 +19396,7 @@ function Global:Aplicar-AyudasInterfaz {
         foreach ($rb in @($cont.Children)) {
             $h = "$($rb.Tag.Header)"
             foreach ($k in @($Global:AyudaPestanas.Keys)) {
-                if ($h.EndsWith($k)) { $rb.ToolTip = $Global:AyudaPestanas[$k]; break }
+                if ($h.EndsWith($k)) { $rb.ToolTip = (Nuevo-TextoAyuda $Global:AyudaPestanas[$k]); break }
             }
         }
     } catch {}
