@@ -223,6 +223,31 @@ $Global:RecursosNeonXaml = @'
         </Setter.Value>
       </Setter>
     </Style>
+    <Style TargetType="ToolTip">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="HasDropShadow" Value="False"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="ContentTemplate">
+        <Setter.Value>
+          <DataTemplate>
+            <TextBlock Text="{Binding}" TextWrapping="Wrap" MaxWidth="400" Foreground="#FFFFFF" FontSize="12" LineHeight="18"/>
+          </DataTemplate>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToolTip">
+            <Border Margin="6" Background="#F2101A2E" BorderBrush="#2F7CF6" BorderThickness="1.5" CornerRadius="9" Padding="11,8" SnapsToDevicePixels="True">
+              <Border.Effect>
+                <DropShadowEffect BlurRadius="12" ShadowDepth="2" Opacity="0.55" Color="#000000"/>
+              </Border.Effect>
+              <ContentPresenter/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="ScrollBar">
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="Width" Value="11"/>
@@ -1128,7 +1153,7 @@ $Script:RegistroErrores = New-Object System.Collections.Generic.List[object]
 # instalacion/desinstalacion de programas, el registro de Windows, etc.
 function Global:Get-CategoriaOrigenError {
     param([string]$Origen)
-    if ($Origen -match '^(Iniciar-Escaneo|Revisar-Escaneo|Procesar-ResultadosHardware|Iniciar-Monitoreo)') { return 'Hardware' }
+    if ($Origen -match '^(Iniciar-Escaneo|Revisar-Escaneo|Procesar-ResultadosHardware|Iniciar-Monitoreo|Detener-Monitoreo)') { return 'Hardware' }
     if ($Origen -match 'Camara') { return 'Camara' }
     if ($Origen -match '^(Show-Prueba|Accion-Probar|Accion-DiagnosticoCompleto|Accion-VerDetallesPantalla)') { return 'Prueba de diagnostico' }
     if ($Origen -match '^(Accion-DescargarISO|Get-EnlaceDescarga|Descargar-ArchivoConProgreso|Accion-DescargarInstalarControladorFaltante|Accion-InstalarControladorDesdeArchivo)') { return 'Descarga de archivos' }
@@ -1167,7 +1192,7 @@ function Global:Get-SolucionSugeridaError {
 function Global:Add-RegistroError {
     param(
         [string]$Tipo = 'ERROR', [string]$Categoria = 'Programa general', [string]$Origen = 'Desconocido',
-        [string]$Mensaje, [string]$Solucion = '', [string]$Detalle = '', $Momento = $null
+        [string]$Mensaje, [string]$Solucion = '', [string]$Detalle = '', $Momento = $null, [int]$Notif = -1
     )
     try {
         $ahora = if ($Momento) { [datetime]$Momento } else { Get-Date }
@@ -1183,12 +1208,25 @@ function Global:Add-RegistroError {
             }
         }
         $hora = if ($ahora.Date -eq (Get-Date).Date) { $ahora.ToString('HH:mm:ss') } else { $ahora.ToString('dd/MM HH:mm') }
-        $Script:RegistroErrores.Add([PSCustomObject]@{
+        $entradaNueva = [PSCustomObject]@{
             Hora = $hora; Fecha = $ahora.ToString('yyyy-MM-dd HH:mm:ss'); Momento = $ahora
             Tipo = $Tipo; Categoria = $Categoria; Origen = $Origen; Mensaje = $Mensaje
             Solucion = $(if ($Solucion) { $Solucion } else { Get-SolucionSugeridaError -Categoria $Categoria -Mensaje $Mensaje -Origen $Origen })
             Detalle = $Detalle; Veces = 1
-        }) | Out-Null
+        }
+        $Script:RegistroErrores.Add($entradaNueva) | Out-Null
+        # Notificacion flotante: errores nuevos y recientes (los avisos solo si son de hardware, energia, congelamiento, etc.)
+        try {
+            if ($Global:NotifActiva -and ($Tipo -eq 'ERROR' -or $Tipo -eq 'AVISO')) {
+                $debe = $false
+                if ($Notif -eq 1) { $debe = $true }
+                elseif ($Notif -eq -1) {
+                    $reciente = ((Get-Date) - $ahora).TotalMinutes -lt 15
+                    $debe = $reciente -and $Categoria -ne 'Rendimiento (lentitud)' -and ($Tipo -eq 'ERROR' -or ($Global:CategoriasNotif -contains $Categoria))
+                }
+                if ($debe) { Show-NotificacionError -Entrada $entradaNueva }
+            }
+        } catch {}
     } catch {}
 }
 
@@ -1207,7 +1245,6 @@ $Script:ScanHardwareSB = {
         @{ P='stornvme'; Id=$null; C='SSD NVMe'; S='El SSD NVMe reporto problemas. Actualiza el firmware y el driver NVMe, y revisa la temperatura y el estado SMART.' },
         @{ P='storahci'; Id=$null; C='Controlador SATA (AHCI)'; S='El controlador SATA reporto problemas. Revisa cables/puertos del disco y actualiza el driver de chipset/almacenamiento.' },
         @{ P='volmgr'; Id=$null; C='Administrador de volumenes'; S='Windows tuvo problemas con un volumen (volcado o disco). Revisa el disco y la configuracion del archivo de paginacion.' },
-        @{ P='Microsoft-Windows-Kernel-Power'; Id=@(41); C='Apagado inesperado'; S='El equipo se reinicio sin apagarse correctamente: corte de energia, fuente de poder fallando, sobrecalentamiento o pantalla azul. Revisa temperaturas, fuente y la pestaña BSOD.' },
         @{ P='Display'; Id=@(4101); C='Controlador de video'; S='El driver de video dejo de responder y se recupero. Reinstala el driver de video, quita overclock y revisa la temperatura de la GPU.' },
         @{ P='nvlddmkm'; Id=$null; C='GPU NVIDIA'; S='El driver de NVIDIA reporto errores. Reinstala el driver de forma limpia y revisa temperaturas/alimentacion.' },
         @{ P='Microsoft-Windows-Kernel-PnP'; Id=@(219); C='Dispositivo / controlador'; S='Windows no pudo cargar un controlador. Actualiza o reinstala el driver del dispositivo indicado.' },
@@ -1295,16 +1332,22 @@ $Script:HwTimerPoll = $null
 $Script:HwTimerVivo = $null
 
 function Global:Procesar-ResultadosHardware {
-    param($Lista)
-    $nuevos = 0
+    param($Lista, [bool]$Resumen = $false)
+    $nuevos = 0; $antiguos = 0; $antErr = 0
     foreach ($r in @($Lista)) {
         if (-not $r -or -not $r.Clave) { continue }
         if ($Script:HwVistos.ContainsKey("$($r.Clave)")) { continue }
         $Script:HwVistos["$($r.Clave)"] = $true
         $mom = try { [datetime]$r.Momento } catch { Get-Date }
-        Add-RegistroError -Tipo "$($r.Tipo)" -Categoria 'Hardware' -Origen "$($r.Origen)" -Mensaje "$($r.Mensaje)" -Solucion "$($r.Solucion)" -Momento $mom
+        $cat = if ($r.PSObject.Properties['Categoria'] -and $r.Categoria) { "$($r.Categoria)" } else { 'Hardware' }
+        $notif = -1
+        if ($r.PSObject.Properties['Forzar'] -and $r.Forzar) { $notif = 1 }
+        elseif ($r.PSObject.Properties['Notificar'] -and -not $r.Notificar) { $notif = 0 }
+        Add-RegistroError -Tipo "$($r.Tipo)" -Categoria $cat -Origen "$($r.Origen)" -Mensaje "$($r.Mensaje)" -Solucion "$($r.Solucion)" -Momento $mom -Notif $notif
+        if ($notif -eq -1 -and ((Get-Date) - $mom).TotalMinutes -ge 15) { $antiguos++; if ("$($r.Tipo)" -eq 'ERROR') { $antErr++ } }
         $nuevos++
     }
+    if ($Resumen -and $antiguos -gt 0) { try { [void](Notificar-Antiguos -N $antiguos -Err $antErr) } catch {} }
     $Script:HwUltimoEscaneo = Get-Date
     return $nuevos
 }
@@ -1324,7 +1367,7 @@ function Global:Revisar-EscaneoHardware {
     $res = $null
     try { $res = $s.PS.EndInvoke($s.H) } catch { Write-Log "El escaneo de hardware fallo: $($_.Exception.Message)" -Tipo AVISO }
     finally { try { $s.PS.Dispose() } catch {}; $Script:HwScan = $null; $Script:HwTimerPoll.Stop() }
-    $n = Procesar-ResultadosHardware -Lista $res
+    $n = Procesar-ResultadosHardware -Lista $res -Resumen (-not $s.Manual)
     if ($s.Manual) { Write-Log "Escaneo de hardware completado: $n hallazgo(s) nuevo(s)." -Tipo $(if ($n -gt 0) { 'AVISO' } else { 'OK' }) }
     try { Cargar-RegistroErrores } catch {}
     if ($s.Manual) {
@@ -1633,7 +1676,7 @@ function Global:Registrar-Lentitud {
         [void]$Global:EventosLentitud.Add(@{ Hora = $ahora; Tipo = $Tipo; Texto = $msg })
         if ($esAviso) {
             Write-Log "$icono $msg Sistema: $($an.Resumen)" -Tipo AVISO -SinRegistro
-            Add-RegistroError -Tipo 'AVISO' -Categoria 'Rendimiento (lentitud)' -Origen 'Monitor de lentitud' -Mensaje $msg -Solucion $sol -Detalle $detalle
+            Add-RegistroError -Tipo 'AVISO' -Categoria 'Rendimiento (lentitud)' -Origen 'Monitor de lentitud' -Mensaje $msg -Solucion $sol -Detalle $detalle -Notif $(if ($Tipo -eq 'Interfaz' -and $seg -ge 5) { 1 } else { 0 })
             try { if ($window.FindName("GridRegistroErrores")) { Cargar-RegistroErrores } } catch {}
         } else {
             Write-Log "$icono Bloqueo breve de la interfaz ($seg s). $ctx. Sistema: $($an.Resumen)" -Tipo INFO -SinRegistro
@@ -11287,6 +11330,7 @@ function Show-VentanaManual {
             $cb.Foreground = [System.Windows.Media.Brushes]::White
             $cb.Margin = "4"
             $cb.Tag = $item
+            try { $cb.ToolTip = (Texto-AyudaItem $item) } catch {}
             $sp.Children.Add($cb) | Out-Null
             $checkboxes.Add($cb) | Out-Null
         }
@@ -14979,6 +15023,31 @@ Marcar-Arranque 'funciones y recursos'
             </Setter>
         </Style>
         <!-- Barras de desplazamiento delgadas con pulgar neon -->
+    <Style TargetType="ToolTip">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="HasDropShadow" Value="False"/>
+      <Setter Property="Foreground" Value="#FFFFFF"/>
+      <Setter Property="ContentTemplate">
+        <Setter.Value>
+          <DataTemplate>
+            <TextBlock Text="{Binding}" TextWrapping="Wrap" MaxWidth="400" Foreground="#FFFFFF" FontSize="12" LineHeight="18"/>
+          </DataTemplate>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToolTip">
+            <Border Margin="6" Background="#F2101A2E" BorderBrush="#2F7CF6" BorderThickness="1.5" CornerRadius="9" Padding="11,8" SnapsToDevicePixels="True">
+              <Border.Effect>
+                <DropShadowEffect BlurRadius="12" ShadowDepth="2" Opacity="0.55" Color="#000000"/>
+              </Border.Effect>
+              <ContentPresenter/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="ScrollBar">
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="Width" Value="11"/>
@@ -16373,6 +16442,12 @@ Marcar-Arranque 'funciones y recursos'
                                     <ComboBoxItem Content="Perfiles de optimizacion"/>
                                     <ComboBoxItem Content="Programa general"/>
                                     <ComboBoxItem Content="Rendimiento (lentitud)"/>
+                                    <ComboBoxItem Content="Apagado inesperado"/>
+                                    <ComboBoxItem Content="Pantalla azul"/>
+                                    <ComboBoxItem Content="Congelamiento"/>
+                                    <ComboBoxItem Content="Bateria / energia"/>
+                                    <ComboBoxItem Content="Aplicacion / servicio"/>
+                                    <ComboBoxItem Content="Controlador (driver)"/>
                                 </ComboBox>
                                 <TextBlock Text="Tipo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <ComboBox x:Name="CmbFiltroTipoError" Width="140">
@@ -16390,9 +16465,9 @@ Marcar-Arranque 'funciones y recursos'
                                 <Button x:Name="BtnExportarPdfErrores" Content="📄 Exportar en PDF el informe de errores" Width="300" Height="42" FontSize="12" BorderBrush="#4CD964"/>
                                 <Button x:Name="BtnLimpiarErrores" Content="🗑️ Limpiar registro" Width="160" Height="42" FontSize="12" BorderBrush="#A85050"/>
                             </WrapPanel>
-                            <CheckBox x:Name="ChkMonitoreoVivo" Content="📡 Monitoreo en vivo del hardware (revisa cada 3 minutos mientras el programa este abierto)" Foreground="White" Margin="0,12,0,0" FontSize="12"/>
+                            <CheckBox x:Name="ChkMonitoreoVivo" Content="📡 Monitoreo en tiempo real con notificaciones flotantes (errores de programas, controladores y hardware, apagados por falta de energia o bateria, congelamientos y problemas de carga de la bateria)" Foreground="White" Margin="0,12,0,0" FontSize="12"/>
                             <CheckBox x:Name="ChkMonitorLentitud" IsChecked="True" Content="🐢 Detectar lentitud automaticamente (al abrir el programa, en la interfaz y en cada prueba) e indicar que la causa" Foreground="White" Margin="0,8,0,0" FontSize="12"/>
-                            <TextBlock x:Name="TxtEstadoMonitor" Foreground="#7C93BD" FontSize="12" Margin="0,4,0,0" Text="Monitoreo en vivo: apagado."/>
+                            <TextBlock x:Name="TxtEstadoMonitor" Foreground="#7C93BD" FontSize="12" Margin="0,4,0,0" Text="Monitoreo en tiempo real: iniciando..."/>
                             <TextBlock x:Name="TxtResumenErrores" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" Margin="0,8,0,0"/>
                         </StackPanel>
                     </Border>
@@ -16648,7 +16723,7 @@ Marcar-Arranque 'funciones y recursos'
                         <Border Style="{StaticResource TarjetaSeccion}">
                             <StackPanel>
                                 <TextBlock Text="✨ Novedades de esta version" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
-                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🎨 Nueva interfaz neon: borde de ventana animado con degradado azul con blanco que fluye, fondo translucido con luces suaves en movimiento y barra de titulo propia (minimizar, maximizar, cerrar).&#10;✨ Boton de la barra de titulo para apagar o encender los efectos animados (modo rendimiento).&#10;☰ Panel lateral de navegacion: oculto al abrir; pulsa MENU para elegir una pestaña y se esconde solo (Esc tambien lo cierra).&#10;🔘 Todos los botones, campos de texto, tablas y barras de desplazamiento con estilo neon redondeado y translucido.&#10;📊 Barras de progreso animadas, con brillo que las recorre, aura y porcentaje en vivo.&#10;⬅ Boton 'Volver' en todas las ventanas que se abren.&#10;🧩 Controladores: el explorador ahora abre ventanas con listas rapidas (todos, que necesitan atencion, faltantes) y se agrego la busqueda de controladores obsoletos o no compatibles para seleccionarlos y borrarlos con copia de seguridad.&#10;🗑️ Programas: 'Desinstalar programas' abre una ventana con la lista de programas instalados, con buscador y los botones 'Desinstalar sin dejar rastros' y 'Forzar desinstalacion'.&#10;🛠️ Pestaña Modificacion: camara (rotar/voltear), pantalla (frecuencia de actualizacion), teclado, parlante y almacenamiento.&#10;🩺 Diagnostico ampliado: camara, teclado, microfono, altavoces, pantalla, RAM, almacenamiento, ventiladores, GPU, mouse, bateria, red, temperatura, arranque, Bluetooth, USB y diagnostico completo automatico.&#10;🚀 Ejecucion desde GitHub con un solo comando en cualquier equipo (ver abajo).&#10;📷 Camara en su propia ventana (Diagnostico y Modificacion): eliges camara y resolucion, rotas, volteas, capturas fotos y, si no llega imagen, el programa prueba otras resoluciones solo (la primera vez descarga un componente; requiere permiso de camara en Windows).&#10;🗑️ Quitar apps de Windows (Perfiles de optimizacion): lista las apps incluidas, incluida Microsoft Store, y las desinstala.&#10;🎞️ Mas animaciones: entrada escalonada de paneles, transicion entre pestañas, botones con zoom y efecto de respiracion.&#10;⚡ Perfiles de optimizacion mejorados (Bajo consumo, Equipo moderno y Gamer): ahora quitan animaciones y sombras al instante, desactivan programas de inicio no esenciales, liberan RAM, ponen la CPU a maximo rendimiento y, al terminar, muestran una ventana con el ANTES y DESPUES (RAM, procesos, hilos, servicios, inicio, disco y cada ajuste).&#10;💀 BSOD: boton 'Explicar error seleccionado' (o doble clic) con el motivo de la pantalla azul y los pasos para solucionarla; catalogo de 45 codigos consultable aunque no tengas historial.&#10;🐞 Monitoreo de errores renovado: errores del programa y de hardware (visor de sucesos, S.M.A.R.T., temperatura, bateria, dispositivos), contadores, filtros, solucion sugerida por cada registro y monitoreo en vivo opcional.&#10;🩺 Diagnostico con mas pruebas: rendimiento de CPU, informacion del hardware, dispositivos de audio, Wi-Fi, velocidad de Internet, dispositivos con problemas, eventos criticos y estado de Windows; pruebas anteriores reforzadas con veredictos y resumen final, mas botones para copiar o guardar el informe."/>
+                                <TextBlock Foreground="White" TextWrapping="Wrap" LineHeight="22" Text="🎨 Nueva interfaz neon: borde de ventana animado con degradado azul con blanco que fluye, fondo translucido con luces suaves en movimiento y barra de titulo propia (minimizar, maximizar, cerrar).&#10;✨ Boton de la barra de titulo para apagar o encender los efectos animados (modo rendimiento).&#10;☰ Panel lateral de navegacion: oculto al abrir; pulsa MENU para elegir una pestaña y se esconde solo (Esc tambien lo cierra).&#10;🔘 Todos los botones, campos de texto, tablas y barras de desplazamiento con estilo neon redondeado y translucido.&#10;📊 Barras de progreso animadas, con brillo que las recorre, aura y porcentaje en vivo.&#10;⬅ Boton 'Volver' en todas las ventanas que se abren.&#10;🧩 Controladores: el explorador ahora abre ventanas con listas rapidas (todos, que necesitan atencion, faltantes) y se agrego la busqueda de controladores obsoletos o no compatibles para seleccionarlos y borrarlos con copia de seguridad.&#10;🗑️ Programas: 'Desinstalar programas' abre una ventana con la lista de programas instalados, con buscador y los botones 'Desinstalar sin dejar rastros' y 'Forzar desinstalacion'.&#10;🛠️ Pestaña Modificacion: camara (rotar/voltear), pantalla (frecuencia de actualizacion), teclado, parlante y almacenamiento.&#10;🩺 Diagnostico ampliado: camara, teclado, microfono, altavoces, pantalla, RAM, almacenamiento, ventiladores, GPU, mouse, bateria, red, temperatura, arranque, Bluetooth, USB y diagnostico completo automatico.&#10;🚀 Ejecucion desde GitHub con un solo comando en cualquier equipo (ver abajo).&#10;📷 Camara en su propia ventana (Diagnostico y Modificacion): eliges camara y resolucion, rotas, volteas, capturas fotos y, si no llega imagen, el programa prueba otras resoluciones solo (la primera vez descarga un componente; requiere permiso de camara en Windows).&#10;🗑️ Quitar apps de Windows (Perfiles de optimizacion): lista las apps incluidas, incluida Microsoft Store, y las desinstala.&#10;🎞️ Mas animaciones: entrada escalonada de paneles, transicion entre pestañas, botones con zoom y efecto de respiracion.&#10;⚡ Perfiles de optimizacion mejorados (Bajo consumo, Equipo moderno y Gamer): ahora quitan animaciones y sombras al instante, desactivan programas de inicio no esenciales, liberan RAM, ponen la CPU a maximo rendimiento y, al terminar, muestran una ventana con el ANTES y DESPUES (RAM, procesos, hilos, servicios, inicio, disco y cada ajuste).&#10;💀 BSOD: boton 'Explicar error seleccionado' (o doble clic) con el motivo de la pantalla azul y los pasos para solucionarla; catalogo de 45 codigos consultable aunque no tengas historial.&#10;🐞 Monitoreo de errores renovado: errores del programa y de hardware (visor de sucesos, S.M.A.R.T., temperatura, bateria, dispositivos), contadores, filtros, solucion sugerida por cada registro y monitoreo en vivo opcional.&#10;🩺 Diagnostico con mas pruebas: rendimiento de CPU, informacion del hardware, dispositivos de audio, Wi-Fi, velocidad de Internet, dispositivos con problemas, eventos criticos y estado de Windows; pruebas anteriores reforzadas con veredictos y resumen final, mas botones para copiar o guardar el informe.&#10;📡 Monitoreo en tiempo real automatico con notificaciones flotantes: al abrir el programa vigila errores de programas, servicios, controladores y hardware, apagados inesperados (falta de energia o bateria), congelamientos y problemas de carga de la bateria. Se puede desactivar en Registro de errores."/>
                             </StackPanel>
                         </Border>
 
@@ -17590,29 +17665,564 @@ function Global:Cargar-RegistroErrores {
     $window.FindName("TxtResumenErrores").Text = "Mostrando $($listaOrdenada.Count) de $($todos.Count) registro(s) ($totalErrores error(es), $totalAvisos aviso(s))."
 }
 
+# ---------------------------------------------------------------------------
+#  MONITOREO EN TIEMPO REAL + NOTIFICACIONES FLOTANTES
+#  Al abrir el programa vigila: errores de programas y servicios, controladores,
+#  hardware, apagados inesperados (falta de energia / bateria), congelamientos y
+#  problemas de carga de la bateria. Cada hallazgo nuevo se anota en el registro de
+#  errores y aparece como una notificacion flotante. Se puede apagar con la casilla
+#  de la pestaña Registro de errores (la eleccion se recuerda).
+# ---------------------------------------------------------------------------
+$Global:NotifActiva = $true
+$Global:CfgCargando = $false
+$Global:CategoriasNotif = @('Hardware','Apagado inesperado','Pantalla azul','Congelamiento','Bateria / energia','Aplicacion / servicio','Controlador (driver)')
+$Global:ToastAbiertos = New-Object System.Collections.ArrayList
+$Global:ToastCola = New-Object System.Collections.ArrayList
+$Global:ToastUltimos = @{}
+$Global:ToastProcesando = $false
+$Global:ResumenAntiguos = @{ N = 0; Err = 0; Timer = $null }
+$Global:ConfigRuta = Join-Path $env:LOCALAPPDATA 'TheDragonTool'
+$Global:VivoEstado = [hashtable]::Synchronized(@{ Hist = (New-Object System.Collections.ArrayList); NR = @{}; NoCargaDesde = $null; DescDesde = $null; TeniaBat = $false })
+$Script:VivoScan = $null
+$Script:VivoTimer = $null
+$Script:VivoPoll = $null
+$Script:VivoUlt = $null
+$Script:VivoUltimo = $null
+
+function Global:Leer-ConfigDragon {
+    try {
+        $f = Join-Path $Global:ConfigRuta 'config.json'
+        if (Test-Path -LiteralPath $f) { return (Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json) }
+    } catch {}
+    return $null
+}
+
+function Global:Guardar-ConfigDragon {
+    param([bool]$Monitoreo)
+    try {
+        if (-not (Test-Path -LiteralPath $Global:ConfigRuta)) { New-Item -ItemType Directory -Path $Global:ConfigRuta -Force | Out-Null }
+        (@{ Monitoreo = $Monitoreo } | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $Global:ConfigRuta 'config.json') -Encoding UTF8
+    } catch {}
+}
+
+# Ultimo dato de energia que dejo el programa la vez anterior (sirve para saber como se apago el equipo)
+function Global:Leer-SnapEnergia {
+    try {
+        $f = Join-Path $Global:ConfigRuta 'energia.json'
+        if (-not (Test-Path -LiteralPath $f)) { return $null }
+        $o = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @{ T = [datetime]$o.T; Pct = [int]$o.Pct; AC = [bool]$o.AC; Bat = [bool]$o.Bat; Cierre = [bool]$o.Cierre }
+    } catch { return $null }
+}
+
+# Al cerrar el programa con normalidad se anota, para no confundir ese cierre con un apagado brusco
+function Global:Marcar-CierreEnergia {
+    try {
+        $f = Join-Path $Global:ConfigRuta 'energia.json'
+        if (-not (Test-Path -LiteralPath $f)) { return }
+        $o = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json
+        $o.Cierre = $true
+        ($o | ConvertTo-Json) | Set-Content -LiteralPath $f -Encoding UTF8
+    } catch {}
+}
+
+# ----- Notificaciones flotantes --------------------------------------------
+function Global:Reposicionar-Toasts {
+    try {
+        $wa = [System.Windows.SystemParameters]::WorkArea
+        $y = $wa.Bottom - 6
+        for ($i = $Global:ToastAbiertos.Count - 1; $i -ge 0; $i--) {
+            $t = $Global:ToastAbiertos[$i]
+            $h = $t.ActualHeight; if ($h -le 0) { $h = 110 }
+            $wd = $t.ActualWidth; if ($wd -le 0) { $wd = 390 }
+            $y -= $h
+            $t.Left = $wa.Right - $wd - 6
+            $t.Top = $y
+        }
+    } catch {}
+}
+
+function Global:Mostrar-RegistroDesdeToast {
+    param($Entrada = $null)
+    try {
+        if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { $window.WindowState = [System.Windows.WindowState]::Normal }
+        [void]$window.Activate()
+        $tc = $window.FindName('TabControlPrincipal')
+        foreach ($ti in $tc.Items) { if ("$($ti.Header)" -like '*Registro de errores*') { $tc.SelectedItem = $ti; break } }
+        Cargar-RegistroErrores
+        if ($Entrada) {
+            $g = $window.FindName('GridRegistroErrores')
+            foreach ($i in @($g.ItemsSource)) {
+                if ([object]::ReferenceEquals($i, $Entrada)) { $g.SelectedItem = $i; $g.ScrollIntoView($i); break }
+            }
+        }
+    } catch {}
+}
+
+function Global:Crear-VentanaToast {
+    param($Item)
+    $bc = New-Object System.Windows.Media.BrushConverter
+    $color = switch ($Item.Tipo) { 'ERROR' { '#FF5C5C' } 'AVISO' { '#FFC857' } default { '#2F7CF6' } }
+    $icono = switch ($Item.Tipo) { 'ERROR' { [string][char]0x26D4 } 'AVISO' { [string][char]0x26A0 } default { [string][char]0x2139 } }
+    $w = New-Object System.Windows.Window
+    $w.WindowStyle = [System.Windows.WindowStyle]::None
+    $w.AllowsTransparency = $true
+    $w.Background = [System.Windows.Media.Brushes]::Transparent
+    $w.Topmost = $true
+    $w.ShowInTaskbar = $false
+    $w.ShowActivated = $false
+    $w.ResizeMode = [System.Windows.ResizeMode]::NoResize
+    $w.SizeToContent = [System.Windows.SizeToContent]::Height
+    $w.Width = 390
+    $w.Opacity = 0
+
+    $borde = New-Object System.Windows.Controls.Border
+    $borde.Margin = New-Object System.Windows.Thickness(10)
+    $borde.CornerRadius = New-Object System.Windows.CornerRadius(12)
+    $borde.Background = $bc.ConvertFromString('#F2101A2E')
+    $borde.BorderBrush = $bc.ConvertFromString($color)
+    $borde.BorderThickness = New-Object System.Windows.Thickness(2)
+    $borde.Padding = New-Object System.Windows.Thickness(12, 10, 12, 10)
+    $borde.Cursor = [System.Windows.Input.Cursors]::Hand
+    $sombra = New-Object System.Windows.Media.Effects.DropShadowEffect
+    $sombra.BlurRadius = 16; $sombra.ShadowDepth = 2; $sombra.Opacity = 0.6
+    $sombra.Color = [System.Windows.Media.Colors]::Black
+    $borde.Effect = $sombra
+
+    $g = New-Object System.Windows.Controls.Grid
+    $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = [System.Windows.GridLength]::Auto
+    $c2 = New-Object System.Windows.Controls.ColumnDefinition; $c2.Width = New-Object System.Windows.GridLength(1, [System.Windows.GridUnitType]::Star)
+    $c3 = New-Object System.Windows.Controls.ColumnDefinition; $c3.Width = [System.Windows.GridLength]::Auto
+    [void]$g.ColumnDefinitions.Add($c1); [void]$g.ColumnDefinitions.Add($c2); [void]$g.ColumnDefinitions.Add($c3)
+
+    $tIcono = New-Object System.Windows.Controls.TextBlock
+    $tIcono.Text = $icono; $tIcono.FontSize = 24
+    $tIcono.Foreground = $bc.ConvertFromString($color)
+    $tIcono.Margin = New-Object System.Windows.Thickness(0, 0, 10, 0)
+    $tIcono.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
+    [System.Windows.Controls.Grid]::SetColumn($tIcono, 0)
+
+    $pila = New-Object System.Windows.Controls.StackPanel
+    $tTitulo = New-Object System.Windows.Controls.TextBlock
+    $tTitulo.Text = "$($Item.Titulo)"; $tTitulo.FontSize = 13
+    $tTitulo.FontWeight = [System.Windows.FontWeights]::Bold
+    $tTitulo.Foreground = [System.Windows.Media.Brushes]::White
+    $tTitulo.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+    $msg = "$($Item.Mensaje)"; if ($msg.Length -gt 230) { $msg = $msg.Substring(0, 230) + '...' }
+    $tMsg = New-Object System.Windows.Controls.TextBlock
+    $tMsg.Text = $msg; $tMsg.FontSize = 12
+    $tMsg.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $tMsg.Foreground = $bc.ConvertFromString('#D8E3F7')
+    $tMsg.Margin = New-Object System.Windows.Thickness(0, 3, 0, 0)
+    $tPista = New-Object System.Windows.Controls.TextBlock
+    $tPista.Text = "Clic para ver como solucionarlo  -  $((Get-Date).ToString('HH:mm:ss'))"
+    $tPista.FontSize = 10
+    $tPista.Foreground = $bc.ConvertFromString('#7C93BD')
+    $tPista.Margin = New-Object System.Windows.Thickness(0, 5, 0, 0)
+    [void]$pila.Children.Add($tTitulo); [void]$pila.Children.Add($tMsg); [void]$pila.Children.Add($tPista)
+    [System.Windows.Controls.Grid]::SetColumn($pila, 1)
+
+    $cerrarX = New-Object System.Windows.Controls.TextBlock
+    $cerrarX.Text = [string][char]0x2715; $cerrarX.FontSize = 14
+    $cerrarX.Foreground = $bc.ConvertFromString('#9FB3D9')
+    $cerrarX.Margin = New-Object System.Windows.Thickness(8, 0, 0, 0)
+    $cerrarX.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
+    $cerrarX.Cursor = [System.Windows.Input.Cursors]::Hand
+    [System.Windows.Controls.Grid]::SetColumn($cerrarX, 2)
+
+    [void]$g.Children.Add($tIcono); [void]$g.Children.Add($pila); [void]$g.Children.Add($cerrarX)
+    $borde.Child = $g
+    $w.Content = $borde
+
+    $seg = if ([int]$Item.Segundos -gt 0) { [int]$Item.Segundos } elseif ($Item.Tipo -eq 'ERROR') { 14 } else { 10 }
+    $tm = New-Object System.Windows.Threading.DispatcherTimer
+    $tm.Interval = [TimeSpan]::FromSeconds($seg)
+    $entrada = $Item.Entrada
+    $tm.Add_Tick({ try { $tm.Stop() } catch {}; try { $w.Close() } catch {} }.GetNewClosure())
+    $borde.Add_MouseEnter({ try { $tm.Stop() } catch {} }.GetNewClosure())
+    $borde.Add_MouseLeave({ try { $tm.Start() } catch {} }.GetNewClosure())
+    $cerrarX.Add_MouseLeftButtonUp({ param($s, $e) $e.Handled = $true; try { $tm.Stop() } catch {}; try { $w.Close() } catch {} }.GetNewClosure())
+    $borde.Add_MouseLeftButtonUp({ try { $tm.Stop() } catch {}; try { $w.Close() } catch {}; try { Mostrar-RegistroDesdeToast -Entrada $entrada } catch {} }.GetNewClosure())
+    $w.Add_Closed({
+        try { $tm.Stop() } catch {}
+        try { [void]$Global:ToastAbiertos.Remove($w) } catch {}
+        try { Reposicionar-Toasts } catch {}
+        try { Procesar-ColaToasts } catch {}
+    }.GetNewClosure())
+
+    [void]$Global:ToastAbiertos.Add($w)
+    $wa = [System.Windows.SystemParameters]::WorkArea
+    $w.Left = $wa.Right - $w.Width - 6
+    $w.Top = $wa.Bottom - 130
+    $w.Show()
+    try { $w.UpdateLayout() } catch {}
+    Reposicionar-Toasts
+    $anim = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $anim.From = 0.0; $anim.To = 1.0
+    $anim.Duration = New-Object System.Windows.Duration([TimeSpan]::FromMilliseconds(280))
+    $w.BeginAnimation([System.Windows.Window]::OpacityProperty, $anim)
+    $tm.Start()
+}
+
+function Global:Procesar-ColaToasts {
+    if ($Global:ToastProcesando -or -not $Global:NotifActiva) { return }
+    $Global:ToastProcesando = $true
+    try {
+        foreach ($c in @($Global:ToastAbiertos.ToArray())) { if (-not $c.IsVisible) { [void]$Global:ToastAbiertos.Remove($c) } }
+        # Si se acumulan muchas alertas se resumen en una sola para no tapar la pantalla
+        if ($Global:ToastCola.Count -gt 4) {
+            $n = $Global:ToastCola.Count
+            $hayErr = (@($Global:ToastCola.ToArray() | Where-Object { $_.Tipo -eq 'ERROR' })).Count -gt 0
+            $Global:ToastCola.Clear()
+            [void]$Global:ToastCola.Add(@{ Entrada = $null; Tipo = $(if ($hayErr) { 'ERROR' } else { 'AVISO' }); Titulo = "$n alertas nuevas"; Mensaje = 'Se detectaron varios problemas seguidos. Haz clic para ver la lista completa en el Registro de errores.'; Segundos = 0 })
+        }
+        while ($Global:ToastCola.Count -gt 0 -and $Global:ToastAbiertos.Count -lt 3) {
+            $it = $Global:ToastCola[0]; $Global:ToastCola.RemoveAt(0)
+            try { Crear-VentanaToast -Item $it } catch {}
+        }
+    } catch {} finally { $Global:ToastProcesando = $false }
+}
+
+function Global:Show-NotificacionError {
+    param($Entrada = $null, [string]$Tipo = 'ERROR', [string]$Titulo = '', [string]$Mensaje = '', [int]$Segundos = 0)
+    try {
+        if (-not $Global:NotifActiva) { return }
+        if ($Entrada) {
+            $Tipo = "$($Entrada.Tipo)"
+            if (-not $Titulo) { $Titulo = if ("$($Entrada.Categoria)" -eq 'Rendimiento (lentitud)') { 'El programa se congelo' } else { "$($Entrada.Categoria)" } }
+            if (-not $Mensaje) { $Mensaje = "$($Entrada.Mensaje)" }
+        }
+        $ahora = Get-Date
+        $clave = "$Tipo|$Titulo|$Mensaje"
+        if ($Global:ToastUltimos.ContainsKey($clave) -and ($ahora - $Global:ToastUltimos[$clave]).TotalSeconds -lt 60) { return }
+        if ($Global:ToastUltimos.Count -gt 200) { $Global:ToastUltimos.Clear() }
+        $Global:ToastUltimos[$clave] = $ahora
+        [void]$Global:ToastCola.Add(@{ Entrada = $Entrada; Tipo = $Tipo; Titulo = $Titulo; Mensaje = $Mensaje; Segundos = $Segundos })
+        Procesar-ColaToasts
+    } catch {}
+}
+
+# Junta los hallazgos viejos (de horas atras) en un solo aviso, en vez de uno por cada uno
+function Global:Notificar-Antiguos {
+    param([int]$N, [int]$Err)
+    try {
+        $r = $Global:ResumenAntiguos
+        $r.N += $N; $r.Err += $Err
+        if (-not $r.Timer) {
+            $r.Timer = New-Object System.Windows.Threading.DispatcherTimer
+            $r.Timer.Interval = [TimeSpan]::FromSeconds(4)
+            $r.Timer.Add_Tick({
+                $q = $Global:ResumenAntiguos
+                $q.Timer.Stop()
+                $n = [int]$q.N; $e = [int]$q.Err; $q.N = 0; $q.Err = 0
+                if ($n -gt 0) {
+                    Show-NotificacionError -Tipo $(if ($e -gt 0) { 'ERROR' } else { 'AVISO' }) -Titulo 'Problemas detectados en las ultimas horas' -Mensaje "Se registraron $n problema(s) recientes del equipo ($e error(es)). Haz clic para revisarlos y ver como solucionarlos."
+                }
+            })
+        }
+        $r.Timer.Stop(); $r.Timer.Start()
+    } catch {}
+}
+
+# ----- Escaneo en tiempo real (hilo aparte) --------------------------------
+$Script:ScanVivoSB = {
+    param([datetime]$Desde, $Estado, [bool]$Inicio, [string]$RutaSnap, $Previo, [int]$PidPropio)
+    $res = New-Object System.Collections.Generic.List[object]
+    $ahora = Get-Date
+    function Nuevo($Momento, $Tipo, $Cat, $Origen, $Mensaje, $Solucion, $Clave, $Forzar = $false, $Notificar = $true) {
+        $res.Add([PSCustomObject]@{ Momento = $Momento; Tipo = $Tipo; Categoria = $Cat; Origen = $Origen; Mensaje = $Mensaje; Solucion = $Solucion; Clave = $Clave; Forzar = $Forzar; Notificar = $Notificar })
+    }
+    function Corta($t, $n) { $t = "$t"; if ($t.Length -gt $n) { return $t.Substring(0, $n) + '...' } else { return $t } }
+    function Cubo($min) { return [int64][math]::Floor($ahora.Ticks / ($min * 600000000)) }
+
+    # 1) Errores de programas, servicios y controladores (visor de sucesos)
+    $defs = @(
+        @{ L = 'Application'; P = 'Application Error'; Id = @(1000) },
+        @{ L = 'Application'; P = 'Application Hang'; Id = @(1002) },
+        @{ L = 'Application'; P = '.NET Runtime'; Id = @(1026) },
+        @{ L = 'System'; P = 'Service Control Manager'; Id = @(7000, 7001, 7009, 7011, 7022, 7023, 7024, 7026, 7031, 7032, 7034) }
+    )
+    foreach ($d in $defs) {
+        $ev = @()
+        try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = $d.L; ProviderName = $d.P; Id = $d.Id; StartTime = $Desde } -MaxEvents 15 -ErrorAction Stop) } catch { continue }
+        foreach ($e in $ev) {
+            try {
+                $cubo10 = [int64][math]::Floor($e.TimeCreated.Ticks / 6000000000)
+                $linea = Corta ((("$($e.Message)" -split "`r?`n")[0]).Trim()) 230
+                switch ($d.P) {
+                    'Application Error' {
+                        $app = "$($e.Properties[0].Value)"; $mod = "$($e.Properties[3].Value)"; $cod = "$($e.Properties[6].Value)"
+                        $sol = if ($mod -match '(?i)nvlddmkm|nvwgf2|nvoglv|nvd3d|atidxx|atioglxx|amdxx|igd|ig9icd|d3d|dxgi') { "El fallo viene de un componente de video ($mod): reinstala el controlador de la tarjeta grafica (pestaña Controladores)." }
+                               elseif ($mod -match '(?i)ntdll|kernelbase|kernel32') { "Fallo generico del programa: actualiza o reinstala '$app' y ejecuta 'sfc /scannow' para reparar archivos de Windows." }
+                               elseif ($mod -match '(?i)\.dll$') { "Repara o reinstala '$app'. El modulo '$mod' fallo (componente danado, complemento incompatible o controlador)." }
+                               else { "Actualiza o reinstala '$app'. Si se repite, revisa si hay una version mas nueva o un conflicto con otro programa." }
+                        Nuevo $e.TimeCreated 'ERROR' 'Aplicacion / servicio' "Programa: $app" "El programa '$app' se cerro por un error (modulo: $mod, excepcion: $cod)." $sol "app|$app|$mod|$cubo10"
+                    }
+                    'Application Hang' {
+                        $app = "$($e.Properties[0].Value)"
+                        Nuevo $e.TimeCreated 'AVISO' 'Congelamiento' "Programa: $app" "El programa '$app' dejo de responder (se congelo)." "Espera unos segundos; si no se recupera, cierralo desde el Administrador de tareas (Ctrl+Mayus+Esc). Si se repite, actualiza o reinstala el programa y revisa que RAM, disco y CPU no esten saturados." "hang|$app|$cubo10"
+                    }
+                    '.NET Runtime' {
+                        $app = ''; if ("$($e.Message)" -match 'Application:\s*(\S+)') { $app = $Matches[1] }
+                        Nuevo $e.TimeCreated 'ERROR' 'Aplicacion / servicio' "Programa .NET: $app" "Error de .NET en $(if ($app) { "'$app'" } else { 'una aplicacion' }): $linea" "Actualiza o reinstala el programa y verifica que .NET Framework / .NET este actualizado (Windows Update)." "net|$app|$cubo10"
+                    }
+                    default {
+                        $drv = ($e.Id -eq 7026)
+                        $sol = switch ($e.Id) {
+                            7026 { 'Un controlador de arranque no cargo. Actualiza o reinstala el controlador indicado (pestaña Controladores) o desinstala el programa que lo instalo.' }
+                            { $_ -in 7031, 7034 } { 'Un servicio de Windows se cerro por si solo. Reinicialo en services.msc o repara/reinstala el programa que lo usa; si se repite, revisa el Visor de eventos.' }
+                            { $_ -in 7009, 7011 } { 'Un servicio tardo demasiado en responder (equipo lento o servicio trabado). Reinicia el equipo y revisa disco y RAM.' }
+                            default { 'Un servicio o controlador no pudo iniciarse. Reinicia el equipo; si persiste, repara o reinstala el programa o controlador relacionado.' }
+                        }
+                        $tipo = if ($e.Level -le 2) { 'ERROR' } else { 'AVISO' }
+                        Nuevo $e.TimeCreated $tipo $(if ($drv) { 'Controlador (driver)' } else { 'Aplicacion / servicio' }) "Servicio de Windows (Id $($e.Id))" $linea $sol "scm|$($e.Id)|$linea|$cubo10"
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    # 2) Apagado inesperado (solo al abrir): falta de energia, bateria agotada, congelamiento o pantalla azul
+    if ($Inicio) {
+        try {
+            $boot = $null
+            try { $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch {}
+            if (-not $boot) { $boot = $ahora.AddHours(-1) }
+            $k41 = @()
+            try { $k41 = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 41; StartTime = $ahora.AddDays(-7) } -MaxEvents 6 -ErrorAction Stop) } catch {}
+            foreach ($e in $k41) {
+                try {
+                    $dd = @{}
+                    try { $x = [xml]$e.ToXml(); foreach ($n in $x.Event.EventData.Data) { $dd["$($n.Name)"] = "$($n.'#text')" } } catch {}
+                    [int64]$bug = 0; [int64]$pb = 0
+                    [void][int64]::TryParse("$($dd['BugcheckCode'])", [ref]$bug)
+                    [void][int64]::TryParse("$($dd['PowerButtonTimestamp'])", [ref]$pb)
+                    $esUlt = ($e.TimeCreated -ge $boot.AddMinutes(-10)) -and (($ahora - $boot).TotalHours -lt 12)
+                    $ctx = ''
+                    $usoSnap = $false
+                    if ($esUlt -and $Previo -and -not $Previo.Cierre -and $Previo.T -lt $boot) {
+                        $usoSnap = $true
+                        $ctx = " Ultimo dato que registro el programa: $($Previo.T.ToString('dd/MM HH:mm')), bateria al $($Previo.Pct)%, $(if ($Previo.AC) { 'con cargador conectado' } else { 'sin cargador (usando bateria)' })."
+                    }
+                    if ($bug -ne 0) {
+                        Nuevo $e.TimeCreated 'ERROR' 'Pantalla azul' 'Reinicio por error critico' ("El equipo se reinicio por una pantalla azul (codigo 0x{0:X}). Ocurrio el {1}." -f $bug, $e.TimeCreated.ToString('dd/MM HH:mm')) 'Abre la pestaña BSOD para ver la explicacion del codigo. Actualiza drivers (video, chipset, disco), revisa la RAM y las temperaturas.' "apag|$($e.RecordId)" $esUlt
+                    } elseif ($pb -ne 0) {
+                        Nuevo $e.TimeCreated 'ERROR' 'Congelamiento' 'Apagado forzado' "El equipo se congelo y fue apagado a la fuerza manteniendo presionado el boton de encendido (el $($e.TimeCreated.ToString('dd/MM HH:mm')))." 'Revisa temperaturas, RAM (Diagnostico de memoria), estado del disco y actualiza los drivers de video y chipset. Si es frecuente, usa la pestaña Diagnostico.' "apag|$($e.RecordId)" $esUlt
+                    } else {
+                        $causa = 'falta de energia (bateria agotada o corte de luz), falla del cargador/fuente de poder o un congelamiento total'
+                        $sol = 'Conecta siempre el cargador antes de que la bateria baje de 15%. Si el equipo estaba conectado, revisa cargador, enchufe/regleta y fuente de poder; si se repite con bateria cargada, la bateria esta danada o desgastada.'
+                        if ($usoSnap) {
+                            if ($Previo.Bat -and -not $Previo.AC) {
+                                if ($Previo.Pct -le 10) {
+                                    $causa = "bateria agotada: se apago funcionando con bateria al $($Previo.Pct)% y sin cargador"
+                                    $sol = 'Conecta el cargador antes de que la bateria baje de 15% y guarda tu trabajo. Si se apaga con mas de 20% de carga, la bateria esta desgastada.'
+                                } else {
+                                    $causa = "apagado de golpe usando bateria con $($Previo.Pct)% de carga: bateria desgastada o danada, mal contacto de la bateria o falla de la placa"
+                                    $sol = 'Revisa el desgaste de la bateria (Diagnostico > Bateria); si perdio mucha capacidad cambiala. Prueba con el cargador conectado para ver si se repite.'
+                                }
+                            } else {
+                                $causa = 'corte de energia electrica o falla del cargador/fuente de poder: el equipo estaba conectado a la corriente'
+                                $sol = 'Revisa el cargador y su cable, el enchufe o la regleta y la fuente de poder. Un UPS/regulador evita apagones bruscos.'
+                            }
+                        }
+                        Nuevo $e.TimeCreated 'ERROR' 'Apagado inesperado' 'Mal apagado (Kernel-Power 41)' "El equipo se apago de forma brusca el $($e.TimeCreated.ToString('dd/MM HH:mm')) por $causa.$ctx" $sol "apag|$($e.RecordId)" $esUlt
+                    }
+                } catch {}
+            }
+            try {
+                $k6008 = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'EventLog'; Id = 6008; StartTime = $ahora.AddDays(-7) } -MaxEvents 6 -ErrorAction Stop)
+                foreach ($e in $k6008) {
+                    $cerca = @($k41 | Where-Object { [math]::Abs(($_.TimeCreated - $e.TimeCreated).TotalMinutes) -lt 10 })
+                    if ($cerca.Count -gt 0) { continue }
+                    Nuevo $e.TimeCreated 'ERROR' 'Apagado inesperado' 'Mal apagado (EventLog 6008)' (Corta ((("$($e.Message)" -split "`r?`n")[0]).Trim()) 230) 'Windows no se cerro correctamente la ultima vez: puede ser un corte de energia, bateria agotada o un congelamiento. Revisa cargador/bateria y temperaturas.' "apag6008|$($e.RecordId)" ($e.TimeCreated -ge $boot.AddMinutes(-10))
+                }
+            } catch {}
+        } catch {}
+    }
+
+    # 3) Bateria: carga, cargador y estado
+    $pct = -1; $online = $true; $carga = $false; $desc = $false; $tiene = $false
+    try {
+        $bat = Get-CimInstance Win32_Battery -ErrorAction Stop | Select-Object -First 1
+        if ($bat) {
+            $tiene = $true
+            $pct = [int]$bat.EstimatedChargeRemaining
+            $st = [int]$bat.BatteryStatus
+            $online = ($st -in 2, 3, 6, 7, 8, 9, 11)
+            $carga = ($st -in 6, 7, 8, 9)
+            $desc = ($st -in 1, 4, 5)
+            try {
+                $bs = Get-CimInstance -Namespace root/wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1
+                if ($bs) { $online = [bool]$bs.PowerOnline; $carga = [bool]$bs.Charging; $desc = [bool]$bs.Discharging }
+            } catch {}
+            [void]$Estado.Hist.Add(@{ T = $ahora; Pct = $pct; Online = $online; Carga = $carga })
+            while ($Estado.Hist.Count -gt 60) { $Estado.Hist.RemoveAt(0) }
+            $Estado.TeniaBat = $true
+
+            # Conectado pero sin cargar
+            if ($online -and -not $carga -and $st -ne 3 -and $pct -ge 0 -and $pct -lt 95) {
+                if (-not $Estado.NoCargaDesde) { $Estado.NoCargaDesde = $ahora }
+                if (($ahora - $Estado.NoCargaDesde).TotalSeconds -ge 150) {
+                    if ($pct -le 50) {
+                        Nuevo $ahora 'ERROR' 'Bateria / energia' 'Carga de la bateria' "La bateria no esta cargando: el cargador esta conectado pero el nivel sigue en $pct%." 'Revisa que el cargador sea el original y de la potencia correcta, prueba otro enchufe y cable, limpia el puerto de carga y reinicia el equipo. Si sigue igual, puede fallar el cargador, el puerto de carga o la bateria.' "bat|nocarga|$(Cubo 30)" $false $true
+                    } else {
+                        Nuevo $ahora 'AVISO' 'Bateria / energia' 'Carga de la bateria' "El cargador esta conectado pero la bateria no sube ($pct%). Puede ser el limite de carga del fabricante (modo conservacion) o un problema de carga." 'Si no activaste un limite de carga (Lenovo Vantage, MyASUS, HP, Dell Power Manager), revisa el cargador y el puerto de carga.' "bat|nocarga|$(Cubo 30)" $false $false
+                    }
+                }
+            } else { $Estado.NoCargaDesde = $null }
+
+            # Cargando pero el nivel no sube
+            if ($carga -and $pct -lt 90) {
+                $vent = @($Estado.Hist.ToArray() | Where-Object { ($ahora - $_.T).TotalMinutes -le 13 })
+                if ($vent.Count -ge 8 -and (@($vent | Where-Object { -not $_.Carga })).Count -eq 0) {
+                    $p0 = $vent[0]
+                    if (($ahora - $p0.T).TotalMinutes -ge 10 -and $pct -le $p0.Pct) {
+                        Nuevo $ahora 'AVISO' 'Bateria / energia' 'Carga de la bateria' "La carga esta estancada: lleva mas de 10 minutos cargando y el nivel no sube ($pct%)." 'Cierra programas pesados (el equipo consume mas de lo que carga), usa el cargador original y revisa el estado de la bateria. Si se repite, la bateria o el cargador estan fallando.' "bat|estancada|$(Cubo 30)" $false $true
+                    }
+                }
+            }
+
+            # Cargador conectado pero la bateria se descarga
+            if ($online -and $desc) {
+                if (-not $Estado.DescDesde) { $Estado.DescDesde = $ahora }
+                if (($ahora - $Estado.DescDesde).TotalSeconds -ge 120) {
+                    Nuevo $ahora 'AVISO' 'Bateria / energia' 'Carga de la bateria' "El cargador esta conectado pero la bateria se esta descargando ($pct%)." 'El cargador es de menor potencia que la necesaria o esta fallando, o el equipo consume demasiado. Usa el cargador original y cierra programas pesados.' "bat|descarga|$(Cubo 30)" $false $true
+                }
+            } else { $Estado.DescDesde = $null }
+
+            # Estado reportado por la propia bateria
+            $est = "$($bat.Status)"
+            if ($est -in 'Error', 'Degraded', 'Pred Fail', 'NonRecover', 'No Contact', 'Lost Comm') {
+                Nuevo $ahora 'ERROR' 'Bateria / energia' 'Estado de la bateria' "Windows reporta la bateria con problemas (estado: $est)." 'La bateria o su controlador estan fallando. Haz copia de tus datos, actualiza el controlador de bateria (Administrador de dispositivos) y considera reemplazarla.' "bat|estado|$est|$(Cubo 60)" $false $true
+            }
+
+            # Bateria casi agotada sin cargador
+            if (-not $online -and $pct -ge 0 -and $pct -le 7) {
+                Nuevo $ahora 'AVISO' 'Bateria / energia' 'Bateria baja' "Bateria casi agotada ($pct%) y sin cargador: el equipo se apagara en breve." 'Conecta el cargador ahora y guarda tu trabajo para no perder datos ni dañar archivos.' "bat|critica|$(Cubo 20)" $true $true
+            }
+        } elseif ($Estado.TeniaBat) {
+            $Estado.TeniaBat = $false
+            Nuevo $ahora 'ERROR' 'Bateria / energia' 'Bateria no detectada' 'La bateria dejo de detectarse: Windows ya no la ve.' 'Reinicia el equipo, revisa que la bateria este bien conectada y actualiza el controlador de bateria. Si sigue sin verse, la bateria o su conector estan danados.' "bat|perdida|$(Cubo 60)" $false $true
+        }
+    } catch {}
+
+    # 4) Programas congelados ("no responde")
+    try {
+        foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+            try {
+                if ($p.Id -eq $PidPropio) { continue }
+                if ($p.MainWindowHandle -eq [IntPtr]::Zero) { continue }
+                if ($p.Responding) { continue }
+                $k = "$($p.Id)"
+                if (-not $Estado.NR.ContainsKey($k)) {
+                    $Estado.NR[$k] = @{ Desde = $ahora; Avisado = $false; Vista = $ahora }
+                } else {
+                    $inf = $Estado.NR[$k]; $inf.Vista = $ahora
+                    if (-not $inf.Avisado -and ($ahora - $inf.Desde).TotalSeconds -ge 20) {
+                        $inf.Avisado = $true
+                        $tit = Corta $p.MainWindowTitle 60
+                        Nuevo $ahora 'AVISO' 'Congelamiento' "Programa: $($p.ProcessName)" "El programa '$($p.ProcessName)'$(if ($tit) { " ($tit)" }) esta congelado: no responde desde hace mas de 20 segundos." 'Espera unos segundos; si no se recupera, cierralo desde el Administrador de tareas (Ctrl+Mayus+Esc). Si se repite, actualiza o reinstala el programa y revisa que la RAM, el disco y la CPU no esten saturados.' "nr|$($p.Id)|$($p.StartTime.Ticks)"
+                    }
+                }
+            } catch {}
+        }
+        foreach ($k in @($Estado.NR.Keys)) {
+            $inf = $Estado.NR[$k]
+            if (($ahora - $inf.Vista).TotalSeconds -gt 70) { [void]$Estado.NR.Remove($k) }
+        }
+    } catch {}
+
+    # 5) Dato de energia para saber, la proxima vez, como se apago el equipo
+    try {
+        $dir = Split-Path -Parent $RutaSnap
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $snap = @{ T = $ahora.ToString('o'); Pct = $pct; AC = [bool]$online; Bat = [bool]$tiene; Cierre = $false }
+        ($snap | ConvertTo-Json) | Set-Content -LiteralPath $RutaSnap -Encoding UTF8
+    } catch {}
+    $res
+}
+
+function Global:Iniciar-EscaneoVivo {
+    param([bool]$Inicio = $false)
+    if ($Script:VivoScan) { return }
+    try {
+        $ahora = Get-Date
+        $desde = if ($Inicio) { $ahora.AddHours(-24) } elseif ($Script:VivoUlt) { $Script:VivoUlt.AddSeconds(-20) } else { $ahora.AddMinutes(-2) }
+        $prev = if ($Inicio) { Leer-SnapEnergia } else { $null }
+        $ps = [powershell]::Create()
+        $null = $ps.AddScript($Script:ScanVivoSB.ToString()).AddArgument($desde).AddArgument($Global:VivoEstado).AddArgument($Inicio).AddArgument((Join-Path $Global:ConfigRuta 'energia.json')).AddArgument($prev).AddArgument([int]$PID)
+        $Script:VivoScan = @{ PS = $ps; H = $ps.BeginInvoke(); Inicio = $ahora }
+        $Script:VivoUlt = $ahora
+        if (-not $Script:VivoPoll) {
+            $Script:VivoPoll = New-Object System.Windows.Threading.DispatcherTimer
+            $Script:VivoPoll.Interval = [TimeSpan]::FromMilliseconds(500)
+            $Script:VivoPoll.Add_Tick({ Revisar-EscaneoVivo })
+        }
+        $Script:VivoPoll.Start()
+    } catch {
+        $Script:VivoScan = $null
+        Write-Log "No se pudo iniciar el monitoreo en tiempo real: $($_.Exception.Message)" -Tipo AVISO -SinRegistro
+    }
+}
+
+function Global:Revisar-EscaneoVivo {
+    $s = $Script:VivoScan
+    if (-not $s) { if ($Script:VivoPoll) { $Script:VivoPoll.Stop() }; return }
+    if (-not $s.H.IsCompleted) {
+        if (((Get-Date) - $s.Inicio).TotalSeconds -gt 120) {
+            try { $s.PS.Stop(); $s.PS.Dispose() } catch {}
+            $Script:VivoScan = $null; $Script:VivoPoll.Stop()
+        }
+        return
+    }
+    $res = $null
+    try { $res = $s.PS.EndInvoke($s.H) } catch {}
+    finally { try { $s.PS.Dispose() } catch {}; $Script:VivoScan = $null; $Script:VivoPoll.Stop() }
+    $Script:VivoUltimo = Get-Date
+    $n = 0
+    try { $n = Procesar-ResultadosHardware -Lista $res -Resumen $true } catch {}
+    if ($n -gt 0) { try { Cargar-RegistroErrores } catch {} }
+    try { Actualizar-EstadoMonitoreo } catch {}
+}
+
 function Global:Actualizar-EstadoMonitoreo {
     $txt = $window.FindName("TxtEstadoMonitor")
     if (-not $txt) { return }
-    $vivo = ($Script:HwTimerVivo -and $Script:HwTimerVivo.IsEnabled)
-    $ult = if ($Script:HwUltimoEscaneo) { "ultimo escaneo a las $($Script:HwUltimoEscaneo.ToString('HH:mm:ss'))" } else { "aun sin escaneos" }
-    $txt.Text = if ($vivo) { "📡 Monitoreo en vivo: ACTIVO (cada 3 min) - $ult." } else { "Monitoreo en vivo: apagado - $ult." }
+    $activo = ($Script:VivoTimer -and $Script:VivoTimer.IsEnabled)
+    $ult = if ($Script:VivoUltimo) { "ultima revision a las $($Script:VivoUltimo.ToString('HH:mm:ss'))" } else { "aun sin revisiones" }
+    $txt.Text = if ($activo) { "📡 Monitoreo en tiempo real: ACTIVO - vigila programas, controladores, hardware, apagados inesperados, congelamientos y bateria (cada 30 s; hardware cada 3 min) - $ult." } else { "Monitoreo en tiempo real: DESACTIVADO - no se vigilan errores ni se muestran notificaciones." }
 }
 
 function Global:Iniciar-MonitoreoVivo {
+    $Global:NotifActiva = $true
     if (-not $Script:HwTimerVivo) {
         $Script:HwTimerVivo = New-Object System.Windows.Threading.DispatcherTimer
         $Script:HwTimerVivo.Interval = [TimeSpan]::FromMinutes(3)
         $Script:HwTimerVivo.Add_Tick({ Iniciar-EscaneoHardware -Horas 2 -Manual $false -IncluirEstado $true; Actualizar-EstadoMonitoreo })
     }
+    if (-not $Script:VivoTimer) {
+        $Script:VivoTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $Script:VivoTimer.Interval = [TimeSpan]::FromSeconds(30)
+        $Script:VivoTimer.Add_Tick({ Iniciar-EscaneoVivo })
+    }
     $Script:HwTimerVivo.Start()
-    Write-Log "Monitoreo en vivo del hardware activado." -Tipo OK
+    $Script:VivoTimer.Start()
+    Write-Log "Monitoreo en tiempo real activado (programas, controladores, hardware, apagados, congelamientos y bateria)." -Tipo OK -SinRegistro
     Iniciar-EscaneoHardware -Horas 24 -Manual $false -IncluirEstado $true
+    Iniciar-EscaneoVivo -Inicio $true
+    if (-not $Global:CfgCargando) { Guardar-ConfigDragon -Monitoreo $true }
     Actualizar-EstadoMonitoreo
+    Show-NotificacionError -Tipo 'INFO' -Titulo 'Monitoreo en tiempo real activo' -Mensaje 'Vigilando errores de programas, controladores y hardware, apagados inesperados, congelamientos y problemas de carga de la bateria. Puedes desactivarlo en la pestaña Registro de errores.' -Segundos 8
 }
 
 function Global:Detener-MonitoreoVivo {
     if ($Script:HwTimerVivo) { $Script:HwTimerVivo.Stop() }
-    Write-Log "Monitoreo en vivo del hardware desactivado." -Tipo INFO
+    if ($Script:VivoTimer) { $Script:VivoTimer.Stop() }
+    $Global:NotifActiva = $false
+    try { $Global:ToastCola.Clear() } catch {}
+    try { foreach ($t in @($Global:ToastAbiertos.ToArray())) { $t.Close() } } catch {}
+    Write-Log "Monitoreo en tiempo real desactivado." -Tipo INFO -SinRegistro
+    if (-not $Global:CfgCargando) { Guardar-ConfigDragon -Monitoreo $false }
     Actualizar-EstadoMonitoreo
 }
 
@@ -18147,6 +18757,22 @@ $Script:TimerInicio.Start()
 Actualizar-PanelInicio
 try { Iniciar-GraficosInicio } catch { Write-Log "Resumen del equipo: no se pudieron iniciar los graficos en vivo: $($_.Exception.Message)" -Tipo ERROR }
 
+# Monitoreo en tiempo real: se activa solo unos segundos despues de abrir (salvo que el usuario lo haya desactivado antes)
+$Script:TimerArranqueMonitor = New-Object System.Windows.Threading.DispatcherTimer
+$Script:TimerArranqueMonitor.Interval = [TimeSpan]::FromSeconds(4)
+$Script:TimerArranqueMonitor.Add_Tick({
+    $Script:TimerArranqueMonitor.Stop()
+    try {
+        $cfg = Leer-ConfigDragon
+        $activar = $true
+        if ($cfg -and $cfg.PSObject.Properties['Monitoreo'] -and -not [bool]$cfg.Monitoreo) { $activar = $false }
+        $Global:CfgCargando = $true
+        try { $window.FindName('ChkMonitoreoVivo').IsChecked = $activar } finally { $Global:CfgCargando = $false }
+        if (-not $activar) { $Global:NotifActiva = $false; Actualizar-EstadoMonitoreo }
+    } catch { Write-Log "No se pudo iniciar el monitoreo en tiempo real: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
+})
+$Script:TimerArranqueMonitor.Start()
+
 $window.Dispatcher.add_UnhandledException({
     param($s, $e)
     try {
@@ -18163,6 +18789,9 @@ $window.Add_Closed({
     try { if ($Script:TimerInicio) { $Script:TimerInicio.Stop() } } catch {}
     try { Detener-CamaraModificacion } catch {}
     try { if ($Script:HwTimerVivo) { $Script:HwTimerVivo.Stop() } } catch {}
+    try { if ($Script:VivoTimer) { $Script:VivoTimer.Stop() } } catch {}
+    try { Marcar-CierreEnergia } catch {}
+    try { $Global:NotifActiva = $false; $Global:ToastCola.Clear(); foreach ($t in @($Global:ToastAbiertos.ToArray())) { $t.Close() } } catch {}
     try { if ($Script:TimerModPantallaEnergia) { $Script:TimerModPantallaEnergia.Stop() } } catch {}
 })
 
@@ -18365,6 +18994,350 @@ try {
     Write-Log "No se pudo activar el escalado automatico a la pantalla: $($_.Exception.Message)" -Tipo AVISO
 }
 
+# ---------------------------------------------------------------------------
+#  AYUDAS EMERGENTES (TOOLTIPS)
+#  - Al pasar el mouse por cada pestaña del menu lateral: lista de sus opciones.
+#  - Al pasar el mouse por cada opcion (boton, casilla, lista): que funcion cumple.
+# ---------------------------------------------------------------------------
+$Global:AyudaPestanas = [ordered]@{
+    'Inicio' = "INICIO - resumen del equipo en vivo`n• Datos de CPU, RAM, discos y tarjetas de video con graficos en tiempo real`n• Temperaturas actuales y maximas`n• Acciones rapidas: limpiar temporales, liberar RAM, perfil de bajo consumo`n• Diagnostico completo del equipo"
+    'Optimizar Windows' = "OPTIMIZAR WINDOWS - acelera el equipo`n• Perfiles: bajo consumo, equipo moderno, gamer y restaurar`n• Quitar apps de Windows (Xbox, Noticias, Clima, Store...)`n• Modo manual: eliges ajuste por ajuste`n• Acelerar el procesador`n• Liberar RAM: basica, intermedia y exhaustiva"
+    'Controladores' = "CONTROLADORES - drivers del equipo`n• Buscador de controladores por fabricante (video, placa madre, laptop) dentro del mismo programa`n• Ver informacion del equipo`n• Explorador: ver instalados, analizar, detectar faltantes, borrar obsoletos y reparar`n• Copia de seguridad y restauracion de controladores"
+    'Programas' = "PROGRAMAS - instalar y quitar software`n• Instalar programas populares con un clic (winget)`n• Ver y desinstalar programas sin dejar rastros`n• Descargar archivos ISO (Windows, Office, Linux)`n• Microsoft Store: buscar e instalar desde un enlace"
+    'Disco y almacenamiento' = "DISCO Y ALMACENAMIENTO - libera espacio y cuida el disco`n• Limpiar temporales, papelera, cache de Windows Update, miniaturas y volcados`n• Liberador de espacio, DISM y Storage Sense`n• Optimizar unidades (TRIM / desfragmentar) y programar chkdsk`n• Ver las carpetas mas pesadas`n• Restablecer la cache de Microsoft Store"
+    'Memoria y rendimiento' = "MEMORIA Y RENDIMIENTO`n• Resumen del sistema y procesos que mas RAM usan`n• Memoria virtual, efectos visuales y plan de energia de alto rendimiento`n• SysMain (Superfetch) y programas de inicio`n• Administrador de tareas, Monitor de recursos y Servicios`n• Priorizar CPU y apagar apps en segundo plano"
+    'Windows Update' = "WINDOWS UPDATE Y DRIVERS`n• Administrador de dispositivos y drivers opcionales`n• Actualizar controladores automaticamente`n• Pausar, deshabilitar, reanudar y forzar actualizaciones`n• Historial y reparacion completa de Windows Update`n• Actualizar firmas de Windows Defender"
+    'Red y seguridad' = "RED Y SEGURIDAD`n• Vaciar DNS, renovar IP y ver tu IP`n• Ver y reiniciar adaptadores de red`n• Restablecer Winsock y TCP/IP`n• Analisis rapido y completo con Windows Defender`n• Estado del Firewall"
+    'Sistema' = "SISTEMA - ajustes y reparacion de Windows`n• Reiniciar Explorer, punto de restauracion y Restaurar sistema`n• Reparar archivos (SFC) y la imagen de Windows (DISM)`n• Variables de entorno e informe de energia`n• Reiniciar o apagar el equipo`n• Perfil de baja latencia`n• Personalizar: menu contextual, barra de tareas, reloj, widgets, Snap Layouts, graficos`n• Estado de activacion de Windows"
+    'Registro de Windows' = "REGISTRO DE WINDOWS`n• Edicion del registro: ajustes listos para marcar y aplicar`n• Optimizacion del registro`n• Analisis y reparacion de errores del registro`n• Punto de restauracion, Restaurar sistema y Regedit"
+    'BSOD' = "BSOD - pantallas azules`n• Historial de pantallas azules y exportarlo`n• Explicar un error (causa y solucion) o un codigo`n• Volcados de memoria y su carpeta`n• Monitor de confiabilidad y controladores recientes`n• Diagnostico de memoria y verificacion de archivos (SFC)"
+    'Diagnosticar equipo' = "DIAGNOSTICAR EQUIPO - pruebas por componente`n• Diagnostico completo automatico`n• Sistema general, Procesador (CPU), Memoria RAM`n• Disco duro / SSD (12 pruebas, S.M.A.R.T., superficie, estres)`n• Graficos y pantalla, Audio, Teclado y mouse, Camara`n• Red y Wi-Fi, Energia y refrigeracion, Puertos USB`n• Copiar, guardar o exportar en PDF el informe"
+    'Registro de errores' = "REGISTRO DE ERRORES Y MONITOREO`n• Errores del programa y del hardware con solucion sugerida`n• Monitoreo en tiempo real con notificaciones (se activa o desactiva aqui)`n• Escanear hardware e informe de lentitud`n• Filtros, busqueda, copiar, exportar a archivo o PDF y limpiar"
+    'Modificacion' = "MODIFICACION - ajustes de hardware`n• Camara: abrir en ventana, rotar, voltear y capturar`n• Pantalla: frecuencia de actualizacion (Hz)`n• Teclado: remapear o bloquear teclas`n• Parlante: silenciar y subir volumen / Equalizer APO`n• Almacenamiento: quitar solo lectura, analizar y corregir errores, firmware"
+    'Acerca de' = "ACERCA DE`n• Autor, version y novedades del programa`n• Como ejecutarlo desde GitHub con un solo comando"
+}
+
+$Global:AyudaControles = @{
+    # --- Inicio ---
+    'CmbVentanaGraficos' = 'Elige cuanto tiempo se ve en los graficos en vivo: 1, 2 o 5 minutos.'
+    'BtnPausaGraficos' = 'Pausa o reanuda los graficos en vivo de CPU, RAM, disco y GPU para poder verlos con calma.'
+    'BtnInicioLimpiarTemp' = 'Borra archivos temporales de Windows y del usuario para liberar espacio en disco.'
+    'BtnInicioLiberarRAM' = 'Libera memoria RAM de forma basica sin cerrar tus programas.'
+    'BtnInicioPerfilBajo' = 'Aplica el perfil de bajo consumo: desactiva servicios innecesarios para que equipos lentos vayan mas rapido.'
+    'BtnInicioDiagnostico' = 'Ejecuta el diagnostico completo automatico del equipo (hardware, disco, red, bateria, eventos) y muestra un resumen.'
+    'BtnInicioActualizar' = 'Vuelve a leer ahora la informacion del equipo mostrada en el resumen.'
+    # --- Optimizar Windows ---
+    'CmbCategoriaOptimizar' = 'Cambia entre perfiles de optimizacion, acelerar procesador y liberar RAM.'
+    'BtnPerfilBajo' = 'Para PCs con poca RAM o disco lento: desactiva servicios, efectos y programas de inicio no esenciales. Muestra un ANTES y DESPUES al terminar.'
+    'BtnPerfilModerno' = 'Para equipos con buen hardware: quita bloatware y telemetria manteniendo las funciones utiles. Muestra un ANTES y DESPUES.'
+    'BtnPerfilGamer' = 'Mejora el rendimiento en juegos: energia al maximo, modo juego, GPU y red optimizadas.'
+    'BtnPerfilRestaurar' = 'Revierte los cambios hechos por cualquiera de los perfiles y vuelve a la configuracion predeterminada.'
+    'BtnQuitarAppsWindows' = 'Lista las apps incluidas en Windows (Xbox, Noticias, Clima, Teams, Store...) y desinstala las que elijas.'
+    'BtnModoManual' = 'Abre una lista de ajustes de CPU, RAM y disco para marcar uno por uno lo que quieras aplicar.'
+    'BtnAcelerarCPU' = 'Pone el procesador en alto rendimiento: sin estacionar nucleos, frecuencia minima al 100% y prioridad a la app activa.'
+    'BtnRamBasica' = 'Vacia la memoria en uso de las apps abiertas sin cerrarlas. Rapido y seguro.'
+    'BtnRamIntermedia' = 'Limpieza basica mas cache DNS y miniaturas.'
+    'BtnRamExhaustiva' = 'La mas agresiva: ademas purga la lista de memoria en espera del sistema. Puede notarse un breve tirón.'
+    # --- Controladores ---
+    'CmbSeccionControladores' = 'Cambia entre el buscador de controladores y el explorador de controladores instalados.'
+    'BtnDetectarTodo' = 'Muestra la informacion del equipo: modelo, placa, procesador, video y mas, util para buscar el controlador correcto.'
+    'RbTipoGPU' = 'Busca controladores de la tarjeta de video (NVIDIA, AMD o Intel).'
+    'RbTipoPlaca' = 'Busca controladores de la placa madre de un equipo de escritorio por marca.'
+    'RbTipoLaptop' = 'Busca controladores para laptops y All-in-One por fabricante.'
+    'CmbFabricanteGPU' = 'Elige el fabricante de tu tarjeta de video.'
+    'BtnBuscarGPU' = 'Abre la pagina oficial de controladores del fabricante elegido dentro de esta misma ventana.'
+    'BtnDetectarGPU' = 'Detecta tu tarjeta de video y muestra sus detalles (modelo, driver y version).'
+    'CmbMarcaPlaca' = 'Elige la marca de tu placa madre.'
+    'BtnBuscarPlaca' = 'Abre la pagina oficial de soporte de la marca elegida dentro de esta ventana.'
+    'BtnDetectarPlaca' = 'Detecta el fabricante y modelo de tu placa madre.'
+    'CmbFabricanteLaptop' = 'Elige el fabricante de tu laptop o All-in-One.'
+    'BtnBuscarLaptop' = 'Abre la pagina oficial de soporte del fabricante elegido dentro de esta ventana.'
+    'BtnDetectarLaptop' = 'Detecta el fabricante, modelo y numero de serie de tu equipo.'
+    'BtnExpVerTodos' = 'Lista todos los controladores instalados: dispositivo, fabricante, version, fecha y estado.'
+    'BtnExpAtencion' = 'Analiza y muestra solo los controladores antiguos o con problemas.'
+    'BtnExpFaltantes' = 'Detecta hardware sin controlador y permite descargarlo e instalarlo.'
+    'BtnBuscarDriversObsoletos' = 'Busca controladores obsoletos o no compatibles para que elijas cuales borrar (guarda una copia antes).'
+    'BtnRepararDriversExp' = 'Intenta reparar los controladores que tienen errores.'
+    'BtnBackupControladores' = 'Guarda todos tus controladores en una carpeta como copia de seguridad.'
+    'BtnRestaurarControladoresBackup' = 'Reinstala controladores desde una copia de seguridad guardada.'
+    'BtnNavCtrlVolver' = 'Vuelve al menu anterior para elegir otro fabricante u otra opcion.'
+    'BtnNavCtrlAtras' = 'Retrocede a la pagina anterior del navegador.'
+    'BtnNavCtrlRecargar' = 'Vuelve a cargar la pagina actual.'
+    'BtnNavCtrlGoogle' = 'Busca en Google el controlador de tu equipo.'
+    'BtnNavCtrlExterno' = 'Abre esta pagina en tu navegador externo (Chrome, Edge...).'
+    # --- Programas ---
+    'CmbSeccionProgramas' = 'Cambia entre instalar programas, desinstalar, archivos ISO y Microsoft Store.'
+    'BtnInstalarSeleccionados' = 'Instala con winget todos los programas que marcaste en la lista.'
+    'BtnVerProgramasInstalados' = 'Abre la lista de programas instalados con buscador, desinstalacion limpia (sin dejar rastros) y forzada.'
+    'CmbTipoISO' = 'Elige que tipo de ISO descargar: Windows, Office o Linux.'
+    'CmbVersionISO' = 'Elige la version del sistema u Office a descargar.'
+    'CmbIdiomaISO' = 'Elige el idioma de la ISO.'
+    'BtnDescargarISO' = 'Descarga la ISO elegida desde la fuente oficial, con barra de progreso.'
+    'BtnBuscarStoreWeb' = 'Busca una app en la web de Microsoft Store.'
+    'BtnDescargarLinkStore' = 'Descarga e instala la app de Microsoft Store a partir de su enlace.'
+    # --- Disco y almacenamiento ---
+    'BtnTemp' = 'Borra archivos temporales del sistema y del usuario.'
+    'BtnPapelera' = 'Vacia la papelera de reciclaje de todas las unidades.'
+    'BtnWU' = 'Borra la cache de descargas de Windows Update que ya no hace falta.'
+    'BtnCleanmgr' = 'Abre el Liberador de espacio en disco de Windows.'
+    'BtnOptimizarUnidades' = 'Ejecuta TRIM en SSD y desfragmenta los discos duros para mejorar la velocidad.'
+    'BtnChkdsk' = 'Programa una comprobacion de errores del disco (chkdsk) en el proximo reinicio.'
+    'BtnStorageSense' = 'Activa Storage Sense para que Windows limpie archivos innecesarios automaticamente.'
+    'BtnMiniaturas' = 'Borra la cache de miniaturas de imagenes del Explorador.'
+    'BtnVolcados' = 'Borra los volcados de memoria (crash dumps) de pantallas azules.'
+    'BtnDISM' = 'Limpieza profunda de componentes antiguos de Windows con DISM. Puede tardar varios minutos.'
+    'BtnCarpetasPesadas' = 'Muestra que carpetas de tu usuario ocupan mas espacio.'
+    'BtnWsReset' = 'Restablece la cache de Microsoft Store (wsreset) si la tienda falla.'
+    # --- Memoria y rendimiento ---
+    'BtnResumen' = 'Muestra en el registro la RAM total, libre y en uso, y el espacio libre de cada disco.'
+    'BtnProcesos' = 'Lista los procesos que mas RAM consumen y permite cerrarlos.'
+    'BtnMemVirtual' = 'Configura el tamano de la memoria virtual (archivo de paginacion).'
+    'BtnEfectos' = 'Ajusta los efectos visuales de Windows para ganar rendimiento.'
+    'BtnEnergia' = 'Activa el plan de energia de alto rendimiento.'
+    'BtnSysMainOn' = 'Activa SysMain (Superfetch), que precarga programas usados con frecuencia.'
+    'BtnSysMainOff' = 'Desactiva SysMain (Superfetch); puede ayudar en equipos con disco duro lento y poca RAM.'
+    'BtnRevisarInicio' = 'Muestra en el registro los programas que arrancan con Windows y ofrece abrir el Administrador de tareas para desactivar los que no necesitas.'
+    'BtnTaskMgr' = 'Abre el Administrador de tareas de Windows.'
+    'BtnResMon' = 'Abre el Monitor de recursos (CPU, memoria, disco y red en detalle).'
+    'BtnServicios' = 'Abre la consola de Servicios de Windows.'
+    'BtnPriorizarCPU' = 'Da prioridad de CPU a la aplicacion que estas usando.'
+    'BtnBackgroundAppsOff' = 'Impide que las apps de Windows sigan ejecutandose en segundo plano.'
+    # --- Windows Update ---
+    'BtnDevMgmt' = 'Abre el Administrador de dispositivos de Windows.'
+    'BtnUpdatesOpc' = 'Muestra las actualizaciones opcionales de controladores que ofrece Windows Update.'
+    'BtnDriversAuto' = 'Busca e instala controladores actualizados automaticamente.'
+    'BtnPausarUpdates' = 'Pausa las actualizaciones de Windows durante 7 dias.'
+    'BtnDeshabilitarUpdates' = 'Deshabilita Windows Update por completo (no recomendado a largo plazo: dejas de recibir parches de seguridad).'
+    'BtnReanudarUpdates' = 'Reanuda las actualizaciones de Windows si estaban pausadas o deshabilitadas.'
+    'BtnForzarUpdate' = 'Busca actualizaciones ahora mismo.'
+    'BtnHistorialUpdates' = 'Muestra el historial de actualizaciones instaladas.'
+    'BtnRepararWU' = 'Reinicia por completo los componentes de Windows Update para corregir errores de actualizacion.'
+    'BtnDefenderUpdate' = 'Actualiza las firmas de virus de Windows Defender.'
+    # --- Red y seguridad ---
+    'BtnDNS' = 'Vacia la cache DNS; soluciona paginas que no cargan o direcciones antiguas.'
+    'BtnRenovarIP' = 'Libera y renueva la direccion IP del equipo.'
+    'BtnDefender' = 'Lanza un analisis rapido con Windows Defender.'
+    'BtnVerAdaptadores' = 'Muestra los adaptadores de red y su estado.'
+    'BtnReiniciarRed' = 'Reinicia los adaptadores de red (puede cortar la conexion unos segundos).'
+    'BtnResetWinsock' = 'Restablece Winsock y TCP/IP; corrige problemas de conexion persistentes. Requiere reiniciar.'
+    'BtnVerIP' = 'Muestra tu direccion IP publica y privada.'
+    'BtnDefenderFull' = 'Lanza un analisis completo con Windows Defender (puede tardar bastante).'
+    'BtnFirewallEstado' = 'Verifica si el Firewall de Windows esta activo en cada perfil de red.'
+    # --- Sistema ---
+    'BtnExplorer' = 'Reinicia el Explorador de Windows (barra de tareas y escritorio) si se traba.'
+    'BtnPuntoRestauracion' = 'Crea un punto de restauracion para poder volver atras si algo sale mal.'
+    'BtnAbrirRestaurar' = 'Abre Restaurar sistema para volver a un punto anterior.'
+    'BtnSFC' = 'Verifica y repara archivos de sistema danados con SFC.'
+    'BtnDISMRestore' = 'Repara la imagen de Windows con DISM (RestoreHealth); util si SFC no basta.'
+    'BtnVariablesEntorno' = 'Abre el panel de variables de entorno del sistema.'
+    'BtnInformeEnergia' = 'Genera un informe de energia y bateria de Windows (powercfg /energy, unos 60 segundos) en HTML y ofrece abrirlo.'
+    'BtnReiniciarEquipo' = 'Reinicia el equipo (pide confirmacion).'
+    'BtnApagarEquipo' = 'Apaga el equipo (pide confirmacion).'
+    'BtnBajaLatenciaOn' = 'Activa el perfil de baja latencia: respuesta mas rapida de mouse, audio y red.'
+    'BtnBajaLatenciaOff' = 'Desactiva el perfil de baja latencia y vuelve a lo normal.'
+    'BtnMenuClasico' = 'Usa el menu contextual clasico (clic derecho) de Windows 10 en Windows 11.'
+    'BtnMenuModerno' = 'Vuelve al menu contextual moderno de Windows 11.'
+    'BtnTaskbarIzquierda' = 'Alinea los iconos de la barra de tareas a la izquierda.'
+    'BtnTaskbarCentrada' = 'Vuelve a centrar los iconos de la barra de tareas (valor por defecto).'
+    'BtnSegundosOn' = 'Muestra los segundos en el reloj de la barra de tareas.'
+    'BtnSegundosOff' = 'Oculta los segundos del reloj.'
+    'BtnWidgetsOff' = 'Oculta el boton de Widgets de la barra de tareas.'
+    'BtnWidgetsOn' = 'Muestra el boton de Widgets en la barra de tareas.'
+    'BtnFinalizarTarea' = 'Agrega la opcion Finalizar tarea al clic derecho de la barra de tareas.'
+    'BtnSnapOff' = 'Desactiva Snap Layouts (el menu de ventanas al pasar sobre maximizar).'
+    'BtnSnapOn' = 'Activa Snap Layouts.'
+    'BtnConfigGraficos' = 'Abre la configuracion de graficos de Windows (Auto HDR, GPU por aplicacion).'
+    'BtnEstadoActivacion' = 'Muestra si Windows esta activado y el tipo de licencia.'
+    # --- Registro de Windows ---
+    'CmbSeccionRegistro' = 'Cambia entre edicion del registro, optimizacion y analisis/reparacion de errores.'
+    'BtnBackupRegistro' = 'Crea un punto de restauracion antes de tocar el registro.'
+    'BtnRestaurarRegistro' = 'Abre Restaurar sistema para deshacer cambios.'
+    'BtnAbrirRegedit' = 'Abre el Editor del Registro (regedit).'
+    'BtnAplicarRegistro' = 'Aplica los ajustes de registro que marcaste en la lista.'
+    'BtnAplicarOptimizacionRegistro' = 'Aplica las optimizaciones de registro que marcaste.'
+    'BtnAnalizarRegistro' = 'Analiza el registro en busca de entradas danadas u obsoletas (no cambia nada).'
+    'BtnCorregirRegistro' = 'Corrige los errores encontrados en el analisis (con copia de seguridad).'
+    # --- BSOD ---
+    'BtnActualizarBSODTab' = 'Vuelve a leer el historial de pantallas azules.'
+    'BtnExportarBSOD' = 'Guarda el historial de pantallas azules en un archivo.'
+    'BtnConfigVolcado' = 'Muestra o activa los volcados de memoria para poder analizar pantallas azules.'
+    'BtnMonitorConfiabilidad' = 'Abre el Monitor de confiabilidad de Windows (linea de tiempo de fallos).'
+    'BtnDiagMemoriaTab' = 'Programa el Diagnostico de memoria de Windows para probar la RAM al reiniciar.'
+    'BtnAbrirMinidumpTab' = 'Abre la carpeta donde Windows guarda los volcados de pantallas azules.'
+    'BtnDriversRecientes' = 'Muestra los 10 controladores con la fecha mas reciente (sospechosos habituales de una pantalla azul).'
+    'BtnSFCTab' = 'Verifica archivos de sistema danados con SFC.'
+    'BtnExplicarBSOD' = 'Explica la causa y la solucion del error seleccionado en la lista (tambien con doble clic).'
+    'CmbCodigoBSOD' = 'Elige un codigo de pantalla azul del catalogo.'
+    'BtnExplicarCodigoBSOD' = 'Explica el codigo elegido: que significa y como solucionarlo.'
+    # --- Diagnosticar equipo: categorias ---
+    'BtnDiagCompleto' = 'Ejecuta todas las pruebas importantes en secuencia y entrega un resumen con veredictos.'
+    'BtnDiagCat_Sistema' = "Sistema general:`n• Informacion del hardware`n• Tiempo de arranque`n• Estado de Windows`n• Eventos criticos (7 dias)`n• Dispositivos con problemas"
+    'BtnDiagCat_CPU' = "Procesador (CPU):`n• Rendimiento, temperatura e informacion`n• Uso por nucleos`n• Estabilidad y throttling`n• Integridad de calculo"
+    'BtnDiagCat_RAM' = "Memoria RAM:`n• Prueba de memoria RAM"
+    'BtnDiagCat_Disco' = "Disco duro / SSD (12 pruebas):`n• Diagnostico completo, salud y espacio, detalle fisico`n• S.M.A.R.T., superficie, CHKDSK, particiones`n• Velocidad, latencia 4K, actividad en vivo`n• Eventos de error, fragmentacion, vida util y estres"
+    'BtnDiagCat_Graficos' = "Graficos y pantalla:`n• Tarjeta grafica`n• Prueba de colores de pantalla`n• Detalles de pantalla"
+    'BtnDiagCat_Audio' = "Audio:`n• Altavoz izquierdo, derecho y ambos`n• Microfono`n• Dispositivos de audio"
+    'BtnDiagCat_Entrada' = "Teclado y mouse:`n• Prueba de teclado (virtual)`n• Prueba de mouse/touchpad (dispositivos, botones y rueda, precision)"
+    'BtnDiagCat_Camara' = "Camara:`n• Probar la camara"
+    'BtnDiagCat_Red' = "Red y conectividad:`n• Red / Internet`n• Wi-Fi (adaptador, redes cercanas, estabilidad, seguridad)`n• Velocidad de Internet`n• Bluetooth"
+    'BtnDiagCat_Energia' = "Energia y refrigeracion:`n• Estado de la bateria`n• Ventiladores"
+    'BtnDiagCat_Puertos' = "Puertos y dispositivos:`n• Dispositivos USB conectados"
+    'BtnDiagVolver_Sistema' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_CPU' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_RAM' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Disco' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Graficos' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Audio' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Entrada' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Camara' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Red' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Energia' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Puertos' = 'Vuelve a la lista de categorias de diagnostico.'
+    # --- Diagnosticar equipo: pruebas ---
+    'BtnInfoHardware' = 'Muestra la informacion completa del hardware: marca, modelo, serie, CPU, RAM, discos, video y placa.'
+    'BtnProbarArranque' = 'Mide cuanto tarda Windows en arrancar y que programas lo retrasan.'
+    'BtnProbarEstadoWin' = 'Revisa el estado de Windows: activacion, actualizaciones, antivirus y firewall.'
+    'BtnProbarEventos' = 'Lista los eventos criticos y errores de los ultimos 7 dias del visor de sucesos.'
+    'BtnProbarDispProblemas' = 'Detecta dispositivos con problemas o sin controlador.'
+    'BtnProbarCPU' = 'Prueba de rendimiento del procesador durante 10 segundos.'
+    'BtnProbarTemperatura' = 'Lee la temperatura del procesador.'
+    'BtnCpuInfo' = 'Muestra modelo, nucleos, hilos, frecuencias y caches del CPU.'
+    'BtnCpuNucleos' = 'Mide el uso de cada nucleo durante 12 segundos.'
+    'BtnCpuEstabilidad' = 'Somete al CPU a carga 30 segundos y detecta throttling (reduccion de velocidad por calor).'
+    'BtnCpuIntegridad' = 'Realiza calculos repetidos durante 15 segundos para verificar que el CPU no comete errores.'
+    'BtnProbarRAM' = 'Abre una ventana para elegir el tamano de la prueba de memoria RAM (rapida o mas completa) y la ejecuta.'
+    'CmbDiagUnidad' = 'Elige la unidad que quieres diagnosticar.'
+    'BtnDiagUnidadRefrescar' = 'Actualiza la lista de unidades.'
+    'BtnDiscoCompleto' = 'Ejecuta todas las pruebas de salud del disco elegido y da un veredicto.'
+    'BtnProbarAlmacenamiento' = 'Resumen de salud y espacio libre de los discos.'
+    'BtnDiscoDetalle' = 'Detalle fisico del disco: interfaz, modo de transferencia, sectores, horas y encendidos.'
+    'BtnDiscoSmart' = 'Muestra los atributos S.M.A.R.T. del disco con su significado.'
+    'BtnDiscoSuperficie' = 'Escanea la superficie del disco y dibuja un mapa de bloques lentos o danados.'
+    'BtnDiscoChkdsk' = 'Verifica errores del sistema de archivos con CHKDSK.'
+    'BtnDiscoParticiones' = 'Muestra las particiones y si estan bien alineadas.'
+    'BtnVelocidadDisco' = 'Mide la velocidad de lectura y escritura del disco.'
+    'BtnDiscoLatencia' = 'Mide la latencia de accesos aleatorios de 4K (lo que se siente al abrir programas).'
+    'BtnDiscoActividad' = 'Muestra la actividad del disco en vivo durante 6 segundos.'
+    'BtnDiscoEventos' = 'Busca en el visor de sucesos errores relacionados con el disco.'
+    'BtnDiscoDefrag' = 'Analiza la fragmentacion y permite optimizar el disco.'
+    'BtnDiscoVidaSsd' = 'Estima la vida util restante del SSD o el estado del disco duro (Bueno / En riesgo / Malo).'
+    'BtnDiscoEstres' = 'Prueba de estres del disco durante el tiempo que elijas, para detectar fallos bajo carga.'
+    'BtnProbarGrafica' = 'Muestra la tarjeta grafica: modelo, memoria y driver.'
+    'BtnProbarPantalla' = 'Abre una prueba de colores para detectar pixeles muertos o manchas.'
+    'BtnDetallesPantalla' = 'Muestra resolucion, frecuencia, tamano y datos de la pantalla.'
+    'BtnProbarAudioIzq' = 'Reproduce un sonido solo por el altavoz izquierdo.'
+    'BtnProbarAudioDer' = 'Reproduce un sonido solo por el altavoz derecho.'
+    'BtnProbarAudioAmbos' = 'Reproduce un sonido por ambos altavoces.'
+    'BtnProbarMicrofono' = 'Prueba el microfono y muestra el nivel de entrada.'
+    'BtnProbarAudioDisp' = 'Lista los dispositivos de audio y su estado.'
+    'BtnProbarTeclado' = 'Abre el probador de teclado: marca cada tecla pulsada, mide rollover, estadisticas y mapa de calor.'
+    'BtnProbarMouse' = 'Prueba el mouse o touchpad.'
+    'BtnMouseDispositivos' = 'Lista los dispositivos de puntero conectados.'
+    'BtnMouseBotones' = 'Prueba los botones y la rueda del mouse.'
+    'BtnMousePrecision' = 'Mide la precision del puntero.'
+    'BtnProbarCamara' = 'Abre la camara en una ventana para comprobar que funciona.'
+    'BtnProbarRed' = 'Prueba la conexion de red y a Internet.'
+    'BtnProbarWifi' = 'Mide la senal y la velocidad del Wi-Fi.'
+    'BtnWifiAdaptador' = 'Muestra los datos del adaptador Wi-Fi y su controlador.'
+    'BtnWifiRedes' = 'Lista las redes cercanas y los canales que usan.'
+    'BtnWifiEstabilidad' = 'Mide perdida de paquetes y latencia para evaluar la estabilidad.'
+    'BtnWifiSeguridad' = 'Revisa el tipo de seguridad de la red y eventos relacionados.'
+    'BtnProbarInternet' = 'Mide la velocidad de descarga y subida de tu conexion.'
+    'BtnProbarBluetooth' = 'Verifica el adaptador Bluetooth y sus dispositivos.'
+    'BtnProbarBateria' = 'Verifica el estado de la bateria: carga, desgaste y capacidad.'
+    'BtnProbarVentiladores' = 'Verifica el estado y la velocidad de los ventiladores.'
+    'BtnProbarUSB' = 'Lista los dispositivos USB conectados.'
+    'BtnDiagCopiar' = 'Copia el informe de diagnostico al portapapeles.'
+    'BtnDiagExportar' = 'Guarda el informe de diagnostico en un archivo de texto.'
+    'BtnDiagPdf' = 'Genera un informe PDF con los resultados (pide nombre del cliente y fecha).'
+    'BtnDiagLimpiar' = 'Borra el informe mostrado para empezar de nuevo.'
+    # --- Registro de errores ---
+    'CmbFiltroCategoriaError' = 'Filtra el registro por categoria (hardware, apagado inesperado, bateria, congelamiento...).'
+    'CmbFiltroTipoError' = 'Filtra por gravedad: errores o avisos.'
+    'BtnActualizarErrores' = 'Actualiza la lista de errores.'
+    'BtnEscanearHardware' = 'Escanea ahora eventos de las ultimas 72 horas y el estado de discos, RAM, temperatura, bateria y dispositivos.'
+    'BtnInformeLentitud' = 'Analiza el rendimiento actual y dice que esta ralentizando el equipo.'
+    'BtnCopiarErrores' = 'Copia todo el registro de errores al portapapeles.'
+    'BtnExportarErrores' = 'Guarda el registro de errores en un archivo de texto.'
+    'BtnExportarPdfErrores' = 'Genera un informe PDF con los errores y sus soluciones.'
+    'BtnLimpiarErrores' = 'Vacia por completo el registro de errores (no se puede deshacer).'
+    'ChkMonitoreoVivo' = 'Activa o desactiva la vigilancia en tiempo real con notificaciones flotantes. Tu eleccion se recuerda.'
+    'ChkMonitorLentitud' = 'Avisa cuando el programa o una prueba va lento e indica la causa probable.'
+    # --- Modificacion ---
+    'CmbSeccionModificacion' = 'Elige que quieres modificar: camara, pantalla, teclado, parlante o almacenamiento.'
+    'BtnModCamaraActualizarLista' = 'Actualiza la lista de camaras.'
+    'CmbModCamaraDispositivo' = 'Elige la camara a usar.'
+    'BtnModCamaraIniciar' = 'Abre la camara en una ventana donde puedes rotar, voltear y capturar fotos.'
+    'BtnModCamaraDetener' = 'Cierra la ventana de la camara.'
+    'BtnModPantallaDetectar' = 'Detecta las pantallas y sus frecuencias disponibles.'
+    'CmbModPantallaDispositivo' = 'Elige la pantalla a modificar.'
+    'BtnModPantallaAplicarFrecuencia' = 'Aplica la frecuencia de actualizacion (Hz) elegida.'
+    'CmbModPantallaFrecuencia' = 'Elige la frecuencia de actualizacion en Hz.'
+    'BtnModPantallaQuitarFrecuencia' = 'Quita la frecuencia fija y vuelve a la maxima nativa.'
+    'ChkModPantallaFrecuenciaEnergia' = 'Usa una frecuencia al estar con cargador y otra con bateria (solo mientras el programa este abierto).'
+    'CmbModPantallaFrecuenciaCA' = 'Frecuencia a usar con el cargador conectado.'
+    'CmbModPantallaFrecuenciaBateria' = 'Frecuencia a usar con bateria (menor frecuencia = mas autonomia).'
+    'BtnModPantallaGuardarEnergia' = 'Guarda la preferencia de frecuencia segun la fuente de energia.'
+    'CmbModTecladoTipo' = 'Elige el tipo de teclado a modificar.'
+    'BtnModTecladoDetectar' = 'Detecta el teclado conectado.'
+    'CmbModTecladoDestino' = 'Elige la tecla que sustituira a la original.'
+    'ChkModTecladoBloquear' = 'Deja la tecla sin funcion (por ejemplo, una tecla danada que se activa sola).'
+    'BtnModTecladoAgregar' = 'Agrega el remapeo a la lista de cambios.'
+    'BtnModTecladoQuitarUno' = 'Quita de la lista el cambio seleccionado.'
+    'BtnModTecladoAplicar' = 'Aplica los cambios de teclas (requiere reiniciar el equipo).'
+    'BtnModTecladoQuitarTodos' = 'Elimina todos los remapeos guardados y devuelve el teclado a lo normal.'
+    'BtnModParlanteDetectar' = 'Detecta los parlantes y su volumen actual.'
+    'ChkModParlanteSilenciar' = 'Silencia o activa el sonido del parlante.'
+    'ChkModParlanteRefuerzo' = 'Sube el volumen nativo de Windows al 100%.'
+    'BtnModParlanteInstalarAPO' = 'Descarga e instala Equalizer APO para amplificar y ecualizar el audio.'
+    'BtnModAlmacenamientoDetectar' = 'Detecta los discos y unidades conectados.'
+    'CmbModAlmacenamientoDispositivo' = 'Elige la unidad a modificar.'
+    'BtnModAlmacenamientoQuitarSoloLectura' = 'Quita el atributo de solo lectura de la unidad para poder escribir en ella.'
+    'BtnModAlmacenamientoAnalizar' = 'Analiza la unidad en busca de errores sin cambiar nada.'
+    'BtnModAlmacenamientoCorregir' = 'Corrige los errores encontrados en la unidad.'
+    'BtnModAlmacenamientoBuscarFirmware' = 'Busca si hay una actualizacion de firmware para el disco.'
+}
+
+function Global:Texto-AyudaItem {
+    param($Item)
+    $n = "$($Item.Nombre)"
+    if ($Item.WingetId) { return "Instala $n con winget (gestor de paquetes de Windows). Marca la casilla y pulsa 'Instalar seleccionados'." }
+    if ($Item.Tipo -eq 'Servicio') { return "$n`nCambia el servicio de Windows '$($Item.Valor)'. Marca la casilla y pulsa el boton de aplicar." }
+    return "$n`nMarca la casilla y pulsa el boton de aplicar para ejecutar este ajuste. Si no estas seguro, crea antes un punto de restauracion."
+}
+
+function Global:Aplicar-AyudasInterfaz {
+    try {
+        [System.Windows.Controls.ToolTipService]::SetInitialShowDelay($window, 350)
+        [System.Windows.Controls.ToolTipService]::SetShowDuration($window, 25000)
+        [System.Windows.Controls.ToolTipService]::SetBetweenShowDelay($window, 150)
+        [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($window, $true)
+    } catch {}
+    $faltan = New-Object System.Collections.ArrayList
+    foreach ($k in @($Global:AyudaControles.Keys)) {
+        try {
+            $c = $window.FindName($k)
+            if ($c) { if (-not $c.ToolTip) { $c.ToolTip = $Global:AyudaControles[$k] } }
+            else { [void]$faltan.Add($k) }
+        } catch {}
+    }
+    foreach ($lista in @($Script:_checkboxesRegistro, $Script:_checkboxesOptimizacionRegistro, $Script:_checkboxesProgramas)) {
+        foreach ($cb in @($lista)) { try { if ($cb -and $cb.Tag -and -not $cb.ToolTip) { $cb.ToolTip = (Texto-AyudaItem $cb.Tag) } } catch {} }
+    }
+    # Menu lateral: cada pestaña lista sus opciones
+    try {
+        $cont = $window.FindName('ContenedorNav')
+        foreach ($rb in @($cont.Children)) {
+            $h = "$($rb.Tag.Header)"
+            foreach ($k in @($Global:AyudaPestanas.Keys)) {
+                if ($h.EndsWith($k)) { $rb.ToolTip = $Global:AyudaPestanas[$k]; break }
+            }
+        }
+    } catch {}
+    if ($faltan.Count -gt 0) { Write-Log "Ayudas: controles sin encontrar: $($faltan -join ', ')" -Tipo INFO -SinRegistro }
+}
+
+try { Aplicar-AyudasInterfaz } catch { Write-Log "No se pudieron activar las ayudas emergentes: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
 Marcar-Arranque 'enlace de controles y efectos'
 $Global:ArranqueReportado = $false
 $window.Add_ContentRendered({
