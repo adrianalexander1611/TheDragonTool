@@ -12450,6 +12450,7 @@ $Global:GrafInicio = @{
     RAM = @{ Nombre = 'RAM'; Canvas = $null; Datos = $null; Extra = $null; Color = '#B07CFF'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     DISCO = @{ Nombre = 'Disco'; Canvas = $null; Datos = $null; Extra = $null; Color = '#3DDC97'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     GPU = @{ Nombre = 'GPU'; Canvas = $null; Datos = $null; Extra = $null; Color = '#FF9F43'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
+    TempPS = $null; TempAR = $null; TickTemp = 99; TempMax = @{}; TbTempDisco = @{}; TempDiscosInfo = @{}
     GpuCat = $null; GpuMem = $null; GpuPrev = @{}; GpuDisponible = $false; GpuDedicadaIntegrada = $false
     DiscosFisicos = $null; TickDiscos = 0
 }
@@ -12629,6 +12630,12 @@ function Global:Dibujar-PanelDiscos {
         $tit.Text = "💽 Disco $($n - 1): $($d.Nombre)  ·  $(Formato-TamDisco $d.Tam)" + $(if ($extra.Count -gt 0) { "  ·  " + ($extra -join ' ') } else { '' })
         $tit.Foreground = [System.Windows.Media.Brushes]::White; $tit.FontWeight = "Bold"; $tit.TextWrapping = "Wrap"
         $sp.Children.Add($tit) | Out-Null
+        $tbTemp = New-Object System.Windows.Controls.TextBlock
+        $tbTemp.FontSize = 11; $tbTemp.Margin = "0,2,0,0"; $tbTemp.TextWrapping = "Wrap"
+        $infoT = $Global:GrafInicio.TempDiscosInfo[$d.Nombre]
+        if ($infoT) { Aplicar-TempTexto -Tb $tbTemp -Info $infoT } else { Aplicar-TempTexto -Tb $tbTemp -Info @{ Nivel = 3; Texto = "🌡 Temperatura: leyendo..." } }
+        $Global:GrafInicio.TbTempDisco[$d.Nombre] = $tbTemp
+        $sp.Children.Add($tbTemp) | Out-Null
         $letrasDisco = @($d.Letras)
         if ($letrasDisco.Count -eq 0) {
             $sin = New-Object System.Windows.Controls.TextBlock
@@ -12803,6 +12810,131 @@ function Global:Dibujar-Grafico {
     }
 }
 
+# ---------- Temperaturas (CPU, GPU, discos) ----------
+# La lectura se hace en un hilo aparte (runspace) cada ~5 s para no congelar la
+# interfaz: consultar WMI, nvidia-smi y el estado SMART puede tardar cientos de ms.
+$Global:BloqueLecturaTemp = {
+    $r = [PSCustomObject]@{ Cpu = $null; Gpus = @(); Discos = @() }
+    try {
+        $z = @(Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction Stop)
+        $vals = @($z | ForEach-Object { [double]$_.Temperature - 273.15 } | Where-Object { $_ -gt 0 -and $_ -lt 150 })
+        if ($vals.Count) { $r.Cpu = [math]::Round(($vals | Measure-Object -Maximum).Maximum, 1) }
+    } catch {}
+    if ($null -eq $r.Cpu) {
+        try {
+            $z = @(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop)
+            $vals = @($z | ForEach-Object { ($_.CurrentTemperature / 10) - 273.15 } | Where-Object { $_ -gt 0 -and $_ -lt 150 })
+            if ($vals.Count) { $r.Cpu = [math]::Round(($vals | Measure-Object -Maximum).Maximum, 1) }
+        } catch {}
+    }
+    try {
+        $exe = $null
+        $cmd = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+        if ($cmd) { $exe = $cmd.Source }
+        foreach ($c in @("$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "$env:SystemRoot\System32\nvidia-smi.exe")) { if (-not $exe -and (Test-Path $c)) { $exe = $c } }
+        if ($exe) {
+            $lista = New-Object System.Collections.Generic.List[object]
+            foreach ($ln in @(& $exe '--query-gpu=index,name,temperature.gpu' '--format=csv,noheader,nounits' 2>$null)) {
+                $p = "$ln" -split ',\s*'
+                if ($p.Count -ge 3 -and $p[2] -match '^\d+$') { $lista.Add([PSCustomObject]@{ Nombre = $p[1].Trim(); Temp = [double]$p[2] }) }
+            }
+            $r.Gpus = $lista.ToArray()
+        }
+    } catch {}
+    try {
+        $lista = New-Object System.Collections.Generic.List[object]
+        foreach ($pd in @(Get-PhysicalDisk -ErrorAction Stop)) {
+            try {
+                $rc = $pd | Get-StorageReliabilityCounter -ErrorAction Stop
+                $t = [double]$rc.Temperature; $m = [double]$rc.TemperatureMax
+                if ($t -gt 0 -and $t -lt 150) { $lista.Add([PSCustomObject]@{ Nombre = ("$($pd.FriendlyName)").Trim(); Temp = $t; Max = $(if ($m -gt 0 -and $m -lt 150) { $m } else { 0 }) }) }
+            } catch {}
+        }
+        $r.Discos = $lista.ToArray()
+    } catch {}
+    $r
+}
+
+function Global:Nivel-Temp {
+    param([double]$Valor, [string]$Tipo)
+    $lim = switch ($Tipo) { 'CPU' { 75, 90 } 'GPU' { 75, 85 } default { 55, 65 } }
+    if ($Valor -ge $lim[1]) { return 2 }
+    if ($Valor -ge $lim[0]) { return 1 }
+    return 0
+}
+
+function Global:Aplicar-TempTexto {
+    param($Tb, $Info)
+    if (-not $Tb -or -not $Info) { return }
+    $Tb.Text = $Info.Texto
+    $conv = New-Object System.Windows.Media.BrushConverter
+    $Tb.Foreground = switch ($Info.Nivel) { 0 { $conv.ConvertFromString("#4CE08A") } 1 { $conv.ConvertFromString("#FFB84D") } 2 { $conv.ConvertFromString("#FF5C5C") } default { $conv.ConvertFromString("#7C93BD") } }
+}
+
+function Global:Registrar-MaxTemp {
+    param([string]$Clave, [double]$Valor)
+    $E = $Global:GrafInicio
+    if (-not $E.TempMax.ContainsKey($Clave) -or $Valor -gt $E.TempMax[$Clave]) { $E.TempMax[$Clave] = $Valor }
+    return [double]$E.TempMax[$Clave]
+}
+
+function Global:Procesar-Temperaturas {
+    param($R)
+    $E = $Global:GrafInicio
+    $w = $Global:VentanaPrincipal
+    if (-not $R) { return }
+    # CPU
+    if ($null -ne $R.Cpu) {
+        $mx = Registrar-MaxTemp -Clave 'CPU' -Valor ([double]$R.Cpu)
+        Aplicar-TempTexto -Tb $w.FindName("TxtInicioCPUTemp") -Info @{ Nivel = (Nivel-Temp -Valor ([double]$R.Cpu) -Tipo 'CPU'); Texto = ("🌡 Temperatura: {0:N0} °C  ·  Máx (sesión): {1:N0} °C   (sensor termico de la placa)" -f $R.Cpu, $mx) }
+    } else {
+        Aplicar-TempTexto -Tb $w.FindName("TxtInicioCPUTemp") -Info @{ Nivel = 3; Texto = "🌡 Temperatura: no disponible (Windows no expone el sensor de la CPU en este equipo)" }
+    }
+    # GPU (NVIDIA mediante nvidia-smi)
+    $lineas = New-Object System.Collections.Generic.List[string]
+    $peor = 3
+    foreach ($g in @($R.Gpus)) {
+        $mx = Registrar-MaxTemp -Clave "GPU|$($g.Nombre)" -Valor ([double]$g.Temp)
+        $lineas.Add(("🌡 {0}: {1:N0} °C  ·  Máx (sesión): {2:N0} °C" -f $g.Nombre, $g.Temp, $mx))
+        $n = Nivel-Temp -Valor ([double]$g.Temp) -Tipo 'GPU'
+        if ($peor -eq 3 -or $n -gt $peor) { $peor = $n }
+    }
+    if ($lineas.Count -eq 0) { $lineas.Add("🌡 Temperatura de la GPU: no disponible (solo se puede leer en tarjetas NVIDIA; AMD/Intel no la exponen a Windows sin herramientas del fabricante)") }
+    Aplicar-TempTexto -Tb $w.FindName("TxtInicioGPUTemp") -Info @{ Nivel = $peor; Texto = ($lineas -join "`n") }
+    # Discos
+    foreach ($d in @($R.Discos)) {
+        $mx = Registrar-MaxTemp -Clave "DISCO|$($d.Nombre)" -Valor ([double]$d.Temp)
+        $txt = ("🌡 Temperatura: {0:N0} °C  ·  Máx (sesión): {1:N0} °C" -f $d.Temp, $mx)
+        if ($d.Max -gt 0) { $txt += ("  ·  Máx registrada por el disco: {0:N0} °C" -f $d.Max) }
+        $info = @{ Nivel = (Nivel-Temp -Valor ([double]$d.Temp) -Tipo 'DISCO'); Texto = $txt }
+        $E.TempDiscosInfo[$d.Nombre] = $info
+        if ($E.TbTempDisco.ContainsKey($d.Nombre)) { Aplicar-TempTexto -Tb $E.TbTempDisco[$d.Nombre] -Info $info }
+    }
+}
+
+function Global:Gestionar-LecturaTemperaturas {
+    $E = $Global:GrafInicio
+    if ($E.TempAR) {
+        if ($E.TempAR.IsCompleted) {
+            $res = $null
+            try { $res = @($E.TempPS.EndInvoke($E.TempAR)) | Select-Object -First 1 } catch {}
+            try { $E.TempPS.Dispose() } catch {}
+            $E.TempPS = $null; $E.TempAR = $null; $E.TickTemp = 0
+            try { Procesar-Temperaturas -R $res } catch {}
+        }
+        return
+    }
+    $E.TickTemp = $E.TickTemp + 1
+    if ($E.TickTemp -ge 5) {
+        try {
+            $ps = [powershell]::Create()
+            [void]$ps.AddScript($Global:BloqueLecturaTemp.ToString())
+            $E.TempPS = $ps
+            $E.TempAR = $ps.BeginInvoke()
+        } catch { $E.TempPS = $null; $E.TempAR = $null; $E.TickTemp = 0 }
+    }
+}
+
 # Uso de GPU: contadores "GPU Engine" (los mismos que usa el Administrador de
 # tareas). Por adaptador se toma el motor mas ocupado (3D, Copy, Video...).
 function Global:Leer-UsoGpu {
@@ -12910,6 +13042,7 @@ function Global:Tick-GraficosInicio {
         }
     } catch {}
     Redibujar-GraficosInicio
+    Gestionar-LecturaTemperaturas
     # Espacio libre de los discos: se refresca cada ~30 s
     $E.TickDiscos = $E.TickDiscos + 1
     if ($E.TickDiscos -ge 30) { $E.TickDiscos = 0; try { Dibujar-PanelDiscos } catch {} }
@@ -15068,6 +15201,7 @@ Marcar-Arranque 'funciones y recursos'
                                     <TextBlock Text="🧮 CPU  (pasa el mouse para ver los nucleos)" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
                                     <TextBlock x:Name="TxtInicioCPU" Text="--%" Foreground="White" FontWeight="Bold" FontSize="24" Margin="0,4,0,0"/>
                                     <TextBlock x:Name="TxtInicioCPUModelo" Text="" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="TxtInicioCPUTemp" Text="🌡 Temperatura: leyendo..." Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
                                     <Canvas x:Name="CanvasCPU" Height="110" Margin="0,8,0,4" Background="Transparent" ClipToBounds="True" Cursor="Cross"/>
                                     <TextBlock x:Name="TxtGrafCPU" Foreground="{StaticResource TextoSecundario}" FontSize="11"/>
                                 </StackPanel>
@@ -15107,6 +15241,7 @@ Marcar-Arranque 'funciones y recursos'
                                     <TextBlock Text="Uso de la GPU" Foreground="{StaticResource TextoSecundario}" FontSize="12" Margin="0,10,0,0"/>
                                     <TextBlock x:Name="TxtInicioGPUUso" Text="--%" Foreground="White" FontWeight="Bold" FontSize="24"/>
                                     <TextBlock x:Name="TxtInicioGPUDet" Text="" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="TxtInicioGPUTemp" Text="🌡 Temperatura: leyendo..." Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
                                     <Canvas x:Name="CanvasGPU" Height="110" Margin="0,8,0,4" Background="Transparent" ClipToBounds="True" Cursor="Cross"/>
                                     <TextBlock x:Name="TxtGrafGPU" Foreground="{StaticResource TextoSecundario}" FontSize="11"/>
                                 </StackPanel>
