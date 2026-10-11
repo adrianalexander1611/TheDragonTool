@@ -16307,6 +16307,13 @@ Marcar-Arranque 'funciones y recursos'
                                             <TextBlock Text="1 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
                                         </StackPanel>
                                     </Button>
+                                    <Button x:Name="BtnDiagCat_Alimentacion" Width="196" Height="84" Margin="0,0,10,10">
+                                        <StackPanel HorizontalAlignment="Center">
+                                            <TextBlock Text="⚡" FontSize="26" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="Alimentacion" FontSize="12" FontWeight="Bold" HorizontalAlignment="Center" Foreground="White"/>
+                                            <TextBlock Text="3 prueba(s)" FontSize="10" HorizontalAlignment="Center" Foreground="#7C93BD"/>
+                                        </StackPanel>
+                                    </Button>
                                 </WrapPanel>
                             </StackPanel>
                             <!-- Componente: Sistema general -->
@@ -16486,6 +16493,20 @@ Marcar-Arranque 'funciones y recursos'
                                         <TextBlock Text="🔌 Puertos y dispositivos" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
                                         <WrapPanel>
                                             <Button x:Name="BtnProbarUSB" Content="🔌 Dispositivos USB conectados" Width="212" Height="42" FontSize="12"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                            <!-- Componente: Alimentacion -->
+                            <StackPanel x:Name="PanelDiag_Alimentacion" Visibility="Collapsed">
+                                <Button x:Name="BtnDiagVolver_Alimentacion" Content="⬅  Volver" Width="120" Height="36" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                                <Border Style="{StaticResource TarjetaSeccion}" Padding="14" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <TextBlock Text="⚡ Alimentacion" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="16" Margin="0,0,0,6"/>
+                                        <WrapPanel>
+                                            <Button x:Name="BtnAlimCargador" Content="🔌 Funcionamiento del cargador" Width="232" Height="42" FontSize="12" Margin="0,0,8,8"/>
+                                            <Button x:Name="BtnAlimBateria" Content="🔋 Revision de bateria" Width="232" Height="42" FontSize="12" Margin="0,0,8,8"/>
+                                            <Button x:Name="BtnAlimFuente" Content="⚡ Fuente de poder (PC)" Width="232" Height="42" FontSize="12" Margin="0,0,8,8"/>
                                         </WrapPanel>
                                     </StackPanel>
                                 </Border>
@@ -17725,8 +17746,430 @@ $window.FindName("BtnProbarInternet").Add_Click({ Ejecutar-PruebaDiag -Nombre 'V
 $window.FindName("BtnProbarDispProblemas").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Dispositivos con problemas' -Icono '🧩' -Accion { Accion-ProbarDispositivosProblemas } })
 $window.FindName("BtnProbarEventos").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Eventos criticos' -Icono '📜' -Accion { Accion-ProbarEventosCriticos } })
 $window.FindName("BtnProbarEstadoWin").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Estado de Windows' -Icono '🛡️' -Accion { Accion-ProbarEstadoWindows } })
+# ---------------------------------------------------------------------------
+#  ALIMENTACION: cargador, bateria y fuente de poder
+# ---------------------------------------------------------------------------
+function Global:Asegurar-TipoEnergia {
+    if ('DragonPower' -as [type]) { return }
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class DragonPower {
+    [StructLayout(LayoutKind.Sequential)]
+    struct SYSTEM_POWER_STATUS {
+        public byte ACLineStatus; public byte BatteryFlag; public byte BatteryLifePercent; public byte SystemStatusFlag;
+        public int BatteryLifeTime; public int BatteryFullLifeTime;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS s);
+    public static int[] Leer() {
+        SYSTEM_POWER_STATUS s;
+        if (!GetSystemPowerStatus(out s)) { return null; }
+        return new int[] { s.ACLineStatus, s.BatteryFlag, s.BatteryLifePercent, s.BatteryLifeTime };
+    }
+}
+"@ -ErrorAction Stop
+}
+
+# Una lectura instantanea del estado de energia (cargador, carga y descarga en vatios, voltaje)
+function Global:Leer-EnergiaActual {
+    $o = [ordered]@{ AC = 255; Pct = -1; Flag = 255; Online = $null; Cargando = $null; CargaW = $null; DescargaW = $null; Voltaje = $null; RestanteWh = $null }
+    try { Asegurar-TipoEnergia; $p = [DragonPower]::Leer(); if ($p) { $o.AC = [int]$p[0]; $o.Flag = [int]$p[1]; $o.Pct = [int]$p[2] } } catch {}
+    try {
+        $s = Get-CimInstance -Namespace root/wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1
+        if ($s) {
+            $o.Online = [bool]$s.PowerOnline
+            $o.Cargando = [bool]$s.Charging
+            $c = [double]$s.ChargeRate; $d = [double]$s.DischargeRate
+            if ($c -gt 0 -and $c -lt 500000) { $o.CargaW = [math]::Round($c / 1000, 1) } else { $o.CargaW = 0 }
+            if ($d -gt 0 -and $d -lt 500000) { $o.DescargaW = [math]::Round($d / 1000, 1) } else { $o.DescargaW = 0 }
+            if ([double]$s.Voltage -gt 0) { $o.Voltaje = [math]::Round([double]$s.Voltage / 1000, 2) }
+            if ([double]$s.RemainingCapacity -gt 0) { $o.RestanteWh = [math]::Round([double]$s.RemainingCapacity / 1000, 2) }
+        }
+    } catch {}
+    return [PSCustomObject]$o
+}
+
+function Global:Accion-AlimCargador {
+    Write-DiagLog "=== FUNCIONAMIENTO DEL CARGADOR ==="
+    $bats = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
+    if ($bats.Count -eq 0) {
+        Write-DiagLog "No se detecto ninguna bateria: es un equipo de escritorio, o la bateria esta desconectada / no la reconoce Windows."
+        Write-DiagLog "Para revisar la alimentacion de un PC de escritorio usa 'Comprobar estado de la fuente de poder'."
+        return
+    }
+    $muestras = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt 4; $i++) {
+        if ($Global:DiagCancelada) { break }
+        Diag-Progreso -Pct ($i * 25) -Texto "Midiendo la carga ($($i + 1) de 4)..."
+        [void]$muestras.Add((Leer-EnergiaActual))
+        if ($i -lt 3) { Wait-UI -Milisegundos 1800 }
+    }
+    if ($muestras.Count -eq 0) { return }
+    $ult = $muestras[$muestras.Count - 1]
+    $pri = $muestras[0]
+    $conectado = (($ult.Online -eq $true) -or ($ult.AC -eq 1))
+    $cargando = (($ult.Cargando -eq $true) -or (($ult.Flag -ne 255) -and (($ult.Flag -band 8) -ne 0)))
+    $pct = $ult.Pct
+    if ($pct -lt 0 -or $pct -gt 100) { try { $pct = [int]$bats[0].EstimatedChargeRemaining } catch { $pct = -1 } }
+    # Tendencia de la carga durante la medicion
+    $tendencia = 0.0
+    try { if ($null -ne $pri.RestanteWh -and $null -ne $ult.RestanteWh) { $tendencia = [double]$ult.RestanteWh - [double]$pri.RestanteWh } } catch {}
+    $maxCarga = 0.0; $maxDesc = 0.0
+    foreach ($m in $muestras) { if ($null -ne $m.CargaW -and $m.CargaW -gt $maxCarga) { $maxCarga = [double]$m.CargaW }; if ($null -ne $m.DescargaW -and $m.DescargaW -gt $maxDesc) { $maxDesc = [double]$m.DescargaW } }
+
+    Write-DiagLog " - Cargador (corriente alterna): $(if ($conectado) { 'DETECTADO (conectado)' } else { 'NO DETECTADO' })"
+    Write-DiagLog " - Bateria: $(if ($pct -ge 0) { "$pct %" } else { 'nivel desconocido' })$(if ($cargando) { '  |  CARGANDO' } elseif ($conectado -and $pct -ge 98) { '  |  carga completa' } elseif ($conectado) { '  |  conectada, sin cargar' } else { '  |  usando bateria' })"
+    if ($maxCarga -gt 0) { Write-DiagLog " - Potencia de carga que recibe la bateria: $maxCarga W" }
+    if ($maxDesc -gt 0) { Write-DiagLog " - Consumo del equipo desde la bateria: $maxDesc W" }
+    if ($null -ne $ult.Voltaje) { Write-DiagLog " - Voltaje de la bateria: $($ult.Voltaje) V" }
+    if ($null -ne $ult.RestanteWh) { Write-DiagLog " - Energia almacenada ahora: $($ult.RestanteWh) Wh (cambio durante la medicion: $([math]::Round($tendencia * 1000, 0)) mWh)" }
+
+    # Controladores del adaptador y de la bateria
+    try {
+        $disp = @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object { $_.Name -match 'AC Adapter|Adaptador de CA|Adaptador de corriente|Control Method Battery|Bater.a con m.todo de control' })
+        foreach ($d in $disp) {
+            if ([int]$d.ConfigManagerErrorCode -ne 0) { Diag-Aviso "El controlador '$($d.Name)' tiene un problema (codigo $($d.ConfigManagerErrorCode)). Reinstalalo desde el Administrador de dispositivos (Baterias) y reinicia." }
+            else { Write-DiagLog "   Controlador '$($d.Name)': correcto" }
+        }
+    } catch {}
+
+    # Veredicto
+    if (-not $conectado) {
+        Diag-Aviso "No se detecta el cargador. Si lo tienes conectado: revisa la toma de corriente, el cable, el conector del equipo (suciedad o pin doblado) y prueba otro cargador original."
+        Write-DiagLog "   Si con otro cargador funciona, el cargador original esta danado. Si con ninguno funciona, el puerto de carga o la placa necesitan revision tecnica."
+        return
+    }
+    if ($cargando) {
+        Diag-Ok "El cargador funciona y la bateria esta cargando$(if ($maxCarga -gt 0) { " ($maxCarga W)" })."
+        if ($maxCarga -gt 0 -and $maxCarga -lt 10 -and $pct -lt 80) { Diag-Aviso "La potencia de carga es muy baja ($maxCarga W): puede ser un cargador de menor vatiaje que el original, o el equipo esta trabajando con mucha carga mientras carga." }
+        if ($maxDesc -gt 0) { Diag-Aviso "El equipo consume de la bateria ($maxDesc W) aunque esta conectado: el cargador entrega menos potencia de la que el equipo necesita ahora." }
+        return
+    }
+    if ($pct -ge 98) { Diag-Ok "Cargador detectado y la bateria esta completa (no necesita cargar)."; return }
+    if ($maxDesc -gt 0 -or $tendencia -lt -0.0005) {
+        Diag-Aviso "El cargador esta detectado pero la bateria se esta DESCARGANDO. El cargador no entrega potencia suficiente (vatiaje menor al original, cable danado o conector flojo)."
+    } else {
+        Diag-Aviso "El cargador esta detectado pero la bateria NO esta cargando ($pct %)."
+        Write-DiagLog "   Causas comunes: limite de carga del fabricante (modo conservacion, 60-80 %), bateria danada o muy gastada, cargador de menor vatiaje, o controlador ACPI/BIOS desactualizado."
+        Write-DiagLog "   Revisa la app del fabricante (limite de carga) y usa 'Revision de bateria' para ver su desgaste."
+    }
+}
+
+function Global:Accion-AlimBateria {
+    Write-DiagLog "=== REVISION DE BATERIA ==="
+    $bats = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
+    if ($bats.Count -eq 0) {
+        Write-DiagLog "No se detecto ninguna bateria: es un equipo de escritorio, o la bateria esta desconectada / no la reconoce Windows."
+        return
+    }
+    $quimica = @{ 1 = 'Otra'; 2 = 'Desconocida'; 3 = 'Plomo-acido'; 4 = 'Niquel-cadmio'; 5 = 'Niquel-hidruro metalico'; 6 = 'Ion de litio'; 7 = 'Zinc-aire'; 8 = 'Polimero de litio' }
+    $estadosBat = @{ 1 = 'Descargando'; 2 = 'Conectada a la corriente'; 3 = 'Carga completa'; 4 = 'Baja'; 5 = 'Critica'; 6 = 'Cargando'; 7 = 'Cargando (alta)'; 8 = 'Cargando (baja)'; 9 = 'Cargando (critica)'; 11 = 'Parcialmente cargada' }
+    $b = $bats[0]
+    Diag-Progreso -Pct 15 -Texto 'Leyendo la bateria...'
+    $nombre = "$($b.Name)".Trim()
+    $est = if ($estadosBat.ContainsKey([int]$b.BatteryStatus)) { $estadosBat[[int]$b.BatteryStatus] } else { "$($b.BatteryStatus)" }
+    Write-DiagLog " - Bateria: $nombre"
+    Write-DiagLog " - Estado actual: $est  |  Carga: $($b.EstimatedChargeRemaining) %"
+    $q = ''; try { $qi = [int]$b.Chemistry; if ($quimica.ContainsKey($qi)) { $q = $quimica[$qi] } } catch {}
+    if ($q) { Write-DiagLog " - Tecnologia: $q" }
+    if ($b.EstimatedRunTime -and [double]$b.EstimatedRunTime -lt 71582788) { Write-DiagLog " - Autonomia estimada: $($b.EstimatedRunTime) min" }
+    if ($b.DesignVoltage -and [double]$b.DesignVoltage -gt 0) { Write-DiagLog " - Voltaje de diseño: $([math]::Round([double]$b.DesignVoltage / 1000, 2)) V" }
+    $statusWin = "$($b.Status)"
+    if ($statusWin) { Write-DiagLog " - Estado segun Windows: $statusWin" }
+
+    # Datos de fabricante y capacidad (WMI de la bateria)
+    $diseno = 0.0; $llena = 0.0; $ciclos = -1; $fab = ''; $serie = ''
+    try { $sd = Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1; if ($sd) { $diseno = [double]$sd.DesignedCapacity; $fab = "$($sd.ManufactureName)".Trim(); $serie = "$($sd.SerialNumber)".Trim() } } catch {}
+    try { $fc = Get-CimInstance -Namespace root/wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1; if ($fc) { $llena = [double]$fc.FullChargedCapacity } } catch {}
+    try { $cc = Get-CimInstance -Namespace root/wmi -ClassName BatteryCycleCount -ErrorAction Stop | Select-Object -First 1; if ($cc -and [int]$cc.CycleCount -gt 0) { $ciclos = [int]$cc.CycleCount } } catch {}
+    Diag-Progreso -Pct 45 -Texto 'Generando el reporte de la bateria (powercfg)...'
+    try {
+        $dir = Join-Path $env:TEMP 'DragonToolBattery'
+        if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+        $xml = Join-Path $dir 'battery-report.xml'
+        powercfg /batteryreport /xml /output $xml *> $null
+        if (Test-Path $xml) {
+            $txt = Get-Content $xml -Raw
+            $mDis = [regex]::Match($txt, '<DesignCapacity>(\d+)</DesignCapacity>'); $mAct = [regex]::Match($txt, '<FullChargeCapacity>(\d+)</FullChargeCapacity>')
+            if (-not $mDis.Success) { $mDis = [regex]::Match($txt, 'DesignCapacity="(\d+)"'); $mAct = [regex]::Match($txt, 'FullChargeCapacity="(\d+)"') }
+            if ($diseno -le 0 -and $mDis.Success) { $diseno = [double]$mDis.Groups[1].Value }
+            if ($llena -le 0 -and $mAct.Success) { $llena = [double]$mAct.Groups[1].Value }
+            $mCic = [regex]::Match($txt, '<CycleCount>(\d+)</CycleCount>')
+            if ($ciclos -lt 0 -and $mCic.Success -and [int]$mCic.Groups[1].Value -gt 0) { $ciclos = [int]$mCic.Groups[1].Value }
+            if (-not $fab) { $mf = [regex]::Match($txt, '<Manufacturer>([^<]+)</Manufacturer>'); if ($mf.Success) { $fab = $mf.Groups[1].Value.Trim() } }
+            if (-not $serie) { $ms = [regex]::Match($txt, '<SerialNumber>([^<]+)</SerialNumber>'); if ($ms.Success) { $serie = $ms.Groups[1].Value.Trim() } }
+            Remove-Item $xml -Force -ErrorAction SilentlyContinue
+        }
+    } catch { Write-DiagLog "   (No se pudo generar el reporte detallado de powercfg; se usan los datos de Windows.)" }
+    if ($fab) { Write-DiagLog " - Fabricante: $fab$(if ($serie) { "  |  Serie: $serie" })" }
+
+    Diag-Progreso -Pct 75 -Texto 'Calculando la salud...'
+    $e = Leer-EnergiaActual
+    if ($null -ne $e.Voltaje) { Write-DiagLog " - Voltaje actual: $($e.Voltaje) V" }
+    $cargandoAhora = (($e.Cargando -eq $true) -or (($e.Flag -ne 255) -and (($e.Flag -band 8) -ne 0)))
+    Write-DiagLog " - Cargando ahora: $(if ($cargandoAhora) { "SI$(if ($e.CargaW -gt 0) { " ($($e.CargaW) W)" })" } else { 'no' })$(if ($e.DescargaW -gt 0) { "  |  Consumo desde bateria: $($e.DescargaW) W" })"
+    if ($diseno -gt 0) { Write-DiagLog " - Capacidad de diseño (nueva): $([math]::Round($diseno / 1000, 1)) Wh ($([int]$diseno) mWh)" }
+    if ($llena -gt 0) { Write-DiagLog " - Capacidad maxima actual: $([math]::Round($llena / 1000, 1)) Wh ($([int]$llena) mWh)" }
+    if ($ciclos -ge 0) { Write-DiagLog " - Ciclos de carga: $ciclos" }
+
+    # Salud y veredicto
+    $salud = -1.0
+    if ($diseno -gt 0 -and $llena -gt 0) {
+        $salud = [math]::Round(($llena / $diseno) * 100, 1)
+        if ($salud -gt 100) { $salud = 100.0 }
+        $desgaste = [math]::Round(100 - $salud, 1)
+        $barras = [int][math]::Round($salud / 10)
+        if ($barras -lt 0) { $barras = 0 }; if ($barras -gt 10) { $barras = 10 }
+        Write-DiagLog " - SALUD DE LA BATERIA: $salud %  [$(('█' * $barras) + ('░' * (10 - $barras)))]   (desgaste $desgaste %)"
+    } else {
+        Write-DiagLog " - No se pudo calcular el desgaste: la bateria no informa su capacidad de diseño."
+    }
+    $mala = $false
+    if ($statusWin -match '(?i)^(Error|Pred Fail|Degraded)$') { $mala = $true }
+    if ([int]$b.BatteryStatus -eq 5) { Write-DiagLog "   La bateria esta en nivel critico ahora mismo (descargada)." }
+    if ($salud -ge 0) {
+        if ($salud -lt 50 -or $mala -or ($ciclos -gt 1000 -and $salud -lt 70)) {
+            Diag-Aviso "SE RECOMIENDA CAMBIAR LA BATERIA: conserva solo $salud % de su capacidad$(if ($mala) { " y Windows la marca como '$statusWin'" })$(if ($ciclos -gt 0) { " ($ciclos ciclos)" }). Dura mucho menos y puede apagarse de golpe."
+        } elseif ($salud -lt 65) {
+            Diag-Aviso "La bateria esta muy desgastada ($salud %). Aun funciona, pero conviene planear su cambio pronto."
+        } elseif ($salud -lt 80) {
+            Write-DiagLog "   Desgaste normal por el uso ($salud %). No es necesario cambiarla todavia."
+        } else {
+            Diag-Ok "Bateria en buen estado ($salud % de su capacidad original). No necesita cambio."
+        }
+    } elseif ($mala) {
+        Diag-Aviso "Windows reporta la bateria como '$statusWin'. Se recomienda revisarla o cambiarla."
+    } else {
+        Write-DiagLog "   Sin datos de capacidad no se puede decidir si hay que cambiarla; si dura poco o se apaga sola, conviene cambiarla."
+    }
+    if ($ciclos -gt 800 -and $salud -ge 65) { Write-DiagLog "   Tiene muchos ciclos de carga ($ciclos): se acerca al final de su vida util." }
+    if ($e.Voltaje -and $b.DesignVoltage -and [double]$b.DesignVoltage -gt 0) {
+        $dv = [double]$b.DesignVoltage / 1000
+        if ($e.Voltaje -lt ($dv * 0.8)) { Diag-Aviso "El voltaje actual ($($e.Voltaje) V) es muy bajo respecto al de diseño ($([math]::Round($dv, 1)) V): puede haber celdas danadas." }
+    }
+}
+
+# --- Fuente de poder / consumo por componente / voltajes ---
+function Global:Leer-EnergyMeter {
+    $res = New-Object System.Collections.ArrayList
+    try {
+        if (-not [System.Diagnostics.PerformanceCounterCategory]::Exists('Energy Meter')) { return @() }
+        $cat = New-Object System.Diagnostics.PerformanceCounterCategory('Energy Meter')
+        $contadores = New-Object System.Collections.ArrayList
+        foreach ($n in $cat.GetInstanceNames()) {
+            $c = New-Object System.Diagnostics.PerformanceCounter('Energy Meter', 'Power', $n)
+            [void]$c.NextValue()
+            [void]$contadores.Add(@{ N = $n; C = $c; S = 0.0; K = 0 })
+        }
+        for ($i = 0; $i -lt 3; $i++) {
+            Wait-UI -Milisegundos 1000
+            foreach ($x in $contadores) { try { $x.S = [double]$x.S + [double]$x.C.NextValue(); $x.K = [int]$x.K + 1 } catch {} }
+        }
+        foreach ($x in $contadores) {
+            if ($x.K -gt 0) { [void]$res.Add([PSCustomObject]@{ Instancia = "$($x.N)"; Vatios = [math]::Round(([double]$x.S / $x.K) / 1000, 1) }) }
+            try { $x.C.Dispose() } catch {}
+        }
+    } catch {}
+    return $res.ToArray()
+}
+
+function Global:Leer-SensoresPlaca {
+    $res = New-Object System.Collections.ArrayList
+    foreach ($ns in @('root/LibreHardwareMonitor', 'root/OpenHardwareMonitor')) {
+        try {
+            foreach ($s in @(Get-CimInstance -Namespace $ns -ClassName Sensor -ErrorAction Stop)) {
+                [void]$res.Add([PSCustomObject]@{ Origen = $ns.Split('/')[1]; Tipo = "$($s.SensorType)"; Nombre = "$($s.Name)"; Valor = [double]$s.Value; Padre = "$($s.Parent)" })
+            }
+            if ($res.Count -gt 0) { break }
+        } catch {}
+    }
+    return $res.ToArray()
+}
+
+# Rango correcto segun el estandar ATX (+-5 %) para cada riel
+function Global:Evaluar-RielVoltaje {
+    param([string]$Nombre, [double]$Valor)
+    $nom = $null; $tol = 0.05; $etq = ''
+    if ($Nombre -match '(?i)-\s*12') { $nom = -12.0; $tol = 0.10; $etq = '-12V' }
+    elseif ($Nombre -match '(?i)5\s*V?\s*SB|VSB\s*5|standby.*5') { $nom = 5.0; $etq = '+5VSB (reposo)' }
+    elseif ($Nombre -match '(?i)3\s*V?\s*SB|3VSB|standby.*3') { $nom = 3.3; $etq = '+3.3VSB (reposo)' }
+    elseif ($Nombre -match '(?i)3\.3|3V3|AVCC|3VCC') { $nom = 3.3; $etq = '+3.3V' }
+    elseif ($Nombre -match '(?i)(^|[^\d.])\+?5\s*V\b') { $nom = 5.0; $etq = '+5V' }
+    elseif ($Nombre -match '(?i)(^|[^\d.])\+?12\s*V\b') { $nom = 12.0; $etq = '+12V' }
+    elseif ($Nombre -match '(?i)VBAT|CMOS|battery') { $nom = 3.0; $tol = 0.10; $etq = 'Pila CMOS' }
+    if ($null -eq $nom) { return $null }
+    $desv = [math]::Abs(($Valor - $nom) / $nom)
+    $estado = if ($desv -le $tol) { 'OK' } elseif ($desv -le ($tol * 1.6)) { 'LIMITE' } else { 'FUERA' }
+    return [PSCustomObject]@{ Rail = $etq; Nominal = $nom; Min = [math]::Round($nom * (1 - $tol), 2); Max = [math]::Round($nom * (1 + $tol), 2); Desv = [math]::Round($desv * 100, 1); Estado = $estado }
+}
+
+function Global:Preparar-LhmPortable {
+    $dir = Join-Path $Global:ConfigRuta 'LibreHardwareMonitor'
+    $exe = $null
+    if (Test-Path -LiteralPath $dir) { $f = Get-ChildItem -LiteralPath $dir -Recurse -Filter 'LibreHardwareMonitor.exe' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($f) { $exe = $f.FullName } }
+    if ($exe) { return $exe }
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $api = Invoke-RestMethod -Uri 'https://api.github.com/repos/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest' -Headers @{ 'User-Agent' = 'TheDragonTool' } -TimeoutSec 30 -ErrorAction Stop
+    $asset = $null
+    foreach ($a in $api.assets) { if ("$($a.name)" -eq 'LibreHardwareMonitor.zip') { $asset = $a } }
+    if (-not $asset) { foreach ($a in $api.assets) { if (-not $asset -and "$($a.name)" -match '^LibreHardwareMonitor.*net4.*\.zip$') { $asset = $a } } }
+    if (-not $asset) { foreach ($a in $api.assets) { if (-not $asset -and "$($a.name)" -match '^LibreHardwareMonitor.*\.zip$') { $asset = $a } } }
+    if (-not $asset) { throw 'No se encontro el paquete de LibreHardwareMonitor en GitHub.' }
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $zip = Join-Path $env:TEMP 'LibreHardwareMonitor.zip'
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
+    Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { try { Unblock-File -LiteralPath $_.FullName } catch {} }
+    $f = Get-ChildItem -LiteralPath $dir -Recurse -Filter 'LibreHardwareMonitor.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $f) { throw 'El paquete descargado no contiene LibreHardwareMonitor.exe.' }
+    return $f.FullName
+}
+
+function Global:Accion-AlimFuente {
+    Write-DiagLog "=== ESTADO DE LA FUENTE DE PODER Y CONSUMO POR COMPONENTE ==="
+    $esPortatil = $false
+    try { $esPortatil = (@(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)).Count -gt 0 } catch {}
+    if ($esPortatil) { Write-DiagLog "Este equipo tiene bateria (portatil): no usa una fuente de poder interna sino un cargador externo. Se muestra el consumo y los voltajes disponibles; para el cargador usa 'Funcionamiento del cargador'." }
+    else { Write-DiagLog "Equipo de escritorio: la fuente de poder (PSU) entrega +12V, +5V y +3.3V a la placa, CPU, GPU y discos." }
+
+    # 1) Consumo por componente
+    Diag-Progreso -Pct 10 -Texto 'Midiendo el consumo de cada componente...'
+    Write-DiagLog ""
+    Write-DiagLog "CONSUMO POR COMPONENTE (vatios, medido ahora):"
+    $total = 0.0; $hayMedida = $false
+    $rapl = @(Leer-EnergyMeter)
+    $pkg = $null; $psys = $null
+    foreach ($r in $rapl) {
+        $n = $r.Instancia; $w = [double]$r.Vatios
+        $et = $n
+        if ($n -match 'PSYS') { $et = 'Plataforma completa (CPU + placa)'; $psys = $w }
+        elseif ($n -match 'PKG') { $et = 'CPU (procesador completo)'; $pkg = $w }
+        elseif ($n -match 'PP0|CORE') { $et = 'CPU (solo nucleos)' }
+        elseif ($n -match 'PP1|GPU|UNCORE') { $et = 'GPU integrada' }
+        elseif ($n -match 'DRAM') { $et = 'Memoria RAM' }
+        Write-DiagLog " - $et`: $w W"
+        $hayMedida = $true
+    }
+    if ($rapl.Count -eq 0) { Write-DiagLog " - CPU / RAM: Windows no entrega el consumo en este equipo (se necesita un procesador con medidor de energia Intel RAPL)." }
+    $gpuW = 0.0
+    try {
+        $exe = $null
+        $cmd = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+        if ($cmd) { $exe = $cmd.Source }
+        foreach ($c in @("$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "$env:SystemRoot\System32\nvidia-smi.exe")) { if (-not $exe -and (Test-Path $c)) { $exe = $c } }
+        if ($exe) {
+            foreach ($ln in @(& $exe '--query-gpu=name,power.draw,power.limit,utilization.gpu' '--format=csv,noheader,nounits' 2>$null)) {
+                $p = "$ln" -split ',\s*'
+                if ($p.Count -ge 3 -and $p[1] -match '^[\d.]+$') {
+                    $d = [double]::Parse($p[1], [Globalization.CultureInfo]::InvariantCulture); $gpuW += $d
+                    Write-DiagLog " - GPU $($p[0].Trim()): $d W (limite $($p[2]) W$(if ($p.Count -ge 4) { ", uso $($p[3]) %" }))"
+                    $hayMedida = $true
+                }
+            }
+        }
+    } catch {}
+    # Sensores de la placa si LibreHardwareMonitor / OpenHardwareMonitor ya estan abiertos
+    $sensores = @(Leer-SensoresPlaca | Where-Object { $_ })
+    foreach ($s in @($sensores | Where-Object { $_.Tipo -eq 'Power' })) { Write-DiagLog " - $($s.Padre) / $($s.Nombre): $([math]::Round($s.Valor, 1)) W"; $hayMedida = $true }
+    $e = Leer-EnergiaActual
+    if ($esPortatil -and $e.DescargaW -gt 0) { Write-DiagLog " - TODO el equipo (consumo desde la bateria): $($e.DescargaW) W" }
+    # Total
+    if ($null -ne $psys) { $total = $psys + $gpuW } elseif ($null -ne $pkg) { $total = $pkg + $gpuW + (@($rapl | Where-Object { $_.Instancia -match 'DRAM' }) | Measure-Object -Property Vatios -Sum).Sum } else { $total = $gpuW }
+    if ($total -gt 0) {
+        Write-DiagLog " = Consumo medido de componentes principales: $([math]::Round($total, 0)) W"
+        $resto = if ($esPortatil) { 10 } else { 35 }
+        Write-DiagLog "   (mas ~$resto W estimados de placa, discos, ventiladores y USB que Windows no mide)"
+        $pico = ($total + $resto) * 2.2
+        Write-DiagLog "   Referencia: bajo carga maxima (juegos / render) este equipo puede subir a unos $([math]::Round($pico, -1)) W; una fuente de calidad de al menos $([math]::Round($pico * 1.2, -1)) W trabaja con holgura."
+    } elseif (-not $hayMedida) {
+        Write-DiagLog " (Ninguna lectura de consumo disponible con las herramientas de Windows; con LibreHardwareMonitor se pueden leer mas componentes.)"
+    }
+
+    # 2) Voltajes
+    Diag-Progreso -Pct 55 -Texto 'Revisando los voltajes...'
+    Write-DiagLog ""
+    Write-DiagLog "VOLTAJES DE ALIMENTACION:"
+    $volt = @($sensores | Where-Object { $_.Tipo -eq 'Voltage' })
+    if ($volt.Count -eq 0 -and -not $esPortatil) {
+        Write-DiagLog " Windows no puede leer los voltajes +12V / +5V / +3.3V de la fuente: los miden los chips de la placa y solo los entrega un programa de sensores."
+        $ok = Show-Confirm "Para leer y comprobar los voltajes de la fuente hace falta LibreHardwareMonitor (programa gratuito y de codigo abierto).`n`n¿Quieres que lo descargue de GitHub y lo use ahora?`n(Requiere administrador. Si tu antivirus avisa, permite el programa. Se cierra solo al terminar.)" "Voltajes de la fuente"
+        if ($ok) {
+            try {
+                Diag-Progreso -Pct 60 -Texto 'Descargando LibreHardwareMonitor...'
+                $exeLhm = Preparar-LhmPortable
+                Diag-Progreso -Pct 75 -Texto 'Iniciando la lectura de sensores...'
+                $proc = Start-Process -FilePath $exeLhm -WindowStyle Minimized -PassThru -ErrorAction Stop
+                for ($i = 0; $i -lt 14 -and $volt.Count -eq 0; $i++) {
+                    Wait-UI -Milisegundos 1000
+                    $sensores = @(Leer-SensoresPlaca | Where-Object { $_ })
+                    $volt = @($sensores | Where-Object { $_.Tipo -eq 'Voltage' })
+                }
+                $pw = @($sensores | Where-Object { $_.Tipo -eq 'Power' })
+                if ($pw.Count -gt 0) { Write-DiagLog " Consumo por componente (sensores de la placa):"; foreach ($s in $pw) { Write-DiagLog "   - $($s.Padre) / $($s.Nombre): $([math]::Round($s.Valor, 1)) W" } }
+                $Script:LhmProceso = $proc
+            } catch {
+                Diag-Aviso "No se pudo preparar LibreHardwareMonitor: $($_.Exception.Message)"
+            }
+        } else { Write-DiagLog " (Lectura de voltajes omitida por el usuario.)" }
+    }
+    $fuera = 0; $limite = 0; $evaluados = 0
+    if ($volt.Count -gt 0) {
+        foreach ($v in $volt) {
+            $ev = Evaluar-RielVoltaje -Nombre $v.Nombre -Valor $v.Valor
+            if ($ev) {
+                $evaluados++
+                $marca = switch ($ev.Estado) { 'OK' { '✔ correcto' } 'LIMITE' { '⚠ en el limite' } default { '✖ FUERA DE RANGO' } }
+                Write-DiagLog (" - {0,-18} {1,7:N3} V   rango {2}-{3} V   {4}" -f $ev.Rail, $v.Valor, $ev.Min, $ev.Max, $marca)
+                if ($ev.Estado -eq 'FUERA') { $fuera++ } elseif ($ev.Estado -eq 'LIMITE') { $limite++ }
+            } else {
+                Write-DiagLog (" - {0,-18} {1,7:N3} V   (informativo)" -f $v.Nombre, $v.Valor)
+            }
+        }
+        if ($evaluados -eq 0) { Write-DiagLog "   Los sensores de esta placa no identifican los rieles +12V/+5V/+3.3V por nombre; compara con el BIOS o HWiNFO." }
+        elseif ($fuera -gt 0) { Diag-Aviso "$fuera voltaje(s) FUERA del rango del estandar ATX (±5 %). La fuente puede estar fallando o el sensor de la placa esta mal calibrado: confirma con un multimetro o HWiNFO antes de cambiarla." }
+        elseif ($limite -gt 0) { Diag-Aviso "$limite voltaje(s) en el limite del rango. Vigilalos bajo carga; si empeoran, la fuente esta perdiendo calidad." }
+        else { Diag-Ok "Todos los voltajes de la fuente medidos estan dentro del rango del estandar ATX." }
+        Write-DiagLog "   Nota: las placas leen con un error de 1-3 %. Rango ATX: +12V 11.40-12.60 | +5V 4.75-5.25 | +3.3V 3.14-3.46."
+    }
+    # Voltajes que Windows si entrega
+    try {
+        $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1
+        if ($cpu -and [int]$cpu.CurrentVoltage -gt 0) {
+            $cv = [int]$cpu.CurrentVoltage
+            $vc = if (($cv -band 128) -ne 0) { ($cv -band 127) / 10.0 } else { $null }
+            if ($vc) { Write-DiagLog " - CPU (voltaje del nucleo segun Windows): $vc V" }
+        }
+    } catch {}
+    try {
+        foreach ($m in @(Get-CimInstance Win32_PhysicalMemory -ErrorAction Stop)) {
+            if ([int]$m.ConfiguredVoltage -gt 0) {
+                $mv = [int]$m.ConfiguredVoltage / 1000.0
+                $tipo = [int]$m.SMBIOSMemoryType
+                $normal = if ($tipo -eq 34 -or $tipo -eq 35) { 1.1 } elseif ($tipo -eq 26 -or $tipo -eq 30) { 1.2 } elseif ($tipo -eq 24 -or $tipo -eq 29) { 1.5 } else { 0 }
+                $txt = " - RAM $($m.DeviceLocator): $mv V"
+                if ($normal -gt 0) { $txt += "   (normal: $normal V; con perfil XMP/EXPO puede llegar a $([math]::Round($normal + 0.25, 2)) V)" }
+                Write-DiagLog $txt
+                if ($normal -gt 0 -and $mv -gt ($normal + 0.3)) { Diag-Aviso "La RAM trabaja a $mv V, bastante mas de lo normal ($normal V). Revisa el perfil XMP/EXPO en la BIOS." }
+            }
+        }
+    } catch {}
+    if ($esPortatil -and $null -ne $e.Voltaje) { Write-DiagLog " - Bateria: $($e.Voltaje) V" }
+    # Cerrar la herramienta externa si la abrimos nosotros
+    try { if ($Script:LhmProceso -and -not $Script:LhmProceso.HasExited) { $null = $Script:LhmProceso.CloseMainWindow(); Start-Sleep -Milliseconds 600; if (-not $Script:LhmProceso.HasExited) { $Script:LhmProceso.Kill() } } } catch {}
+    $Script:LhmProceso = $null
+    # Eventos de energia recientes (apagones, Kernel-Power)
+    try {
+        $kp = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 41; StartTime = (Get-Date).AddDays(-30) } -MaxEvents 10 -ErrorAction Stop)
+        if ($kp.Count -gt 0) { Diag-Aviso "En los ultimos 30 dias el equipo se apago o reinicio sin cerrar Windows $($kp.Count) vez/veces (evento Kernel-Power 41). Es tipico de una fuente debil, un corte de energia o sobrecalentamiento." }
+    } catch {}
+}
+$window.FindName("BtnAlimCargador").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Funcionamiento del cargador' -Icono '🔌' -Accion { Accion-AlimCargador } })
+$window.FindName("BtnAlimBateria").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Revision de bateria' -Icono '🔋' -Accion { Accion-AlimBateria } })
+$window.FindName("BtnAlimFuente").Add_Click({ Ejecutar-PruebaDiag -Nombre 'Estado de la fuente de poder' -Icono '⚡' -Accion { Accion-AlimFuente } })
 # Menu de componentes: muestra solo el panel elegido (o el menu si Clave esta vacia)
-$Global:DiagCategorias = @('Sistema', 'CPU', 'RAM', 'Disco', 'Graficos', 'Audio', 'Entrada', 'Camara', 'Red', 'Energia', 'Puertos')
+$Global:DiagCategorias = @('Sistema', 'CPU', 'RAM', 'Disco', 'Graficos', 'Audio', 'Entrada', 'Camara', 'Red', 'Energia', 'Puertos', 'Alimentacion')
 function Global:Mostrar-CategoriaDiag {
     param([string]$Clave = '')
     try {
@@ -19766,6 +20209,11 @@ $Global:AyudaControles = @{
     'BtnDiagVolver_Red' = 'Vuelve a la lista de categorias de diagnostico.'
     'BtnDiagVolver_Energia' = 'Vuelve a la lista de categorias de diagnostico.'
     'BtnDiagVolver_Puertos' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagVolver_Alimentacion' = 'Vuelve a la lista de categorias de diagnostico.'
+    'BtnDiagCat_Alimentacion' = "Alimentacion:`n• Funcionamiento del cargador`n• Revision de bateria (salud, ciclos, si conviene cambiarla)`n• Fuente de poder en PC (voltajes, watts por componente)"
+    'BtnAlimCargador' = 'Comprueba si el equipo detecta el cargador, si la bateria esta cargando y cuantos watts entran.'
+    'BtnAlimBateria' = 'Revisa el estado de la bateria: carga, capacidad real, ciclos, desgaste e indica si hay que cambiarla.'
+    'BtnAlimFuente' = 'PC de escritorio: lee los voltajes de la fuente (12V, 5V, 3.3V), valida el rango y muestra los watts por componente.'
     # --- Diagnosticar equipo: pruebas ---
     'BtnInfoHardware' = 'Muestra la informacion completa del hardware: marca, modelo, serie, CPU, RAM, discos, video y placa.'
     'BtnProbarArranque' = 'Mide cuanto tarda Windows en arrancar y que programas lo retrasan.'
