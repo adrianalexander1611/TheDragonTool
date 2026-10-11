@@ -13988,6 +13988,43 @@ $Script:CatalogoProgramas = @(
     @{ Categoria='Juegos y launchers'; Nombre='SuperTuxKart (juego de carreras gratis)'; WingetId='SuperTuxKart.SuperTuxKart' }
 )
 
+# Ejecuta winget capturando su codigo de salida y lo ultimo que escribio, para poder explicar por que fallo una instalacion
+function Global:Invocar-Winget {
+    param([string[]]$Argumentos)
+    $so = [System.IO.Path]::GetTempFileName(); $se = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath "winget.exe" -ArgumentList $Argumentos -Wait -PassThru -NoNewWindow -RedirectStandardOutput $so -RedirectStandardError $se -ErrorAction Stop
+        $txt = ''
+        foreach ($f in @($so, $se)) { try { $txt += "$(Get-Content -LiteralPath $f -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)`n" } catch {} }
+        $lineas = @(($txt -split "[\r\n]+") | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^[\s\-\\|/█▒░]+$' -and $_ -notmatch '^[\d\.]+\s*(KB|MB|GB)\s*/' -and $_ -notmatch '^\d+%$' })
+        return @{ Codigo = [int]$p.ExitCode; Salida = (($lineas | Select-Object -Last 4) -join ' | ') }
+    } finally { Remove-Item -LiteralPath $so, $se -Force -ErrorAction SilentlyContinue }
+}
+
+# Instala Microsoft 365 / Office con la Herramienta de implementacion de Office (el instalador oficial de Microsoft)
+# cuando winget no puede. Office muestra su propia ventana de progreso.
+function Global:Instalar-OfficeODT {
+    param($Ventana = $null)
+    try {
+        $dir = Join-Path $env:TEMP "DragonOffice"
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $setup = Join-Path $dir "setup.exe"
+        $cfg = Join-Path $dir "configuracion.xml"
+        if ($Ventana) { Update-VentanaProgreso -Ventana $Ventana -Porcentaje 40 -Estado "Descargando el instalador oficial de Office..." -LogLinea "Descargando la Herramienta de implementacion de Office (setup.exe de Microsoft)..." }
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri "https://officecdn.microsoft.com/pr/wsus/setup.exe" -OutFile $setup -UseBasicParsing -ErrorAction Stop
+        $edicion = if ([Environment]::Is64BitOperatingSystem) { '64' } else { '32' }
+        $xml = "<Configuration>`r`n  <Add OfficeClientEdition=`"$edicion`" Channel=`"Current`">`r`n    <Product ID=`"O365ProPlusRetail`">`r`n      <Language ID=`"MatchOS`"/>`r`n    </Product>`r`n  </Add>`r`n  <Display Level=`"Full`" AcceptEULA=`"TRUE`"/>`r`n</Configuration>"
+        Set-Content -LiteralPath $cfg -Value $xml -Encoding UTF8
+        if ($Ventana) { Update-VentanaProgreso -Ventana $Ventana -Porcentaje 60 -Estado "Instalando Microsoft 365 (sigue la ventana de Office)..." -LogLinea "Ejecutando el instalador de Office. Puede tardar varios minutos; usa su propia ventana de progreso." }
+        $p = Start-Process -FilePath $setup -ArgumentList "/configure", "`"$cfg`"" -Wait -PassThru -ErrorAction Stop
+        if ($p.ExitCode -eq 0) { return @{ Ok = $true; Detalle = '' } }
+        return @{ Ok = $false; Detalle = "el instalador de Office termino con el codigo $($p.ExitCode)" }
+    } catch {
+        return @{ Ok = $false; Detalle = "$($_.Exception.Message)" }
+    }
+}
+
 function Accion-InstalarCatalogoSeleccionado {
     param($Items)
     if (-not (Test-WingetDisponible)) {
@@ -14002,6 +14039,7 @@ function Accion-InstalarCatalogoSeleccionado {
     $i = 0
     $exitosos = 0
     $fallidos = New-Object System.Collections.Generic.List[string]
+    $detalles = New-Object System.Collections.Generic.List[string]
     foreach ($item in $Items) {
         $i++
         if ($prog.Tag -eq $true) {
@@ -14012,18 +14050,34 @@ function Accion-InstalarCatalogoSeleccionado {
         Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -Estado "Instalando $($item.Nombre) ($i de $($Items.Count))..." -LogLinea "Instalando $($item.Nombre) [$($item.WingetId)]..."
 
         try {
-            $argumentos = @("install", "--id", $item.WingetId, "-e", "--silent",
+            $argumentos = @("install", "--id", $item.WingetId, "-e", "--source", "winget", "--silent",
                             "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
-            $procInfo = Start-Process -FilePath "winget.exe" -ArgumentList $argumentos -Wait -PassThru -NoNewWindow -ErrorAction Stop
-            if ($procInfo.ExitCode -eq 0) {
+            $r = Invocar-Winget -Argumentos $argumentos
+            if ($r.Codigo -eq 0) {
                 $exitosos++
                 Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "$($item.Nombre) instalado correctamente."
             } else {
-                $fallidos.Add($item.Nombre) | Out-Null
-                Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "No se pudo instalar $($item.Nombre) (codigo $($procInfo.ExitCode))."
+                $hex = '0x{0:X8}' -f $r.Codigo
+                $motivo = if ($r.Salida) { $r.Salida } else { 'winget no dio mas detalles' }
+                Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "No se pudo instalar $($item.Nombre) (codigo $hex): $motivo"
+                Write-Log "No se pudo instalar $($item.Nombre) con winget (codigo $hex). Detalle: $motivo" -Tipo AVISO
+                $okOffice = $false
+                if ($item.WingetId -eq 'Microsoft.Office') {
+                    $prog.Topmost = $false
+                    if (Show-Confirm "winget no pudo instalar Microsoft 365 / Office (codigo $hex).`n`n¿Probar con el instalador oficial de Office (Herramienta de implementacion de Office)? Descarga unos MB de Microsoft y luego Office; puede tardar varios minutos.") {
+                        $o = Instalar-OfficeODT -Ventana $prog
+                        if ($o.Ok) { $okOffice = $true; $exitosos++; Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "Microsoft 365 / Office instalado con el instalador oficial." }
+                        else { $motivo = "$motivo | Instalador oficial: $($o.Detalle)"; Write-Log "La instalacion de Office con el instalador oficial fallo: $($o.Detalle)" -Tipo AVISO }
+                    }
+                }
+                if (-not $okOffice) {
+                    $fallidos.Add($item.Nombre) | Out-Null
+                    $detalles.Add("$($item.Nombre): $(if ($motivo.Length -gt 220) { $motivo.Substring(0, 220) + '...' } else { $motivo })") | Out-Null
+                }
             }
         } catch {
             $fallidos.Add($item.Nombre) | Out-Null
+            $detalles.Add("$($item.Nombre): $($_.Exception.Message)") | Out-Null
             Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "Error instalando $($item.Nombre): $($_.Exception.Message)"
         }
     }
@@ -14031,7 +14085,7 @@ function Accion-InstalarCatalogoSeleccionado {
     Close-VentanaProgreso -Ventana $prog -MensajeFinal "$exitosos de $($Items.Count) instalado(s)."
     Write-Log "Instalacion de programas finalizada: $exitosos exitoso(s), $($fallidos.Count) fallido(s)." -Tipo OK
     if ($fallidos.Count -gt 0) {
-        Show-Aviso "$exitosos programa(s) instalado(s) correctamente.`n`nNo se pudieron instalar: $($fallidos -join ', ')" "Instalacion finalizada"
+        Show-Aviso "$exitosos programa(s) instalado(s) correctamente.`n`nNo se pudieron instalar: $($fallidos -join ', ')`n`nMotivo:`n$($detalles -join "`n")`n`nEl detalle tambien quedo en la pestaña Registro de errores." "Instalacion finalizada"
     } else {
         Show-Aviso "Los $exitosos programa(s) seleccionados se instalaron correctamente." "Instalacion finalizada"
     }
