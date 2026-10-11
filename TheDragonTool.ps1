@@ -12449,7 +12449,7 @@ $Global:GrafInicio = @{
     CPU = @{ Nombre = 'CPU'; Canvas = $null; Datos = $null; Extra = $null; Color = '#4FA8FF'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     RAM = @{ Nombre = 'RAM'; Canvas = $null; Datos = $null; Extra = $null; Color = '#B07CFF'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
     DISCO = @{ Nombre = 'Disco'; Canvas = $null; Datos = $null; Extra = $null; Color = '#3DDC97'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
-    GPU = @{ Nombre = 'GPU'; Canvas = $null; Datos = $null; Extra = $null; Color = '#FF9F43'; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
+    GpuCardsLista = $null
     TempPS = $null; TempAR = $null; TickTemp = 99; TempMax = @{}; TbTempDisco = @{}; TempDiscosInfo = @{}
     GpuCat = $null; GpuMem = $null; GpuPrev = @{}; GpuDisponible = $false; GpuAdaptadores = @()
     DiscosFisicos = $null; TickDiscos = 0
@@ -12716,10 +12716,6 @@ function Global:Cargar-InfoEstaticaInicio {
         $w.FindName("TxtInicioRAMDetalle").Text = (@($ram.Linea2, $ram.Forma) | Where-Object { $_ }) -join "`n"
         if ($E.TbRamTip) { $E.TbRamTip.Text = "MEMORIA RAM`n$($ram.Titulo)`n$($ram.Linea2)`n$($ram.Forma)`n`n$($ram.Detalle)" }
     } catch {}
-    try {
-        $lineasGpu = @(Get-LineasGPU)
-        $w.FindName("TxtInicioGPU").Text = $lineasGpu -join "`n"
-    } catch {}
     try { $E.DiscosFisicos = @(Get-ListaDiscosFisicos); Dibujar-PanelDiscos } catch {}
 }
 
@@ -12889,18 +12885,24 @@ function Global:Procesar-Temperaturas {
     } else {
         Aplicar-TempTexto -Tb $w.FindName("TxtInicioCPUTemp") -Info @{ Nivel = 3; Texto = "🌡 Temperatura: no disponible (Windows no expone el sensor de la CPU en este equipo)" }
     }
-    # GPU (NVIDIA mediante nvidia-smi)
-    $lineas = New-Object System.Collections.Generic.List[string]
-    $peor = 3
-    foreach ($g in @($R.Gpus)) {
-        if ([double]$g.Temp -le 0) { $lineas.Add("🌡 $($g.Nombre): sin lectura (GPU en reposo)"); continue }
-        $mx = Registrar-MaxTemp -Clave "GPU|$($g.Nombre)" -Valor ([double]$g.Temp)
-        $lineas.Add(("🌡 {0}: {1:N0} °C  ·  Máx (sesión): {2:N0} °C" -f $g.Nombre, $g.Temp, $mx))
-        $n = Nivel-Temp -Valor ([double]$g.Temp) -Tipo 'GPU'
-        if ($peor -eq 3 -or $n -gt $peor) { $peor = $n }
+    # GPU (NVIDIA mediante nvidia-smi): cada tarjeta muestra su propia temperatura
+    foreach ($c in @($E.GpuCardsLista)) {
+        $nv = $null
+        foreach ($g in @($R.Gpus)) { if ($c.Nombre -like "*$($g.Nombre)*" -or $g.Nombre -like "*$($c.Nombre)*") { $nv = $g; break } }
+        if ($nv) {
+            if ([double]$nv.Temp -le 0) {
+                $info = @{ Nivel = 3; Texto = "🌡 Temperatura: sin lectura (la GPU esta en reposo)" }
+            } else {
+                $mx = Registrar-MaxTemp -Clave "GPU|$($c.Nombre)" -Valor ([double]$nv.Temp)
+                $info = @{ Nivel = (Nivel-Temp -Valor ([double]$nv.Temp) -Tipo 'GPU'); Texto = ("🌡 Temperatura: {0:N0} °C  ·  Máx (sesión): {1:N0} °C" -f $nv.Temp, $mx) }
+            }
+        } elseif ($c.Nombre -match 'NVIDIA|GeForce') {
+            $info = @{ Nivel = 3; Texto = "🌡 Temperatura: no disponible (no se encontro nvidia-smi; actualiza el driver NVIDIA)" }
+        } else {
+            $info = @{ Nivel = 3; Texto = "🌡 Temperatura: no disponible (Windows no la expone en GPU Intel/AMD sin herramientas del fabricante)" }
+        }
+        Aplicar-TempTexto -Tb $c.TbTemp -Info $info
     }
-    if ($lineas.Count -eq 0) { $lineas.Add("🌡 Temperatura de la GPU: no disponible (solo se puede leer en tarjetas NVIDIA; AMD/Intel no la exponen a Windows sin herramientas del fabricante)") }
-    Aplicar-TempTexto -Tb $w.FindName("TxtInicioGPUTemp") -Info @{ Nivel = $peor; Texto = ($lineas -join "`n") }
     # Discos
     foreach ($d in @($R.Discos)) {
         $mx = Registrar-MaxTemp -Clave "DISCO|$($d.Nombre)" -Valor ([double]$d.Temp)
@@ -13002,7 +13004,7 @@ function Global:Get-AdaptadoresDxgi {
         $tipo = if ($nombre -match 'GeForce|RTX|GTX|Quadro|NVIDIA|Radeon RX|Radeon Pro|Arc\b') { 'Dedicada' }
                 elseif ($nombre -match 'Intel|UHD|Iris|HD Graphics|Radeon\(TM\) Graphics|Radeon Graphics|Vega \d') { 'Integrada' }
                 elseif ($ded -ge 1024) { 'Dedicada' } else { '' }
-        $res.Add([PSCustomObject]@{ Key = $p[0].ToLower(); Nombre = $nombre; Tipo = $tipo })
+        $res.Add([PSCustomObject]@{ Key = $p[0].ToLower(); Nombre = $nombre; Tipo = $tipo; DedMB = $ded })
     }
     return $res.ToArray()
 }
@@ -13031,16 +13033,20 @@ function Global:Leer-UsoGpu {
         $luid = $clave.Split('|')[0]
         $v = [Math]::Min(100, $motores[$clave])
         if (-not $porLuid.ContainsKey($luid) -or $v -gt $porLuid[$luid].Pct) {
-            $porLuid[$luid] = [PSCustomObject]@{ Luid = $luid; Pct = $v; Vram = [double]0 }
+            $porLuid[$luid] = [PSCustomObject]@{ Luid = $luid; Pct = $v; Vram = [double]0; Comp = [double]0 }
         }
     }
     try {
-        $mem = $E.GpuMem.ReadCategory()['Dedicated Usage']
-        foreach ($k in $mem.Keys) {
-            if ("$k" -match 'luid_(0x[0-9A-Fa-f]+_0x[0-9A-Fa-f]+)') {
-                $luid = $Matches[1].ToLower()
-                if (-not $porLuid.ContainsKey($luid)) { $porLuid[$luid] = [PSCustomObject]@{ Luid = $luid; Pct = [double]0; Vram = [double]0 } }
-                $porLuid[$luid].Vram += [double]$mem[$k].Sample.RawValue
+        $memCat = $E.GpuMem.ReadCategory()
+        foreach ($nomContador in 'Dedicated Usage', 'Shared Usage') {
+            $mem = $memCat[$nomContador]
+            if (-not $mem) { continue }
+            foreach ($k in $mem.Keys) {
+                if ("$k" -match 'luid_(0x[0-9A-Fa-f]+_0x[0-9A-Fa-f]+)') {
+                    $luid = $Matches[1].ToLower()
+                    if (-not $porLuid.ContainsKey($luid)) { $porLuid[$luid] = [PSCustomObject]@{ Luid = $luid; Pct = [double]0; Vram = [double]0; Comp = [double]0 } }
+                    if ($nomContador -eq 'Dedicated Usage') { $porLuid[$luid].Vram += [double]$mem[$k].Sample.RawValue } else { $porLuid[$luid].Comp += [double]$mem[$k].Sample.RawValue }
+                }
             }
         }
     } catch {}
@@ -13050,18 +13056,19 @@ function Global:Leer-UsoGpu {
     if ($ads.Count -gt 0) {
         foreach ($a in $ads) {
             $x = $porLuid[$a.Key]
-            $res.Add([PSCustomObject]@{ Luid = $a.Key; Nombre = $a.Nombre; Tipo = $a.Tipo; Pct = $(if ($x) { $x.Pct } else { [double]0 }); Vram = $(if ($x) { $x.Vram } else { [double]0 }) })
+            $res.Add([PSCustomObject]@{ Luid = $a.Key; Nombre = $a.Nombre; Tipo = $a.Tipo; Pct = $(if ($x) { $x.Pct } else { [double]0 }); Vram = $(if ($x) { $x.Vram } else { [double]0 }); Comp = $(if ($x) { $x.Comp } else { [double]0 }) })
         }
     } else {
         $i = 0
-        foreach ($x in @($porLuid.Values | Sort-Object Luid)) { $i++; $res.Add([PSCustomObject]@{ Luid = $x.Luid; Nombre = "GPU $i"; Tipo = ''; Pct = $x.Pct; Vram = $x.Vram }) }
+        foreach ($x in @($porLuid.Values | Sort-Object Luid)) { $i++; $res.Add([PSCustomObject]@{ Luid = $x.Luid; Nombre = "GPU $i"; Tipo = ''; Pct = $x.Pct; Vram = $x.Vram; Comp = $x.Comp }) }
     }
     return $res.ToArray()
 }
 
 function Global:Redibujar-GraficosInicio {
     $E = $Global:GrafInicio
-    foreach ($k in 'CPU', 'RAM', 'DISCO', 'GPU') { try { Dibujar-Grafico -G $E[$k] } catch {} }
+    foreach ($k in 'CPU', 'RAM', 'DISCO') { try { Dibujar-Grafico -G $E[$k] } catch {} }
+    foreach ($c in @($E.GpuCardsLista)) { try { Dibujar-Grafico -G $c.G } catch {} }
 }
 
 function Global:Tick-GraficosInicio {
@@ -13103,25 +13110,23 @@ function Global:Tick-GraficosInicio {
             $w.FindName("TxtInicioDiscoRW").Text = $extra
         }
     } catch {}
-    # GPU
+    # GPU: una tarjeta (con su grafico) por cada adaptador
     try {
-        if ($E.GpuDisponible) {
+        if ($E.GpuDisponible -and $E.GpuCardsLista) {
             $ad = @(Leer-UsoGpu)
-            if ($ad.Count -gt 0) {
-                $mayor = ($ad | Measure-Object -Property Pct -Maximum).Maximum
-                $partes = New-Object System.Collections.Generic.List[string]
-                $activo = $null
-                foreach ($a in $ad) {
-                    $nom = if ($a.Tipo) { "$($a.Nombre) ($($a.Tipo))" } else { "$($a.Nombre)" }
-                    $txtV = if ($a.Vram -ge 1GB) { " · VRAM {0:N1} GB" -f ($a.Vram / 1GB) } elseif ($a.Vram -gt 0) { " · VRAM {0:N0} MB" -f ($a.Vram / 1MB) } else { '' }
-                    $partes.Add(("{0}: {1:N0}%{2}" -f $nom, $a.Pct, $txtV))
-                    if (-not $activo -or $a.Pct -gt $activo.Pct) { $activo = $a }
-                }
-                $nomActivo = if ($activo.Tipo) { "$($activo.Nombre) ($($activo.Tipo))" } else { "$($activo.Nombre)" }
-                $det = if ($ad.Count -gt 1) { "Mas activa ahora: $nomActivo`n" + ($partes -join "`n") } else { $partes[0] }
-                Agregar-MuestraGrafico -G $E.GPU -Valor $mayor -Extra ("{0}: {1:N0}%" -f $nomActivo, $mayor)
-                $w.FindName("TxtInicioGPUUso").Text = "$([math]::Round($mayor))%"
-                $w.FindName("TxtInicioGPUDet").Text = $det
+            $porKey = @{}
+            foreach ($a in $ad) { $porKey[$a.Luid] = $a }
+            $masActiva = $ad | Sort-Object -Property Pct -Descending | Select-Object -First 1
+            foreach ($c in $E.GpuCardsLista) {
+                $a = if ($c.Key -eq '*') { $masActiva } else { $porKey[$c.Key] }
+                $pct = if ($a) { [double]$a.Pct } else { [double]0 }
+                $ded = if ($a) { [double]$a.Vram } else { [double]0 }
+                $comp = if ($a) { [double]$a.Comp } else { [double]0 }
+                $txtDed = if ($c.DedBytes -gt 0) { "Memoria dedicada: $(Formato-MemGpu $ded) de $(Formato-MemGpu $c.DedBytes)" } else { "Memoria dedicada: $(Formato-MemGpu $ded)" }
+                $txtMem = "$txtDed  ·  Compartida: $(Formato-MemGpu $comp)"
+                Agregar-MuestraGrafico -G $c.G -Valor $pct -Extra $txtMem
+                $c.TbPct.Text = "$([math]::Round($pct))%"
+                $c.TbMem.Text = $txtMem
             }
         }
     } catch {}
@@ -13165,6 +13170,68 @@ function Global:Preparar-Grafico {
     $Canvas.Add_MouseLeftButtonDown({ Alternar-PausaGraficos }.GetNewClosure())
 }
 
+function Global:Formato-MemGpu {
+    param([double]$Bytes)
+    if ($Bytes -ge 1GB) { return ('{0:N1} GB' -f ($Bytes / 1GB)) }
+    return ('{0:N0} MB' -f ($Bytes / 1MB))
+}
+
+# Crea un cuadro (con grafico propio) por cada GPU. Con una sola GPU queda un unico cuadro.
+function Global:Construir-TarjetasGpu {
+    $E = $Global:GrafInicio
+    $w = $Global:VentanaPrincipal
+    $panel = $w.FindName("PanelInicioGPUs")
+    $panel.Children.Clear()
+    $E.GpuCardsLista = New-Object System.Collections.Generic.List[object]
+    $ads = @($E.GpuAdaptadores)
+    if ($ads.Count -eq 0) { $ads = @([PSCustomObject]@{ Key = '*'; Nombre = 'Tarjeta de video'; Tipo = ''; DedMB = 0 }) }
+    $panel.Columns = [Math]::Min($ads.Count, 3)
+    $colores = '#FF9F43', '#2EC4B6', '#FF6B9D'
+    $conv = New-Object System.Windows.Media.BrushConverter
+    $driver = @{}
+    try { foreach ($v in @(Get-CimInstance Win32_VideoController -ErrorAction Stop)) { $driver[("$($v.Name)" -replace '\s+', ' ').Trim()] = "$($v.DriverVersion)" } } catch {}
+    $pincelSec = $null
+    try { $pincelSec = $w.FindResource("TextoSecundario") } catch { $pincelSec = $conv.ConvertFromString("#7C93BD") }
+    $estiloCard = $null
+    try { $estiloCard = $w.FindResource("TarjetaSeccion") } catch {}
+    $n = $ads.Count
+    for ($i = 0; $i -lt $n; $i++) {
+        $a = $ads[$i]
+        $card = New-Object System.Windows.Controls.Border
+        if ($estiloCard) { $card.Style = $estiloCard }
+        $card.Margin = if ($i -lt ($n - 1)) { "0,0,8,14" } else { "0,0,0,14" }
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $titulo = New-Object System.Windows.Controls.TextBlock
+        $titulo.Text = if ($n -gt 1) { "🎮 GPU $i  ·  $($a.Nombre)" } else { "🎮 GPU  ·  $($a.Nombre)" }
+        $titulo.FontWeight = "Bold"; $titulo.FontSize = 14; $titulo.TextWrapping = "Wrap"; $titulo.Foreground = [System.Windows.Media.Brushes]::White
+        $partes = New-Object System.Collections.Generic.List[string]
+        if ($a.Tipo) { $partes.Add($a.Tipo) }
+        if ([double]$a.DedMB -gt 0) { $partes.Add("Memoria de video: " + (Formato-MemGpu ([double]$a.DedMB * 1MB))) }
+        $drv = $driver[$a.Nombre]
+        if ($drv) { $partes.Add("Driver $drv") }
+        $sub = New-Object System.Windows.Controls.TextBlock
+        $sub.Text = ($partes -join '  ·  '); $sub.FontSize = 11; $sub.TextWrapping = "Wrap"; $sub.Foreground = $pincelSec
+        $cap = New-Object System.Windows.Controls.TextBlock
+        $cap.Text = "Uso de la GPU"; $cap.FontSize = 12; $cap.Margin = "0,8,0,0"; $cap.Foreground = $pincelSec
+        $pct = New-Object System.Windows.Controls.TextBlock
+        $pct.Text = "--%"; $pct.FontSize = 24; $pct.FontWeight = "Bold"; $pct.Foreground = [System.Windows.Media.Brushes]::White
+        $mem = New-Object System.Windows.Controls.TextBlock
+        $mem.FontSize = 11; $mem.TextWrapping = "Wrap"; $mem.Foreground = $pincelSec
+        $tmp = New-Object System.Windows.Controls.TextBlock
+        $tmp.Text = "🌡 Temperatura: leyendo..."; $tmp.FontSize = 11; $tmp.TextWrapping = "Wrap"; $tmp.Margin = "0,2,0,0"; $tmp.Foreground = $conv.ConvertFromString("#7C93BD")
+        $cv = New-Object System.Windows.Controls.Canvas
+        $cv.Height = 110; $cv.Margin = "0,8,0,4"; $cv.Background = [System.Windows.Media.Brushes]::Transparent; $cv.ClipToBounds = $true; $cv.Cursor = [System.Windows.Input.Cursors]::Cross
+        $st = New-Object System.Windows.Controls.TextBlock
+        $st.FontSize = 11; $st.Foreground = $pincelSec
+        foreach ($el in $titulo, $sub, $cap, $pct, $mem, $tmp, $cv, $st) { $sp.Children.Add($el) | Out-Null }
+        $card.Child = $sp
+        $panel.Children.Add($card) | Out-Null
+        $G = @{ Nombre = "GPU $i"; Canvas = $null; Datos = $null; Extra = $null; Color = $colores[$i % 3]; Unidad = '%'; Max = 100; HoverX = -1.0; TxtStats = $null }
+        Preparar-Grafico -G $G -Canvas $cv -TxtStats $st
+        $E.GpuCardsLista.Add(@{ Key = $a.Key; Nombre = $a.Nombre; Tipo = $a.Tipo; DedBytes = ([double]$a.DedMB * 1MB); G = $G; TbPct = $pct; TbMem = $mem; TbTemp = $tmp; TbStats = $st })
+    }
+}
+
 function Global:Alternar-PausaGraficos {
     $E = $Global:GrafInicio
     $E.Pausa = -not $E.Pausa
@@ -13181,17 +13248,17 @@ function Iniciar-GraficosInicio {
     Preparar-Grafico -G $E.CPU -Canvas $w.FindName("CanvasCPU") -TxtStats $w.FindName("TxtGrafCPU")
     Preparar-Grafico -G $E.RAM -Canvas $w.FindName("CanvasRAM") -TxtStats $w.FindName("TxtGrafRAM")
     Preparar-Grafico -G $E.DISCO -Canvas $w.FindName("CanvasDisco") -TxtStats $w.FindName("TxtGrafDisco")
-    Preparar-Grafico -G $E.GPU -Canvas $w.FindName("CanvasGPU") -TxtStats $w.FindName("TxtGrafGPU")
+    try { $E.GpuAdaptadores = @(Get-AdaptadoresDxgi) } catch { $E.GpuAdaptadores = @() }
+    Construir-TarjetasGpu
     try {
         if (-not [System.Diagnostics.PerformanceCounterCategory]::Exists("GPU Engine")) { throw "sin contadores GPU Engine" }
         $E.GpuCat = New-Object System.Diagnostics.PerformanceCounterCategory("GPU Engine")
         $E.GpuMem = New-Object System.Diagnostics.PerformanceCounterCategory("GPU Adapter Memory")
-        try { $E.GpuAdaptadores = @(Get-AdaptadoresDxgi) } catch { $E.GpuAdaptadores = @() }
         [void](Leer-UsoGpu)   # primera lectura: deja la muestra base
         $E.GpuDisponible = $true
     } catch {
         $E.GpuDisponible = $false
-        $w.FindName("TxtGrafGPU").Text = "Uso de GPU no disponible (requiere Windows 10 1709 o superior con controlador de video WDDM 2.x)."
+        foreach ($c in @($E.GpuCardsLista)) { $c.TbStats.Text = "Uso de GPU no disponible (requiere Windows 10 1709 o superior con controlador de video WDDM 2.x)." }
     }
     # Contadores de rendimiento (nombres en ingles; funcionan en cualquier idioma de Windows)
     try {
@@ -15314,30 +15381,15 @@ Marcar-Arranque 'funciones y recursos'
                             </Border>
                         </UniformGrid>
 
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="3*"/>
-                                <ColumnDefinition Width="*"/>
-                            </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" Style="{StaticResource TarjetaSeccion}" Margin="0,0,8,14">
-                                <StackPanel>
-                                    <TextBlock Text="🎮 Tarjeta(s) de video" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="14" Margin="0,0,0,8"/>
-                                    <TextBlock x:Name="TxtInicioGPU" Text="Detectando..." Foreground="White" TextWrapping="Wrap"/>
-                                    <TextBlock Text="Uso de la GPU" Foreground="{StaticResource TextoSecundario}" FontSize="12" Margin="0,10,0,0"/>
-                                    <TextBlock x:Name="TxtInicioGPUUso" Text="--%" Foreground="White" FontWeight="Bold" FontSize="24"/>
-                                    <TextBlock x:Name="TxtInicioGPUDet" Text="" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap"/>
-                                    <TextBlock x:Name="TxtInicioGPUTemp" Text="🌡 Temperatura: leyendo..." Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
-                                    <Canvas x:Name="CanvasGPU" Height="110" Margin="0,8,0,4" Background="Transparent" ClipToBounds="True" Cursor="Cross"/>
-                                    <TextBlock x:Name="TxtGrafGPU" Foreground="{StaticResource TextoSecundario}" FontSize="11"/>
-                                </StackPanel>
-                            </Border>
-                            <Border Grid.Column="1" Style="{StaticResource TarjetaSeccion}" Margin="0,0,0,14">
-                                <StackPanel>
-                                    <TextBlock Text="⏱️ Tiempo activo" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
-                                    <TextBlock x:Name="TxtInicioUptime" Text="--" Foreground="White" FontWeight="Bold" FontSize="18" Margin="0,4,0,0"/>
-                                </StackPanel>
-                            </Border>
-                        </Grid>
+                        <!-- Una tarjeta por cada GPU (se crean al iniciar; con una sola GPU queda un unico cuadro) -->
+                        <UniformGrid x:Name="PanelInicioGPUs" Columns="1"/>
+
+                        <Border Style="{StaticResource TarjetaSeccion}">
+                            <StackPanel>
+                                <TextBlock Text="⏱️ Tiempo activo" Foreground="{StaticResource TextoSecundario}" FontSize="12"/>
+                                <TextBlock x:Name="TxtInicioUptime" Text="--" Foreground="White" FontWeight="Bold" FontSize="18" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
 
                         <Border Style="{StaticResource TarjetaSeccion}">
                             <StackPanel>
