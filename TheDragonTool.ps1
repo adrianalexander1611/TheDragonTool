@@ -6204,7 +6204,7 @@ function Accion-ProbarRed {
         $maximo = ($latencias | Measure-Object -Maximum).Maximum
         Write-DiagLog " - Internet: OK | Latencia promedio: $promedio ms (min $minimo ms, max $maximo ms)"
         if ($promedio -gt 100) { Diag-Aviso "Latencia alta hacia Internet ($promedio ms)." }
-        $perdidos = 4 - @($resultado).Count
+        $perdidos = 4 - (Como-Arreglo $resultado).Count
         if ($perdidos -gt 0) { Diag-Aviso "Se perdieron $perdidos de 4 paquetes: conexion inestable." }
     } catch {
         Diag-Aviso "Sin conexion a Internet detectada (no respondio 8.8.8.8)."
@@ -8146,8 +8146,8 @@ function Global:Evaluar-SaludHDD {
     }
     $estado = 'Bueno'
     if ($malo.Count -gt 0) { $estado = 'Malo' } elseif ($riesgo.Count -gt 0) { $estado = 'En riesgo' }
-    $motivos = @($malo) + @($riesgo)
-    return [PSCustomObject]@{ Estado = $estado; Motivos = $motivos; Datos = @($datos) }
+    $motivos = (Como-Arreglo $malo) + (Como-Arreglo $riesgo)
+    return [PSCustomObject]@{ Estado = $estado; Motivos = $motivos; Datos = (Como-Arreglo $datos) }
 }
 
 # Muestra el estado del disco duro (una vez por prueba) y lo guarda para el informe PDF
@@ -10955,7 +10955,7 @@ function Finalizar-Perfil {
     Start-Sleep -Milliseconds 300
     $despues = Get-InstantaneaSistema
     $pasos = @()
-    if ($Script:PasosPerfil) { $pasos = @($Script:PasosPerfil) }
+    if ($Script:PasosPerfil) { $pasos = (Como-Arreglo $Script:PasosPerfil) }
     $Script:PasosPerfil = $null
     Write-Log "$Titulo aplicado." -Tipo OK
     Show-ResultadoPerfil -Titulo $Titulo -Antes $Antes -Despues $despues -Pasos $pasos -Nota $Nota -OfrecerReinicio $Reinicio
@@ -12782,6 +12782,22 @@ function Global:Agregar-MuestraGrafico {
     while ($G.Datos.Count -gt $Global:GrafInicio.Maximo) { $G.Datos.RemoveAt(0); $G.Extra.RemoveAt(0) }
 }
 
+# Convierte una coleccion (List generica, ArrayList...) en arreglo. En algunas versiones de Windows PowerShell 5.1
+# (Windows 11 24H2/25H2) la expresion @($lista) sobre una List generica falla con "Los tipos de argumentos no
+# coinciden"; esta funcion hace la misma conversion sin usar @().
+function Global:Como-Arreglo {
+    param($C)
+    if ($null -eq $C) { return ,(New-Object 'object[]' 0) }
+    if (($C -is [System.Collections.ICollection]) -and ($C -isnot [string]) -and ($C -isnot [System.Collections.IDictionary])) {
+        $t = New-Object 'object[]' $C.Count
+        $C.CopyTo($t, 0)
+        return ,$t
+    }
+    $u = New-Object 'object[]' 1
+    $u[0] = $C
+    return ,$u
+}
+
 # Registra un fallo interno (una vez por zona) con linea y pila, sin notificacion flotante
 function Global:Registrar-FalloInterno {
     param([string]$Zona, $Err, [string]$Solucion = '')
@@ -13011,7 +13027,7 @@ function Global:Procesar-Temperaturas {
     } catch { Registrar-FalloGrafico 'temperatura CPU' $_ }
     # GPU (NVIDIA mediante nvidia-smi): cada tarjeta muestra su propia temperatura
     try {
-    foreach ($c in @($E.GpuCardsLista)) {
+    foreach ($c in (Como-Arreglo $E.GpuCardsLista)) {
         $nv = $null
         foreach ($g in @($R.Gpus)) { if ($c.Nombre -like "*$($g.Nombre)*" -or $g.Nombre -like "*$($c.Nombre)*") { $nv = $g; break } }
         if ($nv) {
@@ -13205,7 +13221,7 @@ function Global:Leer-UsoGpu {
 function Global:Redibujar-GraficosInicio {
     $E = $Global:GrafInicio
     foreach ($k in 'CPU', 'RAM', 'DISCO') { try { Dibujar-Grafico -G $E[$k] } catch {} }
-    foreach ($c in @($E.GpuCardsLista)) { try { Dibujar-Grafico -G $c.G } catch {} }
+    foreach ($c in (Como-Arreglo $E.GpuCardsLista)) { try { Dibujar-Grafico -G $c.G } catch {} }
 }
 
 function Global:Tick-GraficosInicio {
@@ -13400,7 +13416,7 @@ function Iniciar-GraficosInicio {
         $E.GpuDisponible = $true
     } catch {
         $E.GpuDisponible = $false
-        foreach ($c in @($E.GpuCardsLista)) { $c.TbStats.Text = "Uso de GPU no disponible (requiere Windows 10 1709 o superior con controlador de video WDDM 2.x)." }
+        foreach ($c in (Como-Arreglo $E.GpuCardsLista)) { $c.TbStats.Text = "Uso de GPU no disponible (requiere Windows 10 1709 o superior con controlador de video WDDM 2.x)." }
     }
     # Contadores de rendimiento (nombres en ingles; funcionan en cualquier idioma de Windows)
     try {
@@ -19100,9 +19116,9 @@ function Global:AutoVer-ProcesarPestana {
     }
     # Contenido que debe haberse cargado
     switch ($nombre) {
-        'Optimizar Windows' { if (@($Script:_checkboxesOptimizacionRegistro).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'La lista de optimizaciones esta vacia.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
-        'Registro de Windows' { if (@($Script:_checkboxesRegistro).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'La lista de ajustes del Registro esta vacia.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
-        'Programas' { if (@($Script:_checkboxesProgramas).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'El catalogo de programas esta vacio.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
+        'Optimizar Windows' { if ((Como-Arreglo $Script:_checkboxesOptimizacionRegistro).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'La lista de optimizaciones esta vacia.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
+        'Registro de Windows' { if ((Como-Arreglo $Script:_checkboxesRegistro).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'La lista de ajustes del Registro esta vacia.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
+        'Programas' { if ((Como-Arreglo $Script:_checkboxesProgramas).Count -eq 0) { AutoVer-Obs -Tab $nombre -Mensaje 'El catalogo de programas esta vacio.' -Solucion 'Reinicia el programa; si se repite, avisa al desarrollador.' } }
         'Inicio' {
             $E = $Global:GrafInicio
             if (-not $E.Iniciado) { AutoVer-Obs -Tab $nombre -Mensaje 'Los graficos en vivo del Resumen no se iniciaron.' -Solucion 'Reinicia el programa; revisa el registro por "Resumen del equipo".' }
@@ -19907,7 +19923,7 @@ function Global:Ayudas-Listas {
     $listas = @($Script:_checkboxesRegistro, $Script:_checkboxesOptimizacionRegistro, $Script:_checkboxesProgramas)
     $fallos = 0
     for ($j = 0; $j -lt $listas.Count; $j++) {
-        $items = @($listas[$j])
+        $items = Como-Arreglo $listas[$j]
         for ($i = 0; $i -lt $items.Count; $i++) {
             $cb = $items[$i]
             try {
