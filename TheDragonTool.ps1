@@ -11130,10 +11130,11 @@ function Get-ServiciosBCTodos {
 
 # Ajustes de registro (DWord). Def = valor al restaurar ($null = quitar el valor).
 $Script:AjustesRegBC = @(
-    @{ R='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'; N='EnablePrefetcher'; V=0; Def=3 },
-    @{ R='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'; N='EnableSuperfetch'; V=0; Def=3 },
+    @{ R='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'; N='EnablePrefetcher'; V=0; Def=3; SoloSSD=$true },
+    @{ R='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'; N='EnableSuperfetch'; V=0; Def=3; SoloSSD=$true },
     @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N='StartupBoostEnabled'; V=0; Def=$null },
     @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N='BackgroundModeEnabled'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore'; N='AutoDownload'; V=2; Def=$null },
     @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'; N='AllowTelemetry'; V=0; Def=$null },
     @{ R='HKLM:\SOFTWARE\Policies\Microsoft\SQMClient\Windows'; N='CEIPEnable'; V=0; Def=$null },
     @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting'; N='Disabled'; V=1; Def=$null },
@@ -11150,10 +11151,18 @@ $Script:AjustesRegBC = @(
     @{ R='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; N='ShowSyncProviderNotifications'; V=0; Def=1 }
 )
 
+# Solo nivel "MUY LIMITADO" (perfil automatico): Windows Update avisa antes de descargar y no reinicia solo
+$Script:AjustesRegBCExtremo = @(
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; N='NoAutoUpdate'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; N='AUOptions'; V=2; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; N='NoAutoRebootWithLoggedOnUsers'; V=1; Def=$null }
+)
+
 # Tareas programadas extra (ademas de $Script:TareasDiagnostico)
 $Script:TareasBCExtra = @(
     @{ Path='\Microsoft\Windows\Application Experience\'; Name='StartupAppTask' },
     @{ Path='\Microsoft\Windows\Application Experience\'; Name='PcaPatchDbTask' },
+    @{ Path='\Microsoft\Windows\AppxDeploymentClient\'; Name='Pre-staging app cleanup' },
     @{ Path='\Microsoft\Windows\Customer Experience Improvement Program\'; Name='KernelCeipTask' },
     @{ Path='\Microsoft\Windows\Feedback\Siuf\'; Name='DmClient' },
     @{ Path='\Microsoft\Windows\Feedback\Siuf\'; Name='DmClientOnScenarioDownload' },
@@ -11216,18 +11225,27 @@ function Accion-ServiciosBCAgresivo {
 }
 
 function Aplicar-AjustesRegBC {
+    param([switch]$Extremo)
     $ok = 0
-    foreach ($a in $Script:AjustesRegBC) {
+    $esHdd = ((Get-TipoDiscoSistema) -eq 'HDD')
+    $tabla = New-Object System.Collections.Generic.List[object]
+    foreach ($a in $Script:AjustesRegBC) { $tabla.Add($a) }
+    if ($Extremo) { foreach ($a in $Script:AjustesRegBCExtremo) { $tabla.Add($a) } }
+    foreach ($a in $tabla.ToArray()) {
+        if ($esHdd -and $a.SoloSSD) { continue }   # en disco mecanico Prefetch ayuda a arrancar: no se toca
         try {
             if (-not (Test-Path $a.R)) { New-Item -Path $a.R -Force -ErrorAction Stop | Out-Null }
             Set-ItemProperty -Path $a.R -Name $a.N -Value $a.V -Type DWord -ErrorAction Stop
             $ok++
         } catch {}
     }
-    Write-Log "Ajustes de registro de ahorro aplicados: $ok de $($Script:AjustesRegBC.Count) (Prefetch, Edge en segundo plano, telemetria, Cortana/Copilot/Widgets, mantenimiento automatico, etc.)." -Tipo OK
+    Write-Log "Ajustes de registro de ahorro aplicados: $ok (Edge en segundo plano, telemetria, Cortana/Copilot/Widgets, Tienda, mantenimiento automatico$(if (-not $esHdd) { ', Prefetch' })$(if ($Extremo) { ', Windows Update con aviso' }))." -Tipo OK
 }
 function Restaurar-AjustesRegBC {
-    foreach ($a in $Script:AjustesRegBC) {
+    $tabla = New-Object System.Collections.Generic.List[object]
+    foreach ($a in $Script:AjustesRegBC) { $tabla.Add($a) }
+    foreach ($a in $Script:AjustesRegBCExtremo) { $tabla.Add($a) }
+    foreach ($a in $tabla.ToArray()) {
         try {
             if ($null -eq $a.Def) { if (Test-Path $a.R) { Remove-ItemProperty -Path $a.R -Name $a.N -ErrorAction SilentlyContinue } }
             else { if (-not (Test-Path $a.R)) { New-Item -Path $a.R -Force -ErrorAction Stop | Out-Null }; Set-ItemProperty -Path $a.R -Name $a.N -Value $a.Def -Type DWord -ErrorAction Stop }
@@ -11384,23 +11402,266 @@ function Restaurar-BajoConsumoAgresivo {
     try { if (Test-Path $Script:RutaEstadoBC) { Remove-Item -Path $Script:RutaEstadoBC -Force -ErrorAction SilentlyContinue } } catch {}
 }
 
-function Perfil-BajoConsumo {
-    if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "PERFIL BAJO CONSUMO (AGRESIVO) - para equipos con poca RAM, CPU lenta o disco lleno/lento.`n`nRAM: apaga servicios extra (SysMain, busqueda, diagnostico, telemetria, Xbox, UPnP, etc.), bloquea todas las apps en segundo plano, desactiva Cortana/Copilot/Widgets/busqueda web, Edge en segundo plano, cierra actualizadores y limpia la memoria incluida la lista en espera.`n`nCPU: plan Equilibrado eficiente (sin forzar maximo rendimiento), Defender en modo ligero (15% de CPU), tareas programadas de telemetria y mantenimiento automatico desactivados, servicios agrupados en menos procesos, transparencia y animaciones fuera.`n`nALMACENAMIENTO: hibernacion y Prefetch desactivados, menos escrituras de NTFS, almacenamiento reservado desactivado, limpieza profunda (Windows Update, informes de error, volcados, miniaturas, cache de Edge/Chrome, componentes antiguos de Windows) y Restaurar sistema limitado.`n`nTodo se puede revertir con 'Restaurar configuracion predeterminada' (guarda el estado original de los servicios). La limpieza de componentes puede tardar unos minutos.`n`nAl final se recargara el escritorio y veras un resumen.`n`n¿Aplicar perfil de Bajo consumo agresivo?")) { return }
+# ---------------------------------------------------------------------------
+#  DETECCION DE HARDWARE + PERFIL AUTOMATICO + frenos contra wsappx / servicios agrupados
+# ---------------------------------------------------------------------------
 
-    $antes = Get-InstantaneaSistema
-    $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
-    $prog = New-VentanaProgreso -Titulo "Aplicando perfil: Bajo consumo (agresivo)"
-    $pasos = @(
-        @{ Txt="Guardando el estado original para poder restaurarlo..."; Accion={ Guardar-EstadoBC } },
+function Get-TipoDiscoSistema {
+    try {
+        $l = "$env:SystemDrive".TrimEnd(':')
+        $d = Get-Partition -DriveLetter $l -ErrorAction Stop | Get-Disk -ErrorAction Stop | Get-PhysicalDisk -ErrorAction Stop | Select-Object -First 1
+        $t = "$($d.MediaType)"
+        if ($t -eq 'HDD' -or $t -eq 'SSD' -or $t -eq 'SCM') { return $t }
+        if ("$($d.BusType)" -eq 'NVMe') { return 'SSD' }
+    } catch {}
+    try {
+        $dd = Get-CimInstance Win32_DiskDrive -ErrorAction Stop | Select-Object -First 1
+        if ("$($dd.Model)" -match 'SSD|NVMe|M\.2|Solid') { return 'SSD' }
+        if ("$($dd.MediaType)" -match 'Fixed hard disk') { return 'HDD' }
+    } catch {}
+    return 'Desconocido'
+}
+
+function Get-HardwareInfo {
+    $o = [ordered]@{}
+    $cpu = $null; try { $cpu = Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1 } catch {}
+    $o.CpuNombre = if ($cpu) { ("$($cpu.Name)" -replace '\s+', ' ').Trim() } else { 'Desconocido' }
+    $o.Nucleos = if ($cpu -and $cpu.NumberOfCores) { [int]$cpu.NumberOfCores } else { 1 }
+    $o.Hilos = if ($cpu -and $cpu.NumberOfLogicalProcessors) { [int]$cpu.NumberOfLogicalProcessors } else { [Environment]::ProcessorCount }
+    $mhz = if ($cpu -and $cpu.MaxClockSpeed) { [int]$cpu.MaxClockSpeed } else { 0 }
+    $o.GHz = [math]::Round($mhz / 1000, 2)
+    $ram = 0.0; try { $ram = [double](Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB } catch {}
+    $o.RamGB = [math]::Round($ram, 1)
+    $o.Disco = Get-TipoDiscoSistema
+    $o.Laptop = $false; try { $o.Laptop = [bool](Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue) } catch {}
+    # Puntuacion de "limitacion" (0 = equipo potente, 10 = muy limitado)
+    $p = 0
+    if ($o.Hilos -le 2) { $p += 3 } elseif ($o.Hilos -le 4) { $p += 2 } elseif ($o.Hilos -le 6) { $p += 1 }
+    if ($mhz -gt 0) { if ($mhz -lt 1800) { $p += 2 } elseif ($mhz -lt 2500) { $p += 1 } }
+    if ($ram -gt 0) { if ($ram -le 4.5) { $p += 3 } elseif ($ram -le 6.5) { $p += 2 } elseif ($ram -le 8.5) { $p += 1 } }
+    if ($o.Disco -eq 'HDD') { $p += 2 }
+    $o.Puntos = $p
+    $o.Nivel = if ($p -ge 7) { 'MUY LIMITADO' } elseif ($p -ge 3) { 'LIMITADO' } else { 'POTENTE' }
+    [PSCustomObject]$o
+}
+
+# wsappx = AppXSvc (instalacion de apps) + ClipSVC (licencias de la Tienda). Cuando la Tienda actualiza o
+# instala apps en segundo plano consume mucha CPU en equipos lentos. Se frena y se evita que vuelva a empezar sola.
+function Accion-FrenarStoreAppx {
+    if (-not (Requiere-Admin)) { return }
+    foreach ($n in @('AppXSvc','ClipSVC')) { try { Stop-Service -Name $n -Force -ErrorAction SilentlyContinue } catch {} }
+    foreach ($n in @('WinStore.App','StoreExperienceHost')) { foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch {} } }
+    Write-Log "Microsoft Store frenada: instalacion de apps (wsappx) detenida y actualizaciones automaticas de la Tienda desactivadas. La Tienda sigue funcionando al abrirla." -Tipo OK
+}
+
+# Mide durante unos segundos que procesos usan CPU, identifica que servicios hay dentro de cada svchost y
+# detiene SOLO los de una lista segura. Lo demas (sistema, controladores) no se toca; solo se informa.
+function Accion-AnalizarYFrenarCPU {
+    if (-not (Requiere-Admin)) { return }
+    $nProc = [math]::Max(1, [Environment]::ProcessorCount)
+    $leer = {
+        $h = @{}
+        foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) {
+            try { $h[[int]$p.Id] = @{ N = "$($p.ProcessName)"; T = [double]$p.TotalProcessorTime.TotalSeconds } } catch {}
+        }
+        return $h
+    }
+    $a = & $leer; $t0 = Get-Date
+    Wait-UI -Milisegundos 3500
+    $b = & $leer; $seg = [math]::Max(1.0, ((Get-Date) - $t0).TotalSeconds)
+    $lista = New-Object System.Collections.Generic.List[object]
+    foreach ($id in $b.Keys) {
+        if (-not $a.ContainsKey($id)) { continue }
+        $pct = (($b[$id].T - $a[$id].T) / ($seg * $nProc)) * 100
+        if ($pct -ge 3) { $lista.Add([PSCustomObject]@{ Id = $id; Nombre = $b[$id].N; Pct = [math]::Round($pct, 1) }) }
+    }
+    if ($lista.Count -eq 0) { Write-Log "Analisis de CPU: ningun proceso supera el 3% ahora mismo." -Tipo OK; return }
+    $segurosSvc = @('AppXSvc','ClipSVC','wuauserv','UsoSvc','BITS','DoSvc','WSearch','SysMain','DiagTrack','WerSvc','CDPSvc','InstallService','PcaSvc','DPS','WdiServiceHost','WdiSystemHost','TabletInputService','MapsBroker','lfsvc')
+    $segurosProc = @('SearchIndexer','SearchProtocolHost','SearchFilterHost','CompatTelRunner','MoUsoCoreWorker','OneDrive','Teams','ms-teams','YourPhone','Widgets','WinStore.App','StoreExperienceHost','GameBar','DeviceCensus','wsqmcons')
+    $top = $lista.ToArray() | Sort-Object Pct -Descending | Select-Object -First 6
+    foreach ($x in $top) {
+        if ($x.Nombre -eq 'svchost') {
+            $nombres = New-Object System.Collections.Generic.List[string]
+            try { foreach ($s in (Get-CimInstance Win32_Service -Filter "ProcessId=$($x.Id)" -ErrorAction Stop)) { $nombres.Add("$($s.Name)") } } catch {}
+            $txt = if ($nombres.Count) { $nombres -join ', ' } else { 'servicios del sistema' }
+            $detenidos = New-Object System.Collections.Generic.List[string]
+            foreach ($n in $nombres) {
+                if ($segurosSvc -contains $n) { try { Stop-Service -Name $n -Force -ErrorAction Stop; $detenidos.Add($n) } catch {} }
+            }
+            if ($detenidos.Count) { Write-Log "CPU $($x.Pct)% - svchost ($txt): detenidos temporalmente $($detenidos -join ', ')." -Tipo OK }
+            else { Write-Log "CPU $($x.Pct)% - svchost ($txt): servicio del sistema, no se toca." -Tipo INFO -SinRegistro }
+        }
+        elseif ($segurosProc -contains $x.Nombre) {
+            try { Stop-Process -Id $x.Id -Force -ErrorAction Stop; Write-Log "CPU $($x.Pct)% - $($x.Nombre): cerrado (no es esencial)." -Tipo OK } catch {}
+        }
+        elseif ($x.Nombre -eq 'TiWorker' -or $x.Nombre -eq 'TrustedInstaller') {
+            Write-Log "CPU $($x.Pct)% - $($x.Nombre): Windows esta instalando una actualizacion; conviene dejarla terminar y reiniciar." -Tipo INFO -SinRegistro
+        }
+        else { Write-Log "CPU $($x.Pct)% - $($x.Nombre): proceso en uso, no se toca." -Tipo INFO -SinRegistro }
+    }
+}
+
+# --- Medicion de consumo en vivo (CPU, RAM, disco) para que el perfil automatico se ajuste a la carga real ---
+function Medir-ConsumoActual {
+    param([int]$Ms = 4000)
+    $nProc = [math]::Max(1, [Environment]::ProcessorCount)
+    $leer = {
+        $h = @{}
+        foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) {
+            try { $h[[int]$p.Id] = @{ N = "$($p.ProcessName)"; T = [double]$p.TotalProcessorTime.TotalSeconds } } catch {}
+        }
+        return $h
+    }
+    try { Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction Stop | Out-Null } catch {}
+    $a = & $leer; $t0 = Get-Date
+    Wait-UI -Milisegundos $Ms
+    $b = & $leer; $seg = [math]::Max(1.0, ((Get-Date) - $t0).TotalSeconds)
+    $suma = 0.0
+    $lista = New-Object System.Collections.Generic.List[object]
+    foreach ($id in $b.Keys) {
+        if (-not $a.ContainsKey($id)) { continue }
+        $pct = (($b[$id].T - $a[$id].T) / ($seg * $nProc)) * 100
+        if ($pct -lt 0) { continue }
+        $suma += $pct
+        if ($pct -ge 1) { $lista.Add([PSCustomObject]@{ Nombre = $b[$id].N; Pct = [math]::Round($pct, 1) }) }
+    }
+    $carga = 0; try { $carga = [double](Get-CimInstance Win32_Processor -ErrorAction Stop | Measure-Object -Property LoadPercentage -Average).Average } catch {}
+    $cpu = [math]::Min(100, [math]::Round([math]::Max($suma, $carga)))
+    $disco = 0
+    try { $disco = [math]::Min(100, [int](Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction Stop).PercentDiskTime) } catch {}
+    $totMB = 0; $libMB = 0
+    try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $totMB = [math]::Round($os.TotalVisibleMemorySize / 1024); $libMB = [math]::Round($os.FreePhysicalMemory / 1024) } catch {}
+    $usoMB = [math]::Max(0, $totMB - $libMB)
+    $ramPct = if ($totMB -gt 0) { [int][math]::Round(100.0 * $usoMB / $totMB) } else { 0 }
+    $topRam = @()
+    try {
+        $topRam = @(Get-Process -ErrorAction SilentlyContinue | Group-Object ProcessName | ForEach-Object {
+            [PSCustomObject]@{ Nombre = $_.Name; MB = [math]::Round((($_.Group | Measure-Object -Property WorkingSet64 -Sum).Sum) / 1MB) }
+        } | Sort-Object MB -Descending | Select-Object -First 5)
+    } catch {}
+    [PSCustomObject]@{
+        Cpu = [int]$cpu; Disco = [int]$disco; RamPct = $ramPct; RamUsadaMB = $usoMB; RamTotalMB = $totMB
+        TopCpu = @($lista.ToArray() | Sort-Object Pct -Descending | Select-Object -First 5)
+        TopRam = $topRam
+    }
+}
+
+# Decide el nivel final y las opciones del perfil segun hardware + carga medida, y arma la advertencia de lo que dejara de estar disponible.
+function Get-PlanAutomatico {
+    param($Hw, $Carga)
+    $nivel = "$($Hw.Nivel)"
+    $motivos = New-Object System.Collections.Generic.List[string]
+    if ($nivel -eq 'LIMITADO' -and ($Carga.Cpu -ge 85 -or $Carga.RamPct -ge 88)) {
+        $nivel = 'MUY LIMITADO'; $motivos.Add("Carga alta medida (CPU $($Carga.Cpu)%, RAM $($Carga.RamPct)%): el nivel sube a MUY LIMITADO.")
+    }
+    if ($nivel -eq 'POTENTE' -and ($Carga.Cpu -ge 90 -or $Carga.RamPct -ge 90)) {
+        $nivel = 'LIMITADO'; $motivos.Add("Tu hardware es potente, pero ahora mismo esta saturado (CPU $($Carga.Cpu)%, RAM $($Carga.RamPct)%): se aplica el perfil LIMITADO.")
+    }
+    $op = @{ SaltarComponentes = $false; AnalisisTemprano = $false }
+    if ($Carga.Cpu -ge 70) { $op.AnalisisTemprano = $true; $motivos.Add("CPU al $($Carga.Cpu)%: primero se frena lo que mas consume y despues se hace la limpieza.") }
+    if ($Carga.Disco -ge 60) { $op.SaltarComponentes = $true; $motivos.Add("Disco ocupado ($($Carga.Disco)%): se omite la limpieza de componentes de Windows para no saturarlo mas.") }
+    if ($Carga.RamPct -ge 75) { $motivos.Add("RAM al $($Carga.RamPct)% ($($Carga.RamUsadaMB) de $($Carga.RamTotalMB) MB): se cierran apps no esenciales y se purga la memoria en espera.") }
+    if ($motivos.Count -eq 0) { $motivos.Add("Consumo actual moderado (CPU $($Carga.Cpu)%, RAM $($Carga.RamPct)%, disco $($Carga.Disco)%): se aplica el perfil estandar de tu nivel.") }
+    $extremo = ($nivel -eq 'MUY LIMITADO')
+
+    # Apps que estan abiertas ahora y se cerraran
+    $abiertas = New-Object System.Collections.Generic.List[string]
+    foreach ($n in ($Script:ProcesosNoEsenciales + $Script:ProcesosBCExtra)) {
+        if ((Get-Process -Name $n -ErrorAction SilentlyContinue) -and -not $abiertas.Contains($n)) { $abiertas.Add($n) }
+    }
+    # Lo que NO estara disponible (formato "Titulo: efecto")
+    $adv = New-Object System.Collections.Generic.List[string]
+    $adv.Add("Busqueda de Windows: el indexado queda apagado; buscar archivos desde Inicio sera lento o limitado.")
+    $adv.Add("Xbox y Game Bar: juegos de Xbox, grabacion de clips y logros no funcionaran.")
+    $adv.Add("Cortana, Copilot, Widgets y busqueda web: no estaran disponibles.")
+    $adv.Add("Apps en segundo plano: correo, calendario y otras apps de la Tienda no avisaran con la app cerrada.")
+    $adv.Add("Hibernacion e Inicio rapido: no disponibles.")
+    $adv.Add("Transparencia y animaciones: se quitan; Windows se vera mas plano.")
+    $adv.Add("Diagnostico de Windows: solucionadores de problemas, informes de errores y telemetria desactivados.")
+    $adv.Add("Ubicacion, Mapas y dispositivos cercanos: las apps no podran usar la ubicacion ni 'Compartir con dispositivos cercanos' / Proyectar.")
+    $adv.Add("Red domestica (UPnP / descubrimiento): impresoras y equipos de la red pueden no aparecer solos.")
+    $adv.Add("Tarjetas inteligentes y escaneres/camaras de adquisicion: dejan de funcionar.")
+    $adv.Add("Zona Wi-Fi movil: no se podra compartir Internet desde el equipo.")
+    $adv.Add("Programas de inicio: OneDrive, Teams, Spotify, Discord y similares ya no arrancan solos.")
+    $adv.Add("Tienda de Windows: las apps no se actualizan solas (actualizalas a mano desde la Tienda).")
+    $adv.Add("Restaurar sistema: limitado al 3% del disco (menos puntos de restauracion).")
+    $adv.Add("Mantenimiento automatico: desactivado; Windows no hara limpieza ni optimizacion por su cuenta.")
+    $adv.Add("Windows Defender: los analisis seran mas lentos (maximo 15% de CPU); la proteccion en tiempo real sigue activa.")
+    $adv.Add("Almacenamiento reservado: desactivado; con el disco casi lleno, una actualizacion grande podria fallar.")
+    if ($extremo) { $adv.Add("Windows Update: ya no se instala solo; tendras que buscar e instalar las actualizaciones tu mismo (hazlo cada cierto tiempo por seguridad).") }
+    [PSCustomObject]@{ Nivel = $nivel; Extremo = $extremo; Opciones = $op; Motivos = $motivos.ToArray(); Advertencias = $adv.ToArray(); Abiertas = $abiertas.ToArray() }
+}
+
+function Show-ConfirmPerfilAuto {
+    param($Hw, $Carga, $Plan)
+    [xml]$x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Perfil automatico" Height="640" Width="700" MinHeight="420"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="14">
+    <TextBlock DockPanel.Dock="Top" Text="🤖 Perfil automatico" Foreground="White" FontWeight="Bold" FontSize="18" Margin="0,0,0,8"/>
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="BtnCancelar" Content="Cancelar" Width="110" Height="36" Margin="0,0,8,0"/>
+      <Button x:Name="BtnAceptar" Content="Aplicar perfil" Width="150" Height="36"/>
+    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel Margin="0,0,6,0">
+        <TextBlock Text="🧾 Tu equipo" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,4"/>
+        <TextBlock x:Name="TxtHw" Foreground="#9FE8C8" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Margin="0,0,0,10"/>
+        <TextBlock Text="📊 Consumo medido ahora" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,4"/>
+        <TextBlock x:Name="TxtCarga" Foreground="#9FE8C8" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Margin="0,0,0,10"/>
+        <TextBlock Text="🔧 Como se ajusta el perfil a ese consumo" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,4"/>
+        <TextBlock x:Name="TxtPlan" Foreground="White" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/>
+        <Border Background="#2A1E10" BorderBrush="#FFC857" BorderThickness="1" CornerRadius="8" Padding="12">
+          <StackPanel>
+            <TextBlock Text="⚠ ADVERTENCIA: mientras este perfil este activo NO tendras disponible o NO podras usar:" Foreground="#FFC857" FontWeight="Bold" TextWrapping="Wrap" FontSize="13"/>
+            <TextBlock x:Name="TxtAdv" Foreground="White" TextWrapping="Wrap" FontSize="12" Margin="0,8,0,0"/>
+          </StackPanel>
+        </Border>
+        <TextBlock x:Name="TxtPie" Foreground="#9FB4D8" TextWrapping="Wrap" FontSize="12" Margin="0,10,0,0"/>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>
+"@
+    $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
+    try { if ($window -and $window.IsVisible) { $dlg.Owner = $window } } catch {}
+    Iniciar-EfectosNeon -Ventana $dlg
+    $dlg.FindName("TxtHw").Text = "Procesador : $($Hw.CpuNombre)`r`n              $($Hw.Nucleos) nucleo(s), $($Hw.Hilos) hilo(s), $($Hw.GHz) GHz`r`nMemoria RAM: $($Hw.RamGB) GB`r`nDisco       : $($Hw.Disco)`r`nTipo        : $(if ($Hw.Laptop) { 'portatil / tablet' } else { 'PC de escritorio' })`r`nNIVEL       : $($Plan.Nivel)  (limitacion $($Hw.Puntos)/10)"
+    $c = "CPU  : $($Carga.Cpu)%`r`nRAM  : $($Carga.RamPct)%  ($($Carga.RamUsadaMB) de $($Carga.RamTotalMB) MB)`r`nDisco: $($Carga.Disco)%"
+    if (@($Carga.TopCpu).Count -gt 0) { $c += "`r`n`r`nMas CPU : " + ((@($Carga.TopCpu) | ForEach-Object { "$($_.Nombre) $($_.Pct)%" }) -join ', ') }
+    if (@($Carga.TopRam).Count -gt 0) { $c += "`r`nMas RAM : " + ((@($Carga.TopRam) | ForEach-Object { "$($_.Nombre) $($_.MB) MB" }) -join ', ') }
+    $dlg.FindName("TxtCarga").Text = $c
+    $pl = ($Plan.Motivos | ForEach-Object { "• $_" }) -join "`r`n"
+    if (@($Plan.Abiertas).Count -gt 0) { $pl += "`r`n• Se cerraran ahora estas apps abiertas (guarda tu trabajo): " + ($Plan.Abiertas -join ', ') + "." }
+    $dlg.FindName("TxtPlan").Text = $pl
+    $dlg.FindName("TxtAdv").Text = ($Plan.Advertencias | ForEach-Object { "✖ $_" }) -join "`r`n"
+    $dlg.FindName("TxtPie").Text = "Todo se revierte con 'Restaurar configuracion predeterminada' (guarda el estado original de los servicios). Despues de aplicar, reinicia el equipo."
+    $dlg.FindName("BtnCancelar").Add_Click({ $dlg.DialogResult = $false }.GetNewClosure())
+    $dlg.FindName("BtnAceptar").Add_Click({ $dlg.DialogResult = $true }.GetNewClosure())
+    $ok = $dlg.ShowDialog()
+    return [bool]$ok
+}
+
+# Pasos del perfil de bajo consumo (compartidos por el perfil manual y el automatico).
+# $Script:BCExtremo = $true agrega los ajustes de nivel "MUY LIMITADO" (actualizaciones solo con aviso).
+# $Script:BCOpc: opciones segun la carga medida (SaltarComponentes, AnalisisTemprano).
+$Script:BCExtremo = $false
+$Script:BCOpc = @{ SaltarComponentes = $false; AnalisisTemprano = $false }
+function Get-PasosBC {
+    $todos = @(
+        @{ Id='guardar'; Txt="Guardando el estado original para poder restaurarlo..."; Accion={ Guardar-EstadoBC } },
         @{ Txt="Desactivando servicios de telemetria y funciones poco usadas..."; Accion={ foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener } } },
         @{ Txt="Desactivando SysMain, indexacion, panel tactil, fax y Xbox..."; Accion={
             foreach ($s in $Script:ServiciosBCBase) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener }
         } },
         @{ Txt="Desactivando servicios extra (errores, diagnostico, UPnP, dispositivos conectados...)..."; Accion={ Accion-ServiciosBCAgresivo } },
+        @{ Txt="Frenando Microsoft Store e instalacion de apps en segundo plano (wsappx)..."; Accion={ Accion-FrenarStoreAppx } },
         @{ Txt="Quitando transparencia, animaciones y sombras (cambio visible al instante)..."; Accion={ Accion-TransparenciaOff; Accion-EfectosRendimientoMaximo } },
         @{ Txt="Bloqueando apps en segundo plano y sugerencias de Windows..."; Accion={ Accion-BackgroundAppsOff; Accion-SugerenciasOff } },
-        @{ Txt="Aplicando ajustes de ahorro (Prefetch, Edge, Cortana, Copilot, Widgets, telemetria)..."; Accion={ Aplicar-AjustesRegBC } },
+        @{ Txt="Aplicando ajustes de ahorro (Edge, Cortana, Copilot, Widgets, telemetria, Tienda)..."; Accion={ Aplicar-AjustesRegBC -Extremo:$Script:BCExtremo } },
         @{ Txt="Desactivando programas de inicio no esenciales (OneDrive, Teams, Spotify, Discord...)..."; Accion={ Accion-OneDriveStartupOff; Accion-InicioNoEsencialOff } },
         @{ Txt="Desactivando tareas programadas de telemetria y diagnostico..."; Accion={ Accion-TareasBCAgresivoOff } },
         @{ Txt="Poniendo Windows Defender en modo ligero..."; Accion={ Accion-DefenderLigero } },
@@ -11412,12 +11673,61 @@ function Perfil-BajoConsumo {
         @{ Txt="Reduciendo escrituras en disco y liberando almacenamiento reservado..."; Accion={ Accion-UltimoAccesoNtfsOff; Accion-AlmacenamientoReservadoOff } },
         @{ Txt="Limpiando temporales, papelera y cache DNS..."; Accion={ Accion-LimpiarTemporales; Accion-VaciarPapelera; Accion-VaciarDNS } },
         @{ Txt="Limpieza profunda del disco (Windows Update, errores, navegadores)..."; Accion={ Accion-LimpiezaProfundaDisco } },
-        @{ Txt="Limpiando componentes antiguos de Windows (puede tardar unos minutos)..."; Accion={ Accion-LimpiarComponentesWindows } },
+        @{ Id='comp'; Txt="Limpiando componentes antiguos de Windows (puede tardar unos minutos)..."; Accion={ Accion-LimpiarComponentesWindows } },
+        @{ Txt="Buscando que proceso sigue consumiendo CPU y frenando los innecesarios..."; Accion={ Accion-AnalizarYFrenarCPU } },
         @{ Txt="Recargando el escritorio para aplicar los efectos visuales..."; Accion={ Reiniciar-ExplorerSilencioso } },
         @{ Txt="Liberando memoria RAM (incluida la lista en espera)..."; Accion={ Liberar-RAMSilencioso -Profundo } }
     )
-    Invoke-PasosPerfil -Ventana $prog -Pasos $pasos
-    Finalizar-Perfil -Ventana $prog -Titulo "Perfil Bajo consumo (agresivo)" -Antes $antes -Nota "REINICIA el equipo para que se apliquen por completo los servicios desactivados, el agrupamiento de procesos y Prefetch. Si algo te hace falta (impresion, busqueda de Windows, etc.), usa 'Restaurar configuracion predeterminada': devuelve los servicios a su estado original exacto."
+    $res = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $todos) {
+        if ($p.Id -eq 'comp' -and $Script:BCOpc.SaltarComponentes) { continue }
+        $res.Add($p)
+        if ($p.Id -eq 'guardar' -and $Script:BCOpc.AnalisisTemprano) {
+            $res.Add(@{ Txt="CPU alta: frenando primero los procesos que mas consumen..."; Accion={ Accion-AnalizarYFrenarCPU } })
+        }
+    }
+    return $res.ToArray()
+}
+
+function Ejecutar-PerfilBC {
+    param([string]$Titulo, [bool]$Extremo = $false, [string]$Nota = '', $Opciones = $null)
+    $Script:BCExtremo = $Extremo
+    $Script:BCOpc = @{ SaltarComponentes = $false; AnalisisTemprano = $false }
+    if ($Opciones) { foreach ($k in @('SaltarComponentes','AnalisisTemprano')) { if ($Opciones.ContainsKey($k)) { $Script:BCOpc[$k] = [bool]$Opciones[$k] } } }
+    try {
+        $antes = Get-InstantaneaSistema
+        $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
+        $prog = New-VentanaProgreso -Titulo "Aplicando perfil: $Titulo"
+        Invoke-PasosPerfil -Ventana $prog -Pasos (Get-PasosBC)
+    } finally {
+        $Script:BCExtremo = $false
+        $Script:BCOpc = @{ SaltarComponentes = $false; AnalisisTemprano = $false }
+    }
+    Finalizar-Perfil -Ventana $prog -Titulo $Titulo -Antes $antes -Nota $Nota
+}
+
+function Perfil-BajoConsumo {
+    if (-not (Requiere-Admin)) { return }
+    if (-not (Show-Confirm "PERFIL BAJO CONSUMO (AGRESIVO) - para equipos con poca RAM, CPU lenta o disco lleno/lento.`n`nRAM: apaga servicios extra (SysMain, busqueda, diagnostico, telemetria, Xbox, UPnP, etc.), bloquea todas las apps en segundo plano, desactiva Cortana/Copilot/Widgets/busqueda web, Edge en segundo plano, cierra actualizadores y limpia la memoria incluida la lista en espera.`n`nCPU: frena la Tienda y la instalacion de apps (wsappx), plan Equilibrado eficiente, Defender en modo ligero, tareas de telemetria y mantenimiento automatico desactivados, servicios agrupados en menos procesos y, al final, mide que proceso sigue consumiendo y detiene los innecesarios.`n`nALMACENAMIENTO: hibernacion desactivada, menos escrituras de NTFS, almacenamiento reservado desactivado, limpieza profunda (Windows Update, informes de error, volcados, miniaturas, cache de Edge/Chrome, componentes antiguos de Windows) y Restaurar sistema limitado.`n`nTodo se puede revertir con 'Restaurar configuracion predeterminada' (guarda el estado original de los servicios). La limpieza de componentes puede tardar unos minutos.`n`n¿Aplicar perfil de Bajo consumo agresivo?")) { return }
+    Ejecutar-PerfilBC -Titulo "Perfil Bajo consumo (agresivo)" -Extremo $false -Nota "REINICIA el equipo para que se apliquen por completo los servicios desactivados y el agrupamiento de procesos. Si algo te hace falta (impresion, busqueda de Windows, etc.), usa 'Restaurar configuracion predeterminada': devuelve los servicios a su estado original exacto."
+}
+
+function Perfil-Automatico {
+    if (-not (Requiere-Admin)) { return }
+    $hw = $null
+    try { $hw = Get-HardwareInfo } catch { Write-Log "No se pudo detectar el hardware: $($_.Exception.Message)" -Tipo ERROR; return }
+    Write-Log "Perfil automatico: midiendo el consumo actual de CPU, RAM y disco (unos segundos)..." -Tipo INFO
+    $carga = $null
+    try { $carga = Medir-ConsumoActual } catch { Write-Log "No se pudo medir el consumo: $($_.Exception.Message)" -Tipo ERROR; return }
+    $plan = Get-PlanAutomatico -Hw $hw -Carga $carga
+    Write-Log "Hardware: $($hw.CpuNombre), $($hw.RamGB) GB, disco $($hw.Disco). Consumo: CPU $($carga.Cpu)%, RAM $($carga.RamPct)%, disco $($carga.Disco)%. Nivel: $($plan.Nivel)." -Tipo INFO
+    if ($plan.Nivel -eq 'POTENTE') {
+        if (Show-Confirm "Tu equipo es potente ($($hw.CpuNombre), $($hw.RamGB) GB de RAM, disco $($hw.Disco)) y ahora mismo no esta saturado (CPU $($carga.Cpu)%, RAM $($carga.RamPct)%, disco $($carga.Disco)%).`n`nUn perfil agresivo le quitaria funciones sin ganar mucho. Se recomienda el perfil 'Equipo moderno'.`n`n¿Aplicar Equipo moderno?") { Perfil-EquipoModerno }
+        return
+    }
+    if (-not (Show-ConfirmPerfilAuto -Hw $hw -Carga $carga -Plan $plan)) { return }
+    $noDisp = (($plan.Advertencias | ForEach-Object { ($_ -split ':')[0] }) -join ', ')
+    Ejecutar-PerfilBC -Titulo "Perfil Automatico ($($plan.Nivel))" -Extremo $plan.Extremo -Opciones $plan.Opciones -Nota "Detectado: $($hw.CpuNombre), $($hw.RamGB) GB de RAM, disco $($hw.Disco). REINICIA el equipo para completar los cambios. No disponible mientras el perfil este activo: $noDisp. Para volver atras usa 'Restaurar configuracion predeterminada'."
 }
 
 function Perfil-EquipoModerno {
@@ -15855,6 +16165,12 @@ Marcar-Arranque 'funciones y recursos'
                                         <TextBlock Text="MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios y tareas, limita Defender, limpia a fondo el disco y libera RAM. Reversible." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
                                     </StackPanel>
                                 </Button>
+                                <Button x:Name="BtnPerfilAuto" Width="300" Height="90" BorderBrush="#29D398">
+                                    <StackPanel>
+                                        <TextBlock Text="🤖 Perfil automatico (detecta tu hardware)" FontWeight="Bold" TextWrapping="Wrap"/>
+                                        <TextBlock Text="Detecta CPU, RAM y tipo de disco y aplica el nivel de ahorro mas agresivo que le conviene a tu equipo." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
+                                    </StackPanel>
+                                </Button>
                                 <Button x:Name="BtnPerfilModerno" Width="300" Height="90">
                                     <StackPanel>
                                         <TextBlock Text="🖥️ Equipo moderno" FontWeight="Bold" TextWrapping="Wrap"/>
@@ -17223,6 +17539,7 @@ $window.FindName("BtnPerfilBajo").Add_Click({ Perfil-BajoConsumo })
 $window.FindName("BtnPerfilModerno").Add_Click({ Perfil-EquipoModerno })
 $window.FindName("BtnPerfilGamer").Add_Click({ Perfil-Gamer })
 $window.FindName("BtnPerfilRestaurar").Add_Click({ Perfil-Restaurar })
+$window.FindName("BtnPerfilAuto").Add_Click({ Perfil-Automatico })
 $window.FindName("BtnModoManual").Add_Click({ Show-VentanaManual })
 $window.FindName("BtnQuitarAppsWindows").Add_Click({ Show-VentanaAppsWindows })
 
@@ -20227,6 +20544,7 @@ $Global:AyudaControles = @{
     'BtnPerfilBajo' = 'MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios extra, tareas y apps en segundo plano, pone Defender en modo ligero, limpia el disco a fondo y libera RAM. Guarda el estado original: se revierte con Restaurar. Muestra ANTES y DESPUES.'
     'BtnPerfilModerno' = 'Para equipos con buen hardware: quita bloatware y telemetria manteniendo las funciones utiles. Muestra un ANTES y DESPUES.'
     'BtnPerfilGamer' = 'Mejora el rendimiento en juegos: energia al maximo, modo juego, GPU y red optimizadas.'
+    'BtnPerfilAuto' = 'Detecta tu hardware (CPU, RAM, HDD/SSD) y MIDE el consumo actual de CPU, RAM y disco para ajustar el perfil de ahorro; antes de aplicar te avisa que funciones dejaran de estar disponibles. Si el equipo es potente y no esta saturado te recomienda Equipo moderno. Reversible con Restaurar.'
     'BtnPerfilRestaurar' = 'Revierte los cambios hechos por cualquiera de los perfiles y vuelve a la configuracion predeterminada.'
     'BtnQuitarAppsWindows' = 'Lista las apps incluidas en Windows (Xbox, Noticias, Clima, Teams, Store...) y desinstala las que elijas.'
     'BtnModoManual' = 'Abre una lista de ajustes de CPU, RAM y disco para marcar uno por uno lo que quieras aplicar.'
