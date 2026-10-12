@@ -10851,6 +10851,8 @@ function Restaurar-CPUPredeterminado {
     try {
         powercfg -setacvalueindex scheme_current sub_processor 0cc5b647-c1df-4637-891a-dec35c318583 10 | Out-Null
         powercfg -setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 5 | Out-Null
+        powercfg -setdcvalueindex scheme_current sub_processor PROCTHROTTLEMIN 5 | Out-Null
+        powercfg -setdcvalueindex scheme_current sub_processor PROCTHROTTLEMAX 100 | Out-Null
         powercfg -setactive scheme_current | Out-Null
     } catch {}
 }
@@ -11104,34 +11106,318 @@ function Global:Show-ResultadoPerfil {
     $w.ShowDialog() | Out-Null
 }
 
+# ---------------------------------------------------------------------------
+#  PERFIL BAJO CONSUMO (AGRESIVO): piezas reversibles. El estado original de los
+#  servicios y de las tareas se guarda UNA sola vez en ProgramData para que
+#  "Restaurar configuracion predeterminada" lo devuelva exactamente como estaba.
+# ---------------------------------------------------------------------------
+
+$Script:RutaEstadoBC = Join-Path $env:ProgramData 'TheDragonTool\estado_bajo_consumo.json'
+$Script:RutaTareasBC = Join-Path $env:ProgramData 'TheDragonTool\tareas_desactivadas_bc.txt'
+
+# Servicios que el perfil agresivo apaga ademas de los de telemetria/Xbox (ninguno es necesario para trabajar)
+$Script:ServiciosBCBase = @('SysMain','WSearch','TabletInputService','Fax','XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc')
+$Script:ServiciosBCAgresivo = @(
+    'WerSvc','CDPSvc','TrkWks','icssvc','SEMgrSvc','AJRouter','SCardSvr','stisvc','lltdsvc','SSDPSRV','upnphost',
+    'PcaSvc','WpcMonSvc','DPS','WdiServiceHost','WdiSystemHost','diagnosticshub.standardcollector.service','DoSvc'
+)
+
+function Get-ServiciosBCTodos {
+    $l = New-Object System.Collections.Generic.List[string]
+    foreach ($n in ($Script:ServiciosBloatComun + $Script:ServiciosBCBase + $Script:ServiciosBCAgresivo)) { if (-not $l.Contains($n)) { $l.Add($n) } }
+    return $l.ToArray()
+}
+
+# Ajustes de registro (DWord). Def = valor al restaurar ($null = quitar el valor).
+$Script:AjustesRegBC = @(
+    @{ R='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'; N='EnablePrefetcher'; V=0; Def=3 },
+    @{ R='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters'; N='EnableSuperfetch'; V=0; Def=3 },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N='StartupBoostEnabled'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Edge'; N='BackgroundModeEnabled'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection'; N='AllowTelemetry'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\SQMClient\Windows'; N='CEIPEnable'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting'; N='Disabled'; V=1; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'; N='LetAppsRunInBackground'; V=2; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search'; N='AllowCortana'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search'; N='DisableWebSearch'; V=1; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot'; N='TurnOffWindowsCopilot'; V=1; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Dsh'; N='AllowNewsAndInterests'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR'; N='AllowGameDVR'; V=0; Def=$null },
+    @{ R='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\Maintenance'; N='MaintenanceDisabled'; V=1; Def=$null },
+    @{ R='HKCU:\Software\Microsoft\Windows\CurrentVersion\Search'; N='BingSearchEnabled'; V=0; Def=1 },
+    @{ R='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; N='TaskbarDa'; V=0; Def=1 },
+    @{ R='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; N='TaskbarMn'; V=0; Def=1 },
+    @{ R='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; N='ShowSyncProviderNotifications'; V=0; Def=1 }
+)
+
+# Tareas programadas extra (ademas de $Script:TareasDiagnostico)
+$Script:TareasBCExtra = @(
+    @{ Path='\Microsoft\Windows\Application Experience\'; Name='StartupAppTask' },
+    @{ Path='\Microsoft\Windows\Application Experience\'; Name='PcaPatchDbTask' },
+    @{ Path='\Microsoft\Windows\Customer Experience Improvement Program\'; Name='KernelCeipTask' },
+    @{ Path='\Microsoft\Windows\Feedback\Siuf\'; Name='DmClient' },
+    @{ Path='\Microsoft\Windows\Feedback\Siuf\'; Name='DmClientOnScenarioDownload' },
+    @{ Path='\Microsoft\Windows\DiskFootprint\'; Name='Diagnostics' },
+    @{ Path='\Microsoft\Windows\Power Efficiency Diagnostics\'; Name='AnalyzeSystem' },
+    @{ Path='\Microsoft\Windows\NetTrace\'; Name='GatherNetworkInfo' },
+    @{ Path='\Microsoft\Windows\Device Information\'; Name='Device' },
+    @{ Path='\Microsoft\Windows\Flighting\OneSettings\'; Name='RefreshCache' },
+    @{ Path='\Microsoft\Windows\CloudExperienceHost\'; Name='CreateObjectTask' },
+    @{ Path='\Microsoft\Windows\Shell\'; Name='FamilySafetyMonitor' },
+    @{ Path='\Microsoft\Windows\Shell\'; Name='FamilySafetyRefreshTask' },
+    @{ Path='\Microsoft\Windows\Maps\'; Name='MapsUpdateTask' },
+    @{ Path='\Microsoft\Windows\Maps\'; Name='MapsToastTask' },
+    @{ Path='\Microsoft\Windows\SettingSync\'; Name='BackgroundUploadTask' },
+    @{ Path='\Microsoft\Office\'; Name='OfficeTelemetryAgentFallBack2016' },
+    @{ Path='\Microsoft\Office\'; Name='OfficeTelemetryAgentLogOn2016' }
+)
+
+# Procesos extra que el perfil agresivo cierra (actualizadores, telemetria y lanzadores; NO navegadores)
+$Script:ProcesosBCExtra = @(
+    'CompatTelRunner','DeviceCensus','wsqmcons','GoogleCrashHandler','GoogleCrashHandler64','MicrosoftEdgeUpdate',
+    'GoogleUpdate','jusched','AdobeIPCBroker','CCXProcess','CoreSync','AcroTray','Widgets','WidgetService','Cortana'
+)
+
+function Guardar-EstadoBC {
+    try {
+        if (Test-Path $Script:RutaEstadoBC) { Write-Log "Estado original ya guardado antes: se conserva el primero para poder restaurar." -Tipo INFO -SinRegistro; return }
+        $dir = Split-Path $Script:RutaEstadoBC
+        if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+        $svcs = New-Object System.Collections.ArrayList
+        foreach ($n in (Get-ServiciosBCTodos)) {
+            $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$n"
+            if (-not (Test-Path $k)) { continue }
+            $p = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+            if ($null -eq $p -or $null -eq $p.Start) { continue }
+            $d = 0; if ($null -ne $p.DelayedAutostart) { $d = [int]$p.DelayedAutostart }
+            [void]$svcs.Add([ordered]@{ N = $n; Start = [int]$p.Start; Delayed = $d })
+        }
+        $res = $null
+        try { $res = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager' -Name ShippedWithReserves -ErrorAction Stop).ShippedWithReserves } catch {}
+        $obj = [ordered]@{ Fecha = (Get-Date).ToString('s'); Servicios = $svcs.ToArray(); Reserved = $res }
+        ($obj | ConvertTo-Json -Depth 4) | Set-Content -Path $Script:RutaEstadoBC -Encoding UTF8
+        Write-Log "Estado original guardado ($($svcs.Count) servicios) en $Script:RutaEstadoBC para poder restaurarlo." -Tipo OK
+    } catch { Write-Log "No se pudo guardar el estado original: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
+}
+
+function Accion-ServiciosBCAgresivo {
+    if (-not (Requiere-Admin)) { return }
+    $ok = 0; $omitidos = 0
+    foreach ($n in $Script:ServiciosBCAgresivo) {
+        $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
+        if (-not $svc) { continue }
+        try {
+            Stop-Service -Name $n -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $n -StartupType Disabled -ErrorAction Stop
+            $ok++
+        } catch { $omitidos++ }
+    }
+    Write-Log "Servicios extra desactivados: $ok$(if ($omitidos) { " ($omitidos protegidos por Windows, se omiten)" }) - menos procesos y RAM en reposo." -Tipo OK
+}
+
+function Aplicar-AjustesRegBC {
+    $ok = 0
+    foreach ($a in $Script:AjustesRegBC) {
+        try {
+            if (-not (Test-Path $a.R)) { New-Item -Path $a.R -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -Path $a.R -Name $a.N -Value $a.V -Type DWord -ErrorAction Stop
+            $ok++
+        } catch {}
+    }
+    Write-Log "Ajustes de registro de ahorro aplicados: $ok de $($Script:AjustesRegBC.Count) (Prefetch, Edge en segundo plano, telemetria, Cortana/Copilot/Widgets, mantenimiento automatico, etc.)." -Tipo OK
+}
+function Restaurar-AjustesRegBC {
+    foreach ($a in $Script:AjustesRegBC) {
+        try {
+            if ($null -eq $a.Def) { if (Test-Path $a.R) { Remove-ItemProperty -Path $a.R -Name $a.N -ErrorAction SilentlyContinue } }
+            else { if (-not (Test-Path $a.R)) { New-Item -Path $a.R -Force -ErrorAction Stop | Out-Null }; Set-ItemProperty -Path $a.R -Name $a.N -Value $a.Def -Type DWord -ErrorAction Stop }
+        } catch {}
+    }
+}
+
+function Accion-TareasBCAgresivoOff {
+    if (-not (Requiere-Admin)) { return }
+    $reg = New-Object System.Collections.Generic.List[string]
+    foreach ($t in ($Script:TareasDiagnostico + $Script:TareasBCExtra)) {
+        try {
+            $task = Get-ScheduledTask -TaskPath $t.Path -TaskName $t.Name -ErrorAction Stop
+            if ("$($task.State)" -eq 'Disabled') { continue }
+            Disable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null
+            $reg.Add("$($t.Path)|$($t.Name)")
+        } catch {}
+    }
+    if ($reg.Count -gt 0) {
+        try {
+            $dir = Split-Path $Script:RutaTareasBC
+            if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+            Add-Content -Path $Script:RutaTareasBC -Value $reg.ToArray() -Encoding UTF8
+        } catch {}
+    }
+    Write-Log "Tareas programadas de diagnostico/telemetria desactivadas: $($reg.Count)." -Tipo OK
+}
+
+function Accion-DefenderLigero {
+    try {
+        Set-MpPreference -ScanAvgCPULoadFactor 15 -EnableLowCpuPriority $true -DisableCatchupFullScan $true -DisableCatchupQuickScan $true -ErrorAction Stop
+        Write-Log "Windows Defender en modo ligero: analisis con maximo 15% de CPU y baja prioridad (la proteccion sigue activa)." -Tipo OK
+    } catch { Write-Log "Defender no se pudo ajustar (puede haber otro antivirus instalado)." -Tipo INFO -SinRegistro }
+}
+function Restaurar-DefenderLigero {
+    try { Set-MpPreference -ScanAvgCPULoadFactor 50 -EnableLowCpuPriority $false -DisableCatchupFullScan $false -DisableCatchupQuickScan $false -ErrorAction Stop } catch {}
+}
+
+function Accion-CerrarProcesosBCExtra {
+    $n = 0
+    foreach ($nombre in $Script:ProcesosBCExtra) {
+        foreach ($p in @(Get-Process -Name $nombre -ErrorAction SilentlyContinue)) {
+            try { Stop-Process -Id $p.Id -Force -ErrorAction Stop; $n++ } catch {}
+        }
+    }
+    Write-Log "Procesos de actualizadores/telemetria cerrados: $n." -Tipo OK
+}
+
+function Aplicar-CPUEficienteSilencioso {
+    $esLaptop = $false
+    try { $esLaptop = [bool](Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue) } catch {}
+    try {
+        $g = '0cc5b647-c1df-4637-891a-dec35c318583'
+        powercfg -setactive SCHEME_BALANCED | Out-Null
+        powercfg -setacvalueindex scheme_current sub_processor $g 10 | Out-Null
+        powercfg -setdcvalueindex scheme_current sub_processor $g 10 | Out-Null
+        powercfg -setacvalueindex scheme_current sub_processor PROCTHROTTLEMIN 5 | Out-Null
+        powercfg -setdcvalueindex scheme_current sub_processor PROCTHROTTLEMIN 5 | Out-Null
+        if ($esLaptop) { powercfg -setdcvalueindex scheme_current sub_processor PROCTHROTTLEMAX 99 | Out-Null }
+        powercfg -setactive scheme_current | Out-Null
+        Write-Log "CPU en modo eficiente: plan Equilibrado, frecuencia minima 5% y nucleos en reposo permitidos$(if ($esLaptop) { '; con bateria se evita el turbo (menos calor y consumo)' })." -Tipo OK
+    } catch { Write-Log "No se pudo ajustar el plan de energia eficiente." -Tipo AVISO }
+}
+
+function Accion-UltimoAccesoNtfsOff {
+    try { fsutil behavior set disablelastaccess 1 | Out-Null; Write-Log "NTFS ya no escribe la 'fecha de ultimo acceso' en cada lectura (menos escrituras en disco)." -Tipo OK }
+    catch { Write-Log "No se pudo ajustar el ultimo acceso de NTFS." -Tipo INFO -SinRegistro }
+}
+function Accion-AlmacenamientoReservadoOff {
+    try {
+        & "$env:WINDIR\System32\Dism.exe" /Online /Set-ReservedStorageState /State:Disabled | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Log "Almacenamiento reservado de Windows desactivado (libera varios GB; se recupera al restaurar)." -Tipo OK }
+        else { Write-Log "El almacenamiento reservado no se pudo cambiar ahora (hay actualizaciones pendientes o no esta disponible)." -Tipo INFO -SinRegistro }
+    } catch { Write-Log "No se pudo cambiar el almacenamiento reservado." -Tipo INFO -SinRegistro }
+}
+
+function Accion-LimpiezaProfundaDisco {
+    if (-not (Requiere-Admin)) { return }
+    $antes = 0; try { $antes = (New-Object System.IO.DriveInfo("$env:SystemDrive")).AvailableFreeSpace } catch {}
+    $wuCorria = $false
+    try { $wuCorria = ((Get-Service -Name wuauserv -ErrorAction Stop).Status -eq 'Running') } catch {}
+    try { Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue; Stop-Service -Name bits -Force -ErrorAction SilentlyContinue } catch {}
+    $rutas = @(
+        "$env:WINDIR\SoftwareDistribution\Download\*",
+        "$env:ProgramData\Microsoft\Windows\WER\ReportQueue\*",
+        "$env:ProgramData\Microsoft\Windows\WER\ReportArchive\*",
+        "$env:ProgramData\Microsoft\Windows\WER\Temp\*",
+        "$env:LOCALAPPDATA\CrashDumps\*",
+        "$env:WINDIR\Minidump\*",
+        "$env:WINDIR\MEMORY.DMP",
+        "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db",
+        "$env:WINDIR\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache\*",
+        "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\Cache_Data\*",
+        "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Code Cache\*",
+        "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\GPUCache\*",
+        "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache\Cache_Data\*",
+        "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Code Cache\*",
+        "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\GPUCache\*"
+    )
+    foreach ($r in $rutas) { try { Remove-Item -Path $r -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
+    if ($wuCorria) { try { Start-Service -Name wuauserv -ErrorAction SilentlyContinue } catch {} }
+    $despues = $antes; try { $despues = (New-Object System.IO.DriveInfo("$env:SystemDrive")).AvailableFreeSpace } catch {}
+    $mb = [math]::Max(0, [math]::Round(($despues - $antes) / 1MB))
+    Write-Log "Limpieza profunda: cache de Windows Update, informes de errores, volcados de memoria, miniaturas y cache de Edge/Chrome. Liberado aprox.: $mb MB." -Tipo OK
+}
+
+function Accion-LimpiarComponentesWindows {
+    if (-not (Requiere-Admin)) { return }
+    try {
+        $p = Start-Process -FilePath "$env:WINDIR\System32\Dism.exe" -ArgumentList '/Online','/Cleanup-Image','/StartComponentCleanup' -WindowStyle Hidden -PassThru -ErrorAction Stop
+        $t0 = Get-Date
+        while (-not $p.HasExited) {
+            Wait-UI -Milisegundos 250
+            if (((Get-Date) - $t0).TotalMinutes -gt 8) {
+                Write-Log "La limpieza de componentes de Windows sigue en segundo plano; terminara sola." -Tipo INFO -SinRegistro
+                return
+            }
+        }
+        Write-Log "Componentes antiguos de Windows (WinSxS) limpiados." -Tipo OK
+    } catch { Write-Log "No se pudo limpiar los componentes de Windows." -Tipo INFO -SinRegistro }
+}
+
+function Restaurar-BajoConsumoAgresivo {
+    $estado = $null
+    try { if (Test-Path $Script:RutaEstadoBC) { $estado = Get-Content -Path $Script:RutaEstadoBC -Raw -Encoding UTF8 | ConvertFrom-Json } } catch {}
+    if ($estado -and $estado.Servicios) {
+        foreach ($s in $estado.Servicios) {
+            try {
+                $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$($s.N)"
+                if (-not (Test-Path $k)) { continue }
+                Set-ItemProperty -Path $k -Name Start -Value ([int]$s.Start) -Type DWord -ErrorAction Stop
+                if ([int]$s.Delayed -eq 1) { Set-ItemProperty -Path $k -Name DelayedAutostart -Value 1 -Type DWord -ErrorAction SilentlyContinue }
+                else { Remove-ItemProperty -Path $k -Name DelayedAutostart -ErrorAction SilentlyContinue }
+                if ([int]$s.Start -eq 2) { Start-Service -Name $s.N -ErrorAction SilentlyContinue }
+            } catch {}
+        }
+        Write-Log "Servicios devueltos a su estado original exacto (guardado antes de aplicar el perfil)." -Tipo OK
+    } else {
+        foreach ($n in $Script:ServiciosBCAgresivo) { try { Set-Service -Name $n -StartupType Manual -ErrorAction SilentlyContinue } catch {} }
+    }
+    Restaurar-AjustesRegBC
+    Restaurar-DefenderLigero
+    try { fsutil behavior set disablelastaccess 2 | Out-Null } catch {}
+    if ($estado -and [int]$estado.Reserved -eq 1) { try { & "$env:WINDIR\System32\Dism.exe" /Online /Set-ReservedStorageState /State:Enabled | Out-Null } catch {} }
+    try {
+        if (Test-Path $Script:RutaTareasBC) {
+            foreach ($l in (Get-Content -Path $Script:RutaTareasBC -Encoding UTF8)) {
+                $q = "$l".Split('|'); if ($q.Count -lt 2) { continue }
+                try { Enable-ScheduledTask -TaskPath $q[0] -TaskName $q[1] -ErrorAction Stop | Out-Null } catch {}
+            }
+            Remove-Item -Path $Script:RutaTareasBC -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+    try { if (Test-Path $Script:RutaEstadoBC) { Remove-Item -Path $Script:RutaEstadoBC -Force -ErrorAction SilentlyContinue } } catch {}
+}
+
 function Perfil-BajoConsumo {
     if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "Perfil para equipos con pocos recursos (Celeron, Core i3, Core 2 Duo, poca RAM o disco lento).`n`nSe desactivaran servicios en segundo plano, SysMain y la indexacion de busqueda, apps en segundo plano, sugerencias de Windows, programas de inicio no esenciales, transparencia, animaciones y sombras (efecto visible al instante), hibernacion, Delivery Optimization y tareas de diagnostico; se agruparan mas servicios de Windows en menos procesos, se cerraran apps no esenciales, se limpiaran temporales/papelera, la CPU quedara a maximo rendimiento y se liberara la memoria RAM.`n`nAl final se recargara el escritorio (la barra de tareas parpadeara un segundo) y veras un resumen con los cambios.`n`n¿Aplicar perfil de Bajo consumo?")) { return }
+    if (-not (Show-Confirm "PERFIL BAJO CONSUMO (AGRESIVO) - para equipos con poca RAM, CPU lenta o disco lleno/lento.`n`nRAM: apaga servicios extra (SysMain, busqueda, diagnostico, telemetria, Xbox, UPnP, etc.), bloquea todas las apps en segundo plano, desactiva Cortana/Copilot/Widgets/busqueda web, Edge en segundo plano, cierra actualizadores y limpia la memoria incluida la lista en espera.`n`nCPU: plan Equilibrado eficiente (sin forzar maximo rendimiento), Defender en modo ligero (15% de CPU), tareas programadas de telemetria y mantenimiento automatico desactivados, servicios agrupados en menos procesos, transparencia y animaciones fuera.`n`nALMACENAMIENTO: hibernacion y Prefetch desactivados, menos escrituras de NTFS, almacenamiento reservado desactivado, limpieza profunda (Windows Update, informes de error, volcados, miniaturas, cache de Edge/Chrome, componentes antiguos de Windows) y Restaurar sistema limitado.`n`nTodo se puede revertir con 'Restaurar configuracion predeterminada' (guarda el estado original de los servicios). La limpieza de componentes puede tardar unos minutos.`n`nAl final se recargara el escritorio y veras un resumen.`n`n¿Aplicar perfil de Bajo consumo agresivo?")) { return }
 
     $antes = Get-InstantaneaSistema
     $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
-    $prog = New-VentanaProgreso -Titulo "Aplicando perfil: Equipo de bajo consumo"
+    $prog = New-VentanaProgreso -Titulo "Aplicando perfil: Bajo consumo (agresivo)"
     $pasos = @(
+        @{ Txt="Guardando el estado original para poder restaurarlo..."; Accion={ Guardar-EstadoBC } },
         @{ Txt="Desactivando servicios de telemetria y funciones poco usadas..."; Accion={ foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener } } },
         @{ Txt="Desactivando SysMain, indexacion, panel tactil, fax y Xbox..."; Accion={
-            foreach ($s in @('SysMain','WSearch','TabletInputService','Fax','XblAuthManager','XblGameSave','XboxNetApiSvc','XboxGipSvc')) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener }
+            foreach ($s in $Script:ServiciosBCBase) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener }
         } },
+        @{ Txt="Desactivando servicios extra (errores, diagnostico, UPnP, dispositivos conectados...)..."; Accion={ Accion-ServiciosBCAgresivo } },
         @{ Txt="Quitando transparencia, animaciones y sombras (cambio visible al instante)..."; Accion={ Accion-TransparenciaOff; Accion-EfectosRendimientoMaximo } },
-        @{ Txt="Bloqueando apps en segundo plano..."; Accion={ Accion-BackgroundAppsOff } },
-        @{ Txt="Desactivando sugerencias y anuncios de Windows..."; Accion={ Accion-SugerenciasOff } },
+        @{ Txt="Bloqueando apps en segundo plano y sugerencias de Windows..."; Accion={ Accion-BackgroundAppsOff; Accion-SugerenciasOff } },
+        @{ Txt="Aplicando ajustes de ahorro (Prefetch, Edge, Cortana, Copilot, Widgets, telemetria)..."; Accion={ Aplicar-AjustesRegBC } },
         @{ Txt="Desactivando programas de inicio no esenciales (OneDrive, Teams, Spotify, Discord...)..."; Accion={ Accion-OneDriveStartupOff; Accion-InicioNoEsencialOff } },
-        @{ Txt="Desactivando hibernacion (libera espacio en disco)..."; Accion={ Accion-HibernacionOff } },
+        @{ Txt="Desactivando tareas programadas de telemetria y diagnostico..."; Accion={ Accion-TareasBCAgresivoOff } },
+        @{ Txt="Poniendo Windows Defender en modo ligero..."; Accion={ Accion-DefenderLigero } },
+        @{ Txt="Desactivando hibernacion y Delivery Optimization..."; Accion={ Accion-HibernacionOff; Accion-DeliveryOptimizationOff } },
         @{ Txt="Limitando espacio de Restaurar sistema..."; Accion={ Accion-RestaurarSistemaLimitar } },
-        @{ Txt="Desactivando Delivery Optimization y tareas de diagnostico..."; Accion={ Accion-DeliveryOptimizationOff; Accion-TareasDiagnosticoOff } },
         @{ Txt="Agrupando servicios de Windows para reducir procesos en ejecucion..."; Accion={ Accion-AgruparServiciosSvcHost } },
-        @{ Txt="Cerrando aplicaciones no esenciales en segundo plano..."; Accion={ Accion-CerrarProcesosNoEsenciales } },
-        @{ Txt="Poniendo la CPU a maximo rendimiento y priorizando primer plano..."; Accion={ Aplicar-CPUMaximoSilencioso; Accion-PriorizarPrimerPlano } },
+        @{ Txt="Cerrando aplicaciones y actualizadores en segundo plano..."; Accion={ Accion-CerrarProcesosNoEsenciales; Accion-CerrarProcesosBCExtra } },
+        @{ Txt="Configurando la CPU en modo eficiente y priorizando primer plano..."; Accion={ Aplicar-CPUEficienteSilencioso; Accion-PriorizarPrimerPlano } },
+        @{ Txt="Reduciendo escrituras en disco y liberando almacenamiento reservado..."; Accion={ Accion-UltimoAccesoNtfsOff; Accion-AlmacenamientoReservadoOff } },
         @{ Txt="Limpiando temporales, papelera y cache DNS..."; Accion={ Accion-LimpiarTemporales; Accion-VaciarPapelera; Accion-VaciarDNS } },
+        @{ Txt="Limpieza profunda del disco (Windows Update, errores, navegadores)..."; Accion={ Accion-LimpiezaProfundaDisco } },
+        @{ Txt="Limpiando componentes antiguos de Windows (puede tardar unos minutos)..."; Accion={ Accion-LimpiarComponentesWindows } },
         @{ Txt="Recargando el escritorio para aplicar los efectos visuales..."; Accion={ Reiniciar-ExplorerSilencioso } },
         @{ Txt="Liberando memoria RAM (incluida la lista en espera)..."; Accion={ Liberar-RAMSilencioso -Profundo } }
     )
     Invoke-PasosPerfil -Ventana $prog -Pasos $pasos
-    Finalizar-Perfil -Ventana $prog -Titulo "Perfil Bajo consumo" -Antes $antes -Nota "Se recomienda reiniciar el equipo para que los servicios desactivados y el agrupamiento de procesos surtan efecto completo (menos procesos/subprocesos activos, CPU, RAM y disco)."
+    Finalizar-Perfil -Ventana $prog -Titulo "Perfil Bajo consumo (agresivo)" -Antes $antes -Nota "REINICIA el equipo para que se apliquen por completo los servicios desactivados, el agrupamiento de procesos y Prefetch. Si algo te hace falta (impresion, busqueda de Windows, etc.), usa 'Restaurar configuracion predeterminada': devuelve los servicios a su estado original exacto."
 }
 
 function Perfil-EquipoModerno {
@@ -11256,6 +11542,7 @@ function Perfil-Restaurar {
     Accion-TareasDiagnosticoOn
     Accion-PriorizarPrimerPlanoRestaurar
     Accion-AgruparServiciosSvcHostRestaurar
+    Restaurar-BajoConsumoAgresivo
 
     Update-VentanaProgreso -Ventana $prog -Porcentaje 95 -Estado "Restaurando ajustes de GPU y red..." -LogLinea "Restaurando GPU y red multimedia a valores por defecto."
     try { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -Value 0 -Type DWord -ErrorAction SilentlyContinue } catch {}
@@ -15565,7 +15852,7 @@ Marcar-Arranque 'funciones y recursos'
                                 <Button x:Name="BtnPerfilBajo" Width="300" Height="90">
                                     <StackPanel>
                                         <TextBlock Text="🔋 Equipo de bajo consumo" FontWeight="Bold" TextWrapping="Wrap"/>
-                                        <TextBlock Text="Ideal para PCs con poca RAM o disco lento. Desactiva servicios innecesarios para maxima velocidad." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
+                                        <TextBlock Text="MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios y tareas, limita Defender, limpia a fondo el disco y libera RAM. Reversible." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
                                     </StackPanel>
                                 </Button>
                                 <Button x:Name="BtnPerfilModerno" Width="300" Height="90">
@@ -19932,12 +20219,12 @@ $Global:AyudaControles = @{
     'BtnPausaGraficos' = 'Pausa o reanuda los graficos en vivo de CPU, RAM, disco y GPU para poder verlos con calma.'
     'BtnInicioLimpiarTemp' = 'Borra archivos temporales de Windows y del usuario para liberar espacio en disco.'
     'BtnInicioLiberarRAM' = 'Libera memoria RAM de forma basica sin cerrar tus programas.'
-    'BtnInicioPerfilBajo' = 'Aplica el perfil de bajo consumo: desactiva servicios innecesarios para que equipos lentos vayan mas rapido.'
+    'BtnInicioPerfilBajo' = 'Aplica el perfil de bajo consumo AGRESIVO: apaga servicios, tareas y apps en segundo plano, limita Defender, limpia el disco a fondo y libera RAM. Se puede revertir con Restaurar.'
     'BtnInicioDiagnostico' = 'Ejecuta el diagnostico completo automatico del equipo (hardware, disco, red, bateria, eventos) y muestra un resumen.'
     'BtnInicioActualizar' = 'Vuelve a leer ahora la informacion del equipo mostrada en el resumen.'
     # --- Optimizar Windows ---
     'CmbCategoriaOptimizar' = 'Cambia entre perfiles de optimizacion, acelerar procesador y liberar RAM.'
-    'BtnPerfilBajo' = 'Para PCs con poca RAM o disco lento: desactiva servicios, efectos y programas de inicio no esenciales. Muestra un ANTES y DESPUES al terminar.'
+    'BtnPerfilBajo' = 'MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios extra, tareas y apps en segundo plano, pone Defender en modo ligero, limpia el disco a fondo y libera RAM. Guarda el estado original: se revierte con Restaurar. Muestra ANTES y DESPUES.'
     'BtnPerfilModerno' = 'Para equipos con buen hardware: quita bloatware y telemetria manteniendo las funciones utiles. Muestra un ANTES y DESPUES.'
     'BtnPerfilGamer' = 'Mejora el rendimiento en juegos: energia al maximo, modo juego, GPU y red optimizadas.'
     'BtnPerfilRestaurar' = 'Revierte los cambios hechos por cualquiera de los perfiles y vuelve a la configuracion predeterminada.'
