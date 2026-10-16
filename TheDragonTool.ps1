@@ -89,6 +89,28 @@ function Global:Wait-UI {
     [System.Windows.Threading.Dispatcher]::PushFrame($frame)
 }
 
+# Ejecuta un bloque en otro hilo y mantiene la ventana viva (sin congelarse) mientras termina.
+# El bloque debe ser autosuficiente (no ve las funciones ni variables del programa); devuelve lo que el bloque escriba.
+function Global:Invoke-EnSegundoPlano {
+    param([scriptblock]$Bloque, $Argumentos = @(), [int]$TimeoutSeg = 120)
+    $ps = $null
+    try {
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript($Bloque.ToString())
+        foreach ($a in $Argumentos) { [void]$ps.AddArgument($a) }
+        $ar = $ps.BeginInvoke()
+        $t0 = Get-Date
+        while (-not $ar.IsCompleted) {
+            Wait-UI -Milisegundos 40
+            if (((Get-Date) - $t0).TotalSeconds -gt $TimeoutSeg) { try { [void]$ps.BeginStop($null, $null) } catch {}; return @() }
+        }
+        $l = New-Object System.Collections.Generic.List[object]
+        try { foreach ($x in $ps.EndInvoke($ar)) { $l.Add($x) } } catch {}
+        return $l.ToArray()
+    } catch { return @() }
+    finally { if ($ps) { try { $ps.Dispose() } catch {} } }
+}
+
 # Recursos XAML compartidos por TODAS las ventanas secundarias (dialogos, progreso,
 # pruebas...): el mismo boton redondeado/semitransparente con borde neon del panel
 # lateral y una barra de progreso animada. Cada ventana los inserta dentro de su
@@ -1170,7 +1192,7 @@ function Global:Get-CategoriaOrigenError {
     if ($Origen -match '^(Accion-Instalar|Accion-Desinstalar|Show-VentanaProgramasInstalados|Limpiar-RastrosPrograma)') { return 'Instalar/Desinstalar programas' }
     if ($Origen -match 'Registro') { return 'Registro de Windows' }
     if ($Origen -match 'Driver|Controlador') { return 'Controladores' }
-    if ($Origen -match '^Perfil-|^Accion-Acelerar|^Accion-LiberarRAM') { return 'Perfiles de optimizacion' }
+    if ($Origen -match '^Perfil-|^Accion-Acelerar|^Accion-LiberarRAM|^Reg-Verif') { return 'Perfiles de optimizacion' }
     return 'Programa general'
 }
 
@@ -1245,8 +1267,8 @@ function Global:Add-RegistroError {
 $Script:ScanHardwareSB = {
     param([datetime]$Desde, [bool]$IncluirEstado)
     $res = New-Object System.Collections.Generic.List[object]
-    function Nuevo($Momento, $Tipo, $Origen, $Mensaje, $Solucion, $Clave) {
-        $res.Add([PSCustomObject]@{ Momento = $Momento; Tipo = $Tipo; Origen = $Origen; Mensaje = $Mensaje; Solucion = $Solucion; Clave = $Clave })
+    function Nuevo($Momento, $Tipo, $Origen, $Mensaje, $Solucion, $Clave, $Cat = 'Hardware', $Notificar = $true) {
+        $res.Add([PSCustomObject]@{ Momento = $Momento; Tipo = $Tipo; Categoria = $Cat; Origen = $Origen; Mensaje = $Mensaje; Solucion = $Solucion; Clave = $Clave; Notificar = $Notificar })
     }
     $def = @(
         @{ P='Microsoft-Windows-WHEA-Logger'; Id=$null; C='CPU / memoria / PCIe (WHEA)'; S='El procesador o la placa detectaron un error de hardware. Quita overclock/XMP, revisa temperaturas y fuente de poder, y prueba la RAM (Diagnostico de memoria).' },
@@ -1258,18 +1280,38 @@ $Script:ScanHardwareSB = {
         @{ P='Display'; Id=@(4101); C='Controlador de video'; S='El driver de video dejo de responder y se recupero. Reinstala el driver de video, quita overclock y revisa la temperatura de la GPU.' },
         @{ P='nvlddmkm'; Id=$null; C='GPU NVIDIA'; S='El driver de NVIDIA reporto errores. Reinstala el driver de forma limpia y revisa temperaturas/alimentacion.' },
         @{ P='Microsoft-Windows-Kernel-PnP'; Id=@(219); C='Dispositivo / controlador'; S='Windows no pudo cargar un controlador. Actualiza o reinstala el driver del dispositivo indicado.' },
-        @{ P='BTHUSB'; Id=$null; C='Bluetooth'; S='El adaptador Bluetooth reporto problemas. Actualiza su driver o prueba otro puerto USB.' }
+        @{ P='BTHUSB'; Id=$null; C='Bluetooth'; S='El adaptador Bluetooth reporto problemas. Actualiza su driver o prueba otro puerto USB.' },
+        # --- Nuevos detectores ---
+        @{ P=@('storport','iaStorAVC','iaStorA','iaStorV','amdsata'); Id=@(129); C='Controlador de almacenamiento (el disco dejo de responder y se reinicio)'; S='Windows tuvo que reiniciar el disco porque no respondia. Suele ser cable/conector SATA suelto, disco fallando o driver de almacenamiento. Haz copia de seguridad, revisa SMART y cambia el cable.'; Min=2 },
+        @{ P='Microsoft-Windows-MemoryDiagnostics-Results'; Id=@(1101); C='Prueba de memoria RAM de Windows'; S='El Diagnostico de memoria de Windows encontro errores en la RAM. Retira un modulo a la vez para ubicar el defectuoso y reemplazalo; quita XMP/overclock.' },
+        @{ P='Microsoft-Windows-Resource-Exhaustion-Detector'; Id=@(2004); C='Memoria virtual casi agotada'; S='Windows se quedo sin memoria virtual: cierra programas pesados, amplia la RAM o revisa el archivo de paginacion. Un programa con fuga de memoria tambien lo causa.'; Cat='Rendimiento (saturacion)' },
+        @{ P='Microsoft-Windows-Kernel-Processor-Power'; Id=@(37); C='CPU limitada por el firmware (throttling)'; S='La CPU esta bajando su velocidad por calor o por energia insuficiente. Limpia ventiladores y disipador, renueva la pasta termica y revisa el cargador/fuente de poder.'; Min=3 },
+        @{ P='Tcpip'; Id=@(4199); C='Red: conflicto de direccion IP'; S='Otro equipo usa la misma direccion IP. Reinicia el router o asigna una IP distinta al equipo.'; Cat='Red' },
+        @{ P='Microsoft-Windows-WindowsUpdateClient'; Id=@(20); C='Windows Update: fallo de instalacion'; S='Una actualizacion no pudo instalarse. Ejecuta el solucionador de Windows Update, y si sigue, ejecuta sfc /scannow y DISM /Online /Cleanup-Image /RestoreHealth.'; Cat='Aplicacion / servicio'; Min=2 },
+        @{ L='Microsoft-Windows-Windows Defender/Operational'; P='Microsoft-Windows-Windows Defender'; Id=@(1116,1119); C='Antivirus (Windows Defender)'; S='Defender detecto o no pudo eliminar una amenaza. Abre Seguridad de Windows > Proteccion antivirus > Historial de proteccion y ejecuta un analisis completo.'; Cat='Seguridad' }
     )
     foreach ($d in $def) {
         try {
-            $f = @{ LogName = 'System'; ProviderName = $d.P; StartTime = $Desde; Level = @(1,2,3) }
+            $log = if ($d.L) { $d.L } else { 'System' }
+            $catd = if ($d.Cat) { $d.Cat } else { 'Hardware' }
+            $f = @{ LogName = $log; ProviderName = $d.P; StartTime = $Desde; Level = @(1,2,3) }
             if ($d.Id) { $f.Id = $d.Id }
-            $ev = Get-WinEvent -FilterHashtable $f -MaxEvents 20 -ErrorAction Stop
+            $ev = @(Get-WinEvent -FilterHashtable $f -MaxEvents 20 -ErrorAction Stop)
+            if ($d.Min) {
+                # Evento que solo importa si se repite: un solo aviso aislado suele ser ruido
+                if ($ev.Count -ge $d.Min) {
+                    $cub = [int64][math]::Floor((Get-Date).Ticks / (6 * 36000000000))
+                    $m1 = (("$($ev[0].Message)" -split "`r?`n")[0]).Trim()
+                    if ($m1.Length -gt 180) { $m1 = $m1.Substring(0, 180) + '...' }
+                    Nuevo $ev[0].TimeCreated 'AVISO' "$($d.C) - $($ev.Count) eventos" "Se repitio $($ev.Count) veces en las ultimas horas. $m1" $d.S "agg|$($d.C)|$cub" $catd
+                }
+                continue
+            }
             foreach ($e in $ev) {
                 $msg = (("$($e.Message)" -split "`r?`n")[0]).Trim()
                 if ($msg.Length -gt 230) { $msg = $msg.Substring(0, 230) + '...' }
                 $tipo = if ($e.Level -le 2) { 'ERROR' } else { 'AVISO' }
-                Nuevo $e.TimeCreated $tipo ("$($d.C) (Id $($e.Id))") $msg $d.S ("ev|$($e.ProviderName)|$($e.RecordId)")
+                Nuevo $e.TimeCreated $tipo ("$($d.C) (Id $($e.Id))") $msg $d.S ("ev|$($e.ProviderName)|$($e.RecordId)") $catd
             }
         } catch {}
     }
@@ -1331,7 +1373,77 @@ $Script:ScanHardwareSB = {
                 Nuevo $ahora 'AVISO' "Dispositivo: $($pn.Name)" "El dispositivo '$($pn.Name)' esta $txt (codigo $cod)." 'Actualiza o reinstala el controlador (pestaña Controladores) o revisa el dispositivo en el Administrador de dispositivos.' "pnp|$($pn.DeviceID)|$cod"
             }
         } catch {}
+        # --- Nuevo: el propio disco predice su fallo (SMART) y contadores criticos del disco ---
+        try {
+            foreach ($p in @(Get-CimInstance -Namespace root/wmi -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction Stop)) {
+                if ($p.PredictFailure) {
+                    Nuevo $ahora 'ERROR' 'Disco (SMART)' 'El propio disco predice que va a fallar (SMART: PredictFailure).' 'Haz copia de seguridad YA de tus datos y reemplaza el disco: el firmware del disco ya detecto que se esta degradando.' "smartpred|$($p.InstanceName)"
+                }
+            }
+        } catch {}
+        try {
+            foreach ($d2 in @(Get-CimInstance -Namespace root/wmi -ClassName MSStorageDriver_FailurePredictData -ErrorAction Stop)) {
+                $v = $d2.VendorSpecific
+                if (-not $v -or $v.Length -lt 14) { continue }
+                $at = @{}
+                for ($i = 2; ($i + 11) -lt $v.Length; $i += 12) {
+                    $aid = [int]$v[$i]; if ($aid -eq 0) { continue }
+                    $at[$aid] = [int64]$v[$i + 5] + ([int64]$v[$i + 6] -shl 8) + ([int64]$v[$i + 7] -shl 16) + ([int64]$v[$i + 8] -shl 24)
+                }
+                $pend = 0; if ($at.ContainsKey(197)) { $pend = $at[197] }
+                $offl = 0; if ($at.ContainsKey(198)) { $offl = $at[198] }
+                $real = 0; if ($at.ContainsKey(5)) { $real = $at[5] }
+                $crc = 0; if ($at.ContainsKey(199)) { $crc = $at[199] }
+                if ($pend -gt 0 -or $offl -gt 0) {
+                    $t = if (($pend -gt 0 -and $offl -gt 0) -or $pend -ge 8 -or $offl -ge 8) { 'ERROR' } else { 'AVISO' }
+                    Nuevo $ahora $t 'Disco (SMART)' "El disco tiene sectores danados sin resolver: $pend pendientes de reasignar y $offl incorregibles." 'Son las senales mas fiables de un disco que empieza a fallar. Haz copia de seguridad ahora y planea cambiarlo; si crece el numero, no esperes.' "smartsec|$($d2.InstanceName)|$pend|$offl"
+                }
+                if ($real -ge 10) {
+                    Nuevo $ahora 'AVISO' 'Disco (SMART)' "El disco ya reasigno $real sectores danados." 'El disco esta usando sectores de reserva. Vigilalo: si el numero sigue subiendo, cambialo; mientras tanto haz copias de seguridad.' "smartreal|$($d2.InstanceName)|$([int]($real/10))"
+                }
+                if ($crc -ge 50) {
+                    Nuevo $ahora 'AVISO' 'Disco (SMART)' "El disco registro $crc errores de comunicacion (CRC) con la placa." 'Casi siempre es el cable SATA o su conector: cambia el cable, prueba otro puerto SATA y revisa que este bien encajado.' "smartcrc|$($d2.InstanceName)|$([int]($crc/50))"
+                }
+            }
+        } catch {}
+        try {
+            foreach ($dd in @(Get-CimInstance Win32_DiskDrive -ErrorAction Stop | Where-Object { $_.Status -and "$($_.Status)" -ne 'OK' })) {
+                Nuevo $ahora 'ERROR' "Disco: $($dd.Model)" "Windows reporta el estado del disco como '$($dd.Status)'." 'Haz copia de seguridad YA y reemplaza el disco; Windows ya lo considera en riesgo.' "diskstatus|$($dd.Model)|$($dd.Status)"
+            }
+        } catch {}
+        try {
+            foreach ($vol in @(Get-CimInstance Win32_Volume -Filter 'DriveType=3' -ErrorAction Stop | Where-Object { $_.DirtyBitSet })) {
+                Nuevo $ahora 'AVISO' "Volumen $($vol.DriveLetter)" "El volumen $($vol.DriveLetter) esta marcado como sucio (Windows detecto un cierre incorrecto o errores)." 'Ejecuta chkdsk /f en esa unidad (o dejalo correr al reiniciar) y revisa el estado del disco.' "dirty|$($vol.DriveLetter)"
+            }
+        } catch {}
+        # Temperatura: segunda fuente (contadores termicos de Windows) solo si la primera no encontro nada
+        try {
+            $hay = $false
+            foreach ($r0 in $res.ToArray()) { if ("$($r0.Origen)" -eq 'Temperatura del sistema') { $hay = $true } }
+            if (-not $hay) {
+                foreach ($z in @(Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation -ErrorAction Stop)) {
+                    $c = [math]::Round(([double]$z.Temperature) - 273.15, 0)
+                    if ($c -ge 85 -and $c -lt 150) {
+                        $t = if ($c -ge 95) { 'ERROR' } else { 'AVISO' }
+                        Nuevo $ahora $t 'Temperatura del sistema' "Temperatura elevada ($($z.Name)): $c C." 'Limpia el polvo, revisa ventiladores y pasta termica, y evita bloquear las rejillas del equipo.' "temp2|$([int]($c/5))"
+                    }
+                }
+            }
+        } catch {}
     }
+    # Correlacion: varios indicios del mismo componente en pocas horas se vuelven UN hallazgo mas fiable
+    try {
+        $nD = 0; $nF = 0
+        foreach ($r1 in $res.ToArray()) {
+            $o = "$($r1.Origen)"
+            if ($o -like 'Disco duro/SSD*' -or $o -like 'Controlador de almacenamiento*' -or $o -like 'Controlador SATA*' -or $o -like 'SSD NVMe*') { $nD++ }
+            elseif ($o -like 'Sistema de archivos NTFS*') { $nF++ }
+        }
+        if (($nD + $nF) -ge 4 -and $nD -ge 1) {
+            $cub = [int64][math]::Floor((Get-Date).Ticks / (6 * 36000000000))
+            Nuevo (Get-Date) 'ERROR' 'Disco: varios indicios de fallo' "En las ultimas horas se juntaron $nD error(es) del disco/controlador y $nF del sistema de archivos: el disco o su cable probablemente estan fallando." 'Haz copia de seguridad AHORA. Cambia el cable SATA y prueba otro puerto; si los errores continuan, reemplaza el disco (revisa SMART con CrystalDiskInfo).' "corrdisco|$cub"
+        }
+    } catch {}
     $res
 }
 
@@ -1914,22 +2026,16 @@ function Show-VentanaProcesos {
 
 function Accion-LimpiarTemporales {
     Write-Log "Limpiando archivos temporales..."
-    $rutas = @(
-        "$env:TEMP\*",
-        "$env:WINDIR\Temp\*",
-        "$env:WINDIR\Prefetch\*",
-        "$env:LOCALAPPDATA\Microsoft\Windows\INetCache\*"
-    )
-    $totalLiberado = 0
-    foreach ($ruta in $rutas) {
-        try {
-            $items = Get-ChildItem -Path $ruta -Force -Recurse -ErrorAction SilentlyContinue
-            $size = ($items | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
-            if ($size) { $totalLiberado += $size }
-            Remove-Item -Path $ruta -Recurse -Force -ErrorAction SilentlyContinue
-        } catch {}
-    }
-    $mb = [math]::Round($totalLiberado / 1MB, 1)
+    $hdd = ((Get-TipoDiscoSistema) -eq 'HDD')
+    $antes = 0; try { $antes = (New-Object System.IO.DriveInfo("$env:SystemDrive")).AvailableFreeSpace } catch {}
+    $rutas = @("$env:TEMP\*", "$env:WINDIR\Temp\*", "$env:LOCALAPPDATA\Microsoft\Windows\INetCache\*")
+    if (-not $hdd) { $rutas += "$env:WINDIR\Prefetch\*" }   # en disco mecanico Prefetch acelera el arranque: no se borra
+    Invoke-EnSegundoPlano -Argumentos @(, $rutas) -TimeoutSeg 300 -Bloque {
+        param($r)
+        foreach ($x in $r) { try { Remove-Item -Path $x -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
+    } | Out-Null
+    $despues = $antes; try { $despues = (New-Object System.IO.DriveInfo("$env:SystemDrive")).AvailableFreeSpace } catch {}
+    $mb = [math]::Max(0, [math]::Round(($despues - $antes) / 1MB, 1))
     Write-Log "Archivos temporales eliminados. Espacio aproximado liberado: $mb MB" -Tipo OK
 }
 
@@ -5277,24 +5383,225 @@ function Show-PruebaPantalla {
     }
 }
 
+# ===== Detalles reales del panel (EDID) =====
+# Todo lo que se muestra sale tal cual de los bytes EDID que el propio panel informa
+# a Windows. No se deduce ni se inventa nada: si el panel no informa un dato, se dice.
+function Global:Convertir-EDIDPantalla {
+    param([byte[]]$Bytes)
+    $o = [PSCustomObject]@{
+        Valido = $false; Motivo = ''; Fabricante = ''; CodigoProducto = ''; SerieNumerica = 0
+        Semana = 0; Anio = 0; AnioEsModelo = $false; VersionEDID = ''; AnchoMm = 0; AltoMm = 0
+        Diagonal = 0.0; Nombre = ''; TextosAscii = @(); SerieTexto = ''; Modos = @()
+        ProfundidadBits = 0; Digital = $false; Extensiones = 0
+    }
+    if (-not $Bytes -or $Bytes.Length -lt 128) { $o.Motivo = 'El EDID esta vacio o incompleto'; return $o }
+    $cab = @(0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00)
+    for ($i = 0; $i -lt 8; $i++) { if ($Bytes[$i] -ne $cab[$i]) { $o.Motivo = 'Cabecera EDID invalida'; return $o } }
+    $suma = 0
+    for ($i = 0; $i -lt 128; $i++) { $suma += $Bytes[$i] }
+    if (($suma % 256) -ne 0) { $o.Motivo = 'La suma de verificacion del EDID no coincide (datos no confiables)'; return $o }
+
+    $b8 = [int]$Bytes[8]; $b9 = [int]$Bytes[9]
+    $c1 = (($b8 -shr 2) -band 0x1F) + 64
+    $c2 = ((($b8 -band 3) -shl 3) -bor ($b9 -shr 5)) + 64
+    $c3 = ($b9 -band 0x1F) + 64
+    if ($c1 -ge 65 -and $c1 -le 90 -and $c2 -ge 65 -and $c2 -le 90 -and $c3 -ge 65 -and $c3 -le 90) {
+        $o.Fabricante = ([string][char]$c1) + [char]$c2 + [char]$c3
+    }
+    $o.CodigoProducto = ('{0:X4}' -f ([int]$Bytes[10] + 256 * [int]$Bytes[11]))
+    $o.SerieNumerica = [int64]$Bytes[12] + 256 * [int64]$Bytes[13] + 65536 * [int64]$Bytes[14] + 16777216 * [int64]$Bytes[15]
+    $sem = [int]$Bytes[16]; $anio = [int]$Bytes[17] + 1990
+    if ($sem -eq 255) { $o.AnioEsModelo = $true; $o.Anio = $anio }
+    elseif ($sem -ge 1 -and $sem -le 54 -and $anio -ge 1990 -and $anio -le (Get-Date).Year + 1) { $o.Semana = $sem; $o.Anio = $anio }
+    elseif ($sem -eq 0 -and $anio -ge 1990 -and $anio -le (Get-Date).Year + 1) { $o.Anio = $anio }
+    $o.VersionEDID = "$($Bytes[18]).$($Bytes[19])"
+    $o.Extensiones = [int]$Bytes[126]
+    $b20 = [int]$Bytes[20]
+    $o.Digital = (($b20 -band 0x80) -ne 0)
+    if ($o.Digital -and [int]$Bytes[18] -eq 1 -and [int]$Bytes[19] -ge 4) {
+        $prof = @{ 1 = 6; 2 = 8; 3 = 10; 4 = 12; 5 = 14; 6 = 16 }
+        $k = ($b20 -shr 4) -band 7
+        if ($prof.ContainsKey($k)) { $o.ProfundidadBits = $prof[$k] }
+    }
+    $cmW = [int]$Bytes[21]; $cmH = [int]$Bytes[22]
+
+    $textos = New-Object System.Collections.Generic.List[string]
+    $modos = New-Object System.Collections.Generic.List[object]
+    foreach ($ini in 54, 72, 90, 108) {
+        $d = New-Object 'byte[]' 18
+        [Array]::Copy($Bytes, $ini, $d, 0, 18)
+        if ($d[0] -ne 0 -or $d[1] -ne 0) {
+            $reloj = ([int]$d[0] + 256 * [int]$d[1]) * 10000.0
+            $ha = [int]$d[2] + ((([int]$d[4]) -band 0xF0) -shl 4)
+            $hb = [int]$d[3] + ((([int]$d[4]) -band 0x0F) -shl 8)
+            $va = [int]$d[5] + ((([int]$d[7]) -band 0xF0) -shl 4)
+            $vb = [int]$d[6] + ((([int]$d[7]) -band 0x0F) -shl 8)
+            $hs = [int]$d[12] + ((([int]$d[14]) -band 0xF0) -shl 4)
+            $vs = [int]$d[13] + ((([int]$d[14]) -band 0x0F) -shl 8)
+            if ($ha -gt 0 -and $va -gt 0 -and ($ha + $hb) -gt 0 -and ($va + $vb) -gt 0) {
+                $hz = [math]::Round($reloj / (($ha + $hb) * ($va + $vb)), 2)
+                $modos.Add([PSCustomObject]@{ Ancho = $ha; Alto = $va; Hz = $hz; Entrelazado = (([int]$d[17] -band 0x80) -ne 0) })
+                if ($modos.Count -eq 1 -and $hs -gt 0 -and $vs -gt 0) { $o.AnchoMm = $hs; $o.AltoMm = $vs }
+            }
+        } elseif ($d[2] -eq 0) {
+            $tag = [int]$d[3]
+            if ($tag -in 0xFC, 0xFE, 0xFF) {
+                $t = New-Object System.Text.StringBuilder
+                for ($j = 5; $j -lt 18; $j++) {
+                    if ($d[$j] -eq 0x0A) { break }
+                    if ($d[$j] -ge 32 -and $d[$j] -le 126) { [void]$t.Append([char]$d[$j]) } else { [void]$t.Append('?') }
+                }
+                $txt = $t.ToString().Trim()
+                if ($txt -and $txt -notmatch '^\?+$') {
+                    if ($tag -eq 0xFC) { $o.Nombre = $txt }
+                    elseif ($tag -eq 0xFF) { $o.SerieTexto = $txt }
+                    else { $textos.Add($txt) }
+                }
+            }
+        }
+    }
+    if ($o.AnchoMm -le 0 -and $cmW -gt 0 -and $cmH -gt 0) { $o.AnchoMm = $cmW * 10; $o.AltoMm = $cmH * 10 }
+    if ($o.AnchoMm -gt 0 -and $o.AltoMm -gt 0) {
+        $o.Diagonal = [math]::Round([math]::Sqrt([math]::Pow($o.AnchoMm, 2) + [math]::Pow($o.AltoMm, 2)) / 25.4, 1)
+    }
+    $o.TextosAscii = $textos.ToArray()
+    $o.Modos = $modos.ToArray()
+    $o.Valido = $true
+    return $o
+}
+
+function Global:Get-NombreFabricantePanel {
+    param([string]$Codigo)
+    $mapa = @{
+        AUO = 'AU Optronics'; BOE = 'BOE Technology'; CMN = 'Chimei Innolux (Innolux)'; LGD = 'LG Display'
+        SDC = 'Samsung Display'; SEC = 'Samsung Electronics'; IVO = 'InfoVision (IVO)'; CSO = 'CSOT (China Star)'
+        SHP = 'Sharp'; LEN = 'Lenovo'; DEL = 'Dell'; HWP = 'HP'; ACR = 'Acer'; AUS = 'ASUS'; SAM = 'Samsung'
+        GSM = 'LG Electronics'; AOC = 'AOC'; PHL = 'Philips'; BNQ = 'BenQ'; MSI = 'MSI'
+    }
+    if ($Codigo -and $mapa.ContainsKey($Codigo)) { return $mapa[$Codigo] }
+    return $null
+}
+
+# Lee las pantallas ACTIVAS: EDID crudo del registro (fuente completa) y, si no esta, los datos de WMI.
+function Global:Get-PantallasEDIDSistema {
+    $lista = New-Object System.Collections.Generic.List[object]
+    $conn = @{}
+    try {
+        foreach ($c in (Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorConnectionParams -ErrorAction SilentlyContinue)) {
+            $conn[[string]$c.InstanceName] = [int64]$c.VideoOutputTechnology
+        }
+    } catch {}
+    $mons = $null
+    try { $mons = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue } catch {}
+    foreach ($m in $mons) {
+        try { if ($m.Active -eq $false) { continue } } catch {}
+        $inst = [string]$m.InstanceName
+        $base = $inst -replace '_\d+$', ''
+        $bytes = $null
+        try {
+            $ruta = "HKLM:\SYSTEM\CurrentControlSet\Enum\$base\Device Parameters"
+            if (Test-Path -LiteralPath $ruta) {
+                $v = (Get-ItemProperty -LiteralPath $ruta -Name EDID -ErrorAction SilentlyContinue).EDID
+                if ($v) { $bytes = [byte[]]$v }
+            }
+        } catch {}
+        $tec = $null
+        if ($conn.ContainsKey($inst)) { $tec = $conn[$inst] }
+        $interna = $false
+        if ($null -ne $tec) { $interna = ($tec -eq 2147483648 -or $tec -eq -2147483648 -or $tec -eq 11 -or $tec -eq 13) }
+        $edid = $null
+        if ($bytes) { $edid = Convertir-EDIDPantalla -Bytes $bytes }
+        $wmiNombre = Decodificar-CadenaEDID -Codigos $m.UserFriendlyName
+        $wmiSerie = Decodificar-CadenaEDID -Codigos $m.SerialNumberID
+        $lista.Add([PSCustomObject]@{ Instancia = $inst; Interna = $interna; TecnologiaConocida = ($null -ne $tec); Tecnologia = $tec
+            Edid = $edid; BytesLeidos = [bool]$bytes; WmiNombre = $wmiNombre; WmiSerie = $wmiSerie })
+    }
+    return $lista.ToArray()
+}
+
+function Global:Describir-PantallaEDID {
+    param($P, [bool]$EsLaptop)
+    $l = New-Object System.Collections.Generic.List[string]
+    $e = $P.Edid
+    if ($P.Interna) { $tipo = 'PANTALLA INTEGRADA DEL PORTATIL (panel interno)' }
+    elseif ($P.TecnologiaConocida) { $tipo = 'MONITOR EXTERNO' }
+    else { $tipo = 'PANTALLA (no se pudo confirmar si es interna o externa)' }
+    $l.Add("--- $tipo ---")
+    if ($e -and $e.Valido) {
+        $fab = Get-NombreFabricantePanel -Codigo $e.Fabricante
+        $codFab = if ($e.Fabricante) { $e.Fabricante } else { 'no informado' }
+        if ($fab) { $l.Add("Fabricante del panel: $fab (codigo $codFab)") } else { $l.Add("Fabricante (codigo EDID): $codFab") }
+        $l.Add("Codigo de producto EDID: $($e.CodigoProducto)")
+        if ($e.Fabricante) { $l.Add("Identificador completo: $($e.Fabricante)$($e.CodigoProducto)  (util para buscar el repuesto)") }
+        if ($e.TextosAscii.Count -gt 0) {
+            foreach ($t in $e.TextosAscii) { $l.Add("Modelo/numero de parte del panel (texto del EDID): $t") }
+        } else {
+            $l.Add("Modelo/numero de parte del panel: el panel NO lo informa en su EDID (no se inventa; usa el identificador de arriba para buscarlo)")
+        }
+        if ($e.Nombre) { $l.Add("Nombre del monitor (EDID): $($e.Nombre)") }
+        if ($e.SerieTexto) { $l.Add("Numero de serie (EDID): $($e.SerieTexto)") }
+        elseif ($e.SerieNumerica -gt 0) { $l.Add("Numero de serie numerico (EDID): $($e.SerieNumerica)") }
+        if ($e.Anio -gt 0) {
+            if ($e.AnioEsModelo) { $l.Add("Ano del modelo: $($e.Anio)") }
+            elseif ($e.Semana -gt 0) { $l.Add("Fabricacion: semana $($e.Semana) de $($e.Anio)") }
+            else { $l.Add("Ano de fabricacion: $($e.Anio)") }
+        }
+        if ($e.Diagonal -gt 0) { $l.Add("Tamano fisico: $($e.AnchoMm) x $($e.AltoMm) mm  (diagonal medida $($e.Diagonal) pulgadas; el tamano comercial suele redondearse, ej. 15.5 se vende como 15.6)") }
+        if ($e.Modos.Count -gt 0) {
+            $n = $e.Modos[0]
+            $l.Add("Resolucion nativa: $($n.Ancho) x $($n.Alto) px a $($n.Hz) Hz")
+            for ($i = 1; $i -lt $e.Modos.Count; $i++) {
+                $mm = $e.Modos[$i]
+                $l.Add("Otro modo del panel: $($mm.Ancho) x $($mm.Alto) px a $($mm.Hz) Hz")
+            }
+        }
+        if ($e.ProfundidadBits -gt 0) { $l.Add("Profundidad de color informada: $($e.ProfundidadBits) bits por canal") }
+        $l.Add("Version EDID: $($e.VersionEDID)")
+    } elseif ($e) {
+        $l.Add("No se pudo confiar en el EDID de esta pantalla: $($e.Motivo)")
+        if ($P.WmiNombre) { $l.Add("Nombre segun Windows: $($P.WmiNombre)") }
+    } else {
+        $l.Add("No se pudo leer el EDID completo de esta pantalla (se necesitan permisos de administrador o el equipo no lo expone).")
+        if ($P.WmiNombre) { $l.Add("Nombre segun Windows: $($P.WmiNombre)") }
+        if ($P.WmiSerie) { $l.Add("Serie segun Windows: $($P.WmiSerie)") }
+    }
+    return $l.ToArray()
+}
+
 function Accion-VerDetallesPantalla {
     Write-DiagLog "=== PANTALLA: DETALLES ==="
+    $esLaptop = $false
     try {
-        $monitores = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction SilentlyContinue
-        foreach ($m in $monitores) {
-            $nombre = -join ($m.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ })
-            if ($nombre) { Write-DiagLog " - Monitor: $nombre" }
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+        $esLaptop = ($cs.PCSystemType -eq 2)
+        if (-not $esLaptop -and (Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)) { $esLaptop = $true }
+    } catch {}
+    $pantallas = @()
+    try { $pantallas = @(Get-PantallasEDIDSistema) } catch { Write-DiagLog "No se pudo leer la informacion de pantallas: $($_.Exception.Message)" }
+    if ($pantallas.Count -eq 0) {
+        Write-DiagLog "Windows no informo ninguna pantalla con datos EDID (puede faltar ejecutar como administrador)."
+    } else {
+        $ordenadas = New-Object System.Collections.Generic.List[object]
+        foreach ($p in $pantallas) { if ($p.Interna) { $ordenadas.Add($p) } }
+        foreach ($p in $pantallas) { if (-not $p.Interna) { $ordenadas.Add($p) } }
+        foreach ($p in $ordenadas.ToArray()) {
+            foreach ($linea in (Describir-PantallaEDID -P $p -EsLaptop $esLaptop)) { Write-DiagLog $linea }
         }
+        if ($esLaptop) {
+            $hayInterna = $false
+            foreach ($p in $pantallas) { if ($p.Interna) { $hayInterna = $true } }
+            if (-not $hayInterna) { Write-DiagLog "Nota: no se pudo confirmar cual es el panel interno; revisa los datos de cada pantalla." }
+        }
+        Write-DiagLog "Origen de los datos: EDID que el propio panel informa a Windows (no son estimaciones)."
+    }
+    try {
         $videoCtrl = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue
         foreach ($v in $videoCtrl) {
             if ($v.CurrentHorizontalResolution) {
-                Write-DiagLog " - Resolucion actual: $($v.CurrentHorizontalResolution) x $($v.CurrentVerticalResolution) @ $($v.CurrentRefreshRate) Hz"
+                Write-DiagLog " - Resolucion actual en uso: $($v.CurrentHorizontalResolution) x $($v.CurrentVerticalResolution) @ $($v.CurrentRefreshRate) Hz ($($v.Name))"
             }
         }
-        if (-not $monitores -and -not $videoCtrl) { Write-DiagLog "No se pudo obtener el detalle de pantalla." }
-    } catch {
-        Write-DiagLog "No se pudo obtener el detalle de pantalla."
-    }
+    } catch {}
 }
 
 # --- RAM: prueba propia de patrones (sin reiniciar, sin abrir Windows) ---
@@ -10858,23 +11165,6 @@ function Restaurar-CPUPredeterminado {
 }
 
 # --- RAM: vacia el working set de todos los procesos y purga la lista en espera. Devuelve MB liberados. ---
-function Liberar-RAMSilencioso {
-    param([switch]$Profundo)
-    try {
-        Ensure-TipoLimpiadorRAM
-        $antes = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024
-        foreach ($p in @(Get-Process | Where-Object { $_.Id -ne $PID })) {
-            try { [DragonToolMemUtils]::EmptyWorkingSet($p.Handle) | Out-Null } catch {}
-        }
-        if ($Profundo) { try { [DragonToolMemUtils]::PurgeStandbyList() | Out-Null } catch {} }
-        try { ipconfig /flushdns | Out-Null } catch {}
-        Start-Sleep -Milliseconds 400
-        $despues = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024
-        $mb = [math]::Round($despues - $antes)
-        Write-Log "Memoria RAM liberada: $([math]::Max(0,$mb)) MB$(if ($Profundo) { ' (incluye lista en espera)' })." -Tipo OK
-    } catch { Write-Log "No se pudo liberar la RAM: $($_.Exception.Message)" -Tipo AVISO }
-}
-
 function Reiniciar-ExplorerSilencioso {
     try {
         Stop-Process -Name explorer -Force -ErrorAction Stop
@@ -10907,8 +11197,8 @@ function Global:Texto-Servicio {
 }
 function Global:Get-InstantaneaSistema {
     $o = [ordered]@{}
-    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-    $o.RamLibreMB = if ($os) { [math]::Round($os.FreePhysicalMemory / 1024) } else { 0 }
+    $o.RamUsadaMB = 0
+    try { $mm = [DragonMem]::Leer(); if ($mm) { $o.RamUsadaMB = [math]::Round(($mm[1] - $mm[2]) / 1MB) } } catch {}
     $procs = @(Get-Process -ErrorAction SilentlyContinue)
     $o.Procesos = $procs.Count
     $o.Hilos = [int](($procs | ForEach-Object { $_.Threads.Count } | Measure-Object -Sum).Sum)
@@ -10939,15 +11229,250 @@ function Global:Get-InstantaneaSistema {
 }
 
 # Ejecuta los pasos de un perfil con progreso real y sin repetir codigo.
+# ---------------------------------------------------------------------------
+#  VERIFICACION REAL: cada cambio de un perfil se comprueba leyendo el estado del sistema.
+#  Estados: OK (aplicado y comprobado), PEND (aplicado, termina de verse al reiniciar),
+#           PARCIAL (algunos elementos los protege Windows), FALLO (no se aplico).
+# ---------------------------------------------------------------------------
+$Script:Verif = New-Object System.Collections.Generic.List[object]
+
+function Reg-Verif {
+    param([string]$Tema, [string]$Estado, [string]$Detalle = '')
+    $Script:Verif.Add([PSCustomObject]@{ Tema = $Tema; Estado = $Estado; Detalle = $Detalle })
+    switch ($Estado) {
+        'FALLO'   { Write-Log "NO SE APLICO - ${Tema}: $Detalle" -Tipo AVISO }
+        'PARCIAL' { Write-Log "Aplicado en parte - ${Tema}: $Detalle" -Tipo INFO -SinRegistro }
+        'PEND'    { Write-Log "Aplicado (se completa al reiniciar) - ${Tema}: $Detalle" -Tipo OK }
+        default   { Write-Log "Comprobado - ${Tema}: $Detalle" -Tipo OK }
+    }
+}
+
+function Verificar-AjustesPerfil {
+    param([ValidateSet('BC','Gamer','Moderno')][string]$Perfil)
+    $i = Get-InstantaneaSistema
+    $chk = { param($Tema, [bool]$Ok, $Real, [string]$Pend = '')
+        if ($Ok) { if ($Pend) { Reg-Verif $Tema 'PEND' "$Real - $Pend" } else { Reg-Verif $Tema 'OK' "$Real" } }
+        else { Reg-Verif $Tema 'FALLO' "ahora esta: $Real" }
+    }
+    $plan = ''; try { $plan = (powercfg /getactivescheme) -join ' ' } catch {}
+    $equilibrado = ($plan -match '381b4222-f694-41f0-9685-bb9cb4b0bf1f')
+    $svc = { param($Tema, $Txt)
+        $ok = ("$Txt" -match '^(Desactivado|No existe)')
+        $pend = if ("$Txt" -match 'en ejecucion') { 'sigue en memoria hasta reiniciar' } else { '' }
+        & $chk $Tema $ok $Txt $pend
+    }
+    switch ($Perfil) {
+        'BC' {
+            & $chk 'Efectos visuales en "mejor rendimiento"' ($i.EfectosVisuales -eq 'Mejor rendimiento') $i.EfectosVisuales
+            & $chk 'Animaciones de la barra desactivadas' ($i.AnimacionesBarra -eq 'Desactivadas') $i.AnimacionesBarra
+            & $chk 'Transparencia desactivada' ($i.Transparencia -eq 'Desactivada') $i.Transparencia
+            & $chk 'Apps en segundo plano bloqueadas' ($i.AppsSegundoPlano -eq 'Bloqueadas') $i.AppsSegundoPlano
+            & $chk 'CPU priorizada para el primer plano' ($i.PrioridadPrimerPlano -like 'Maxima*') $i.PrioridadPrimerPlano
+            & $chk 'Hibernacion desactivada (libera espacio)' ($i.Hibernacion -eq 'Desactivada') $i.Hibernacion
+            & $svc 'SysMain (Superfetch) desactivado' $i.SysMain
+            & $svc 'Indexacion de busqueda desactivada' $i.Busqueda
+            & $svc 'Telemetria (DiagTrack) desactivada' $i.Telemetria
+            & $chk 'Plan de energia Equilibrado (CPU eficiente)' $equilibrado $(if ($equilibrado) { 'Equilibrado' } else { $plan })
+            $v = Leer-Reg 'HKLM:\SYSTEM\CurrentControlSet\Control' 'SvcHostSplitThresholdInKB' $null
+            & $chk 'Menos procesos svchost (agrupar servicios)' ($null -ne $v -and [int64]$v -eq 251658240) $(if ($null -ne $v) { "valor $v" } else { 'sin definir' }) 'se aplica al reiniciar'
+        }
+        'Gamer' {
+            & $svc 'SysMain desactivado' $i.SysMain
+            & $chk 'Modo juego activado' ($i.ModoJuego -eq 'Activado') $i.ModoJuego
+            & $chk 'Grabacion en segundo plano desactivada' ($i.GrabacionJuegos -eq 'Desactivada') $i.GrabacionJuegos
+            & $chk 'GPU acelerada por hardware' ($i.GPUHardware -eq 'Activada') $i.GPUHardware 'se aplica al reiniciar'
+            & $chk 'Aceleracion del mouse desactivada' ($i.AceleracionMouse -eq 'Desactivada') $i.AceleracionMouse
+            & $chk 'CPU priorizada para el primer plano' ($i.PrioridadPrimerPlano -like 'Maxima*') $i.PrioridadPrimerPlano
+        }
+        'Moderno' {
+            & $chk 'Inicio rapido activado' ($i.InicioRapido -eq 'Activado') $i.InicioRapido
+            & $chk 'Plan de energia Equilibrado' $equilibrado $(if ($equilibrado) { 'Equilibrado' } else { $plan })
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+#  VERIFICAR RENDIMIENTO DEL EQUIPO: mide como esta rindiendo el equipo ANTES de elegir un perfil y,
+#  al aplicar un perfil, vuelve a medir y compara de verdad contra esa medicion.
+# ---------------------------------------------------------------------------
+$Script:RendAntes = $null
+
+function Calcular-PuntosRendimiento {
+    param($M)
+    $p = 100
+    if ($M.Cpu -ge 90) { $p -= 30 } elseif ($M.Cpu -ge 70) { $p -= 20 } elseif ($M.Cpu -ge 50) { $p -= 10 } elseif ($M.Cpu -ge 30) { $p -= 4 }
+    if ($M.RamPct -ge 92) { $p -= 30 } elseif ($M.RamPct -ge 85) { $p -= 22 } elseif ($M.RamPct -ge 75) { $p -= 12 } elseif ($M.RamPct -ge 65) { $p -= 5 }
+    if ($M.Disco -ge 90) { $p -= 25 } elseif ($M.Disco -ge 60) { $p -= 15 } elseif ($M.Disco -ge 30) { $p -= 5 }
+    if ($M.Procesos -gt 140) { $p -= 8 } elseif ($M.Procesos -gt 110) { $p -= 4 }
+    if ($M.Servicios -gt 110) { $p -= 5 }
+    if ($M.Inicio -gt 10) { $p -= 5 } elseif ($M.Inicio -gt 6) { $p -= 3 }
+    if ($M.DiscoLibrePct -lt 10) { $p -= 8 } elseif ($M.DiscoLibrePct -lt 20) { $p -= 3 }
+    return [int][math]::Max(0, [math]::Min(100, $p))
+}
+
+function Texto-CalificacionRendimiento {
+    param([int]$Puntos)
+    if ($Puntos -ge 80) { return 'BUENO' }
+    if ($Puntos -ge 60) { return 'ACEPTABLE' }
+    if ($Puntos -ge 40) { return 'LENTO' }
+    return 'CRITICO'
+}
+
+function Global:Medir-RendimientoEquipo {
+    param([int]$Ms = 6000)
+    $hw = $null; try { $hw = Get-HardwareInfo } catch {}
+    $c = Medir-ConsumoActual -Ms $Ms
+    $proc = 0; try { $proc = (Get-Process -ErrorAction Stop).Count } catch {}
+    $svc = 0; try { foreach ($s in (Get-Service -ErrorAction Stop)) { if ("$($s.Status)" -eq 'Running') { $svc++ } } } catch {}
+    $ini = 0; try { $ini = [int](Get-InicioActivosCount) } catch {}
+    $libre = 100.0
+    try { $di = New-Object System.IO.DriveInfo("$env:SystemDrive"); if ($di.TotalSize -gt 0) { $libre = 100.0 * $di.AvailableFreeSpace / $di.TotalSize } } catch {}
+    $horas = 0.0; try { $horas = ((Get-Date) - (Get-InicioSistema)).TotalHours } catch {}
+    $o = [PSCustomObject]@{
+        Hw = $hw; Cpu = [int]$c.Cpu; Disco = [int]$c.Disco; RamPct = [int]$c.RamPct; RamUsadaMB = [int]$c.RamUsadaMB; RamTotalMB = [int]$c.RamTotalMB
+        TopCpu = $c.TopCpu; TopRam = $c.TopRam; Procesos = [int]$proc; Servicios = [int]$svc; Inicio = [int]$ini
+        DiscoLibrePct = [int][math]::Round($libre); Horas = [math]::Round($horas, 1); Puntos = 0
+    }
+    $o.Puntos = Calcular-PuntosRendimiento $o
+    return $o
+}
+
+function Get-HallazgosRendimiento {
+    param($M)
+    $l = New-Object System.Collections.Generic.List[string]
+    $topC = (@($M.TopCpu) | Select-Object -First 3 | ForEach-Object { "$($_.Nombre) $($_.Pct)%" }) -join ', '
+    $topR = (@($M.TopRam) | Select-Object -First 3 | ForEach-Object { "$($_.Nombre) $($_.MB) MB" }) -join ', '
+    if ($M.Cpu -ge 70) { $l.Add("⚠ CPU muy cargada en reposo ($($M.Cpu)%)$(if ($topC) { ". Mayor consumo: $topC" }).") }
+    elseif ($M.Cpu -ge 40) { $l.Add("⚠ CPU con carga moderada en reposo ($($M.Cpu)%)$(if ($topC) { ". Mayor consumo: $topC" }).") }
+    else { $l.Add("✔ CPU tranquila en reposo ($($M.Cpu)%).") }
+    if ($M.RamPct -ge 85) { $l.Add("⚠ Memoria casi llena: $($M.RamUsadaMB) de $($M.RamTotalMB) MB ($($M.RamPct)%)$(if ($topR) { ". Mas memoria: $topR" }).") }
+    elseif ($M.RamPct -ge 70) { $l.Add("⚠ Memoria con poco margen: $($M.RamUsadaMB) de $($M.RamTotalMB) MB ($($M.RamPct)%)$(if ($topR) { ". Mas memoria: $topR" }).") }
+    else { $l.Add("✔ Memoria con margen: $($M.RamUsadaMB) de $($M.RamTotalMB) MB ($($M.RamPct)%).") }
+    if ($M.Disco -ge 60) { $l.Add("⚠ Disco muy ocupado ($($M.Disco)%) mientras no se hace nada$(if ($M.Hw -and $M.Hw.Disco -eq 'HDD') { '; en un disco mecanico es el cuello de botella habitual' }).") }
+    else { $l.Add("✔ Disco sin saturacion ($($M.Disco)%).") }
+    if ($M.Procesos -gt 110) { $l.Add("⚠ Muchos procesos en ejecucion ($($M.Procesos)).") }
+    if ($M.Servicios -gt 110) { $l.Add("⚠ Muchos servicios activos ($($M.Servicios)).") }
+    if ($M.Inicio -gt 6) { $l.Add("⚠ $($M.Inicio) programas arrancan con Windows.") }
+    if ($M.DiscoLibrePct -lt 15) { $l.Add("⚠ Poco espacio libre en el disco del sistema ($($M.DiscoLibrePct)%).") }
+    if ($M.Horas -gt 168) { $l.Add("⚠ Lleva $([math]::Round($M.Horas / 24)) dias encendido sin reiniciar: reiniciar libera memoria.") }
+    return $l.ToArray()
+}
+
+function Get-PerfilRecomendado {
+    param($M)
+    $nivel = if ($M.Hw) { "$($M.Hw.Nivel)" } else { 'LIMITADO' }
+    $cal = Texto-CalificacionRendimiento $M.Puntos
+    if ($nivel -eq 'POTENTE' -and $M.Puntos -ge 80) { return "No necesita optimizacion agresiva: el hardware es potente y rinde bien. Opcional: perfil 'Equipo moderno'." }
+    if ($nivel -eq 'MUY LIMITADO' -or $cal -eq 'CRITICO' -or $cal -eq 'LENTO') { return "Recomendado: 'Perfil automatico' (nivel agresivo). Hardware $nivel y rendimiento $cal." }
+    return "Recomendado: 'Equipo de bajo consumo' o 'Perfil automatico'. Hardware $nivel y rendimiento $cal."
+}
+
+function Global:Show-VerificacionRendimiento {
+    param($M)
+    [xml]$x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Verificar rendimiento del equipo" Height="660" Width="700" MinHeight="420"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="14">
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="BtnCerrar" Content="Cerrar" Width="140" Height="38"/>
+    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel Margin="0,0,6,0">
+        <TextBlock Text="📊 Rendimiento del equipo" Foreground="White" FontWeight="Bold" FontSize="18"/>
+        <StackPanel Orientation="Horizontal" Margin="0,8,0,10">
+          <TextBlock x:Name="TxtPuntos" FontSize="44" FontWeight="Bold" Foreground="White"/>
+          <TextBlock x:Name="TxtCalif" FontSize="20" FontWeight="Bold" Margin="14,0,0,0" VerticalAlignment="Center"/>
+        </StackPanel>
+        <TextBlock Text="🧾 Equipo" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,4"/>
+        <TextBlock x:Name="TxtHw" Foreground="#9FE8C8" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Margin="0,0,0,10"/>
+        <TextBlock Text="📏 Mediciones (equipo en reposo)" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,4"/>
+        <TextBlock x:Name="TxtMed" Foreground="#9FE8C8" TextWrapping="Wrap" FontFamily="Consolas" FontSize="12" Margin="0,0,0,10"/>
+        <TextBlock Text="🔎 Hallazgos" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,4"/>
+        <TextBlock x:Name="TxtHall" Foreground="White" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/>
+        <Border Background="#102A1E" BorderBrush="#29D398" BorderThickness="1" CornerRadius="8" Padding="12">
+          <StackPanel>
+            <TextBlock Text="✅ Que perfil usar" Foreground="#29D398" FontWeight="Bold" FontSize="13"/>
+            <TextBlock x:Name="TxtRec" Foreground="White" TextWrapping="Wrap" FontSize="12" Margin="0,6,0,0"/>
+          </StackPanel>
+        </Border>
+        <TextBlock x:Name="TxtPie" Foreground="#9FB4D8" TextWrapping="Wrap" FontSize="12" Margin="0,10,0,0"/>
+      </StackPanel>
+    </ScrollViewer>
+  </DockPanel>
+</Window>
+"@
+    $dlg = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
+    try { if ($window -and $window.IsVisible) { $dlg.Owner = $window } } catch {}
+    Iniciar-EfectosNeon -Ventana $dlg
+    $cal = Texto-CalificacionRendimiento $M.Puntos
+    $col = switch ($cal) { 'BUENO' { '#29D398' } 'ACEPTABLE' { '#FFC857' } 'LENTO' { '#FF9F43' } default { '#FF6B6B' } }
+    $dlg.FindName("TxtPuntos").Text = "$($M.Puntos)/100"
+    $tc = $dlg.FindName("TxtCalif"); $tc.Text = $cal; $tc.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($col)
+    $hw = $M.Hw
+    $dlg.FindName("TxtHw").Text = if ($hw) { "Procesador : $($hw.CpuNombre)`r`n              $($hw.Nucleos) nucleo(s), $($hw.Hilos) hilo(s), $($hw.GHz) GHz`r`nMemoria RAM: $($hw.RamGB) GB`r`nDisco       : $($hw.Disco)`r`nNivel del hardware: $($hw.Nivel)" } else { 'No se pudo detectar el hardware.' }
+    $dlg.FindName("TxtMed").Text = "CPU            : $($M.Cpu)%`r`nRAM            : $($M.RamPct)%  ($($M.RamUsadaMB) de $($M.RamTotalMB) MB)`r`nDisco (uso)    : $($M.Disco)%`r`nProcesos       : $($M.Procesos)`r`nServicios activos: $($M.Servicios)`r`nProgramas de inicio: $($M.Inicio)`r`nEspacio libre  : $($M.DiscoLibrePct)%`r`nEncendido hace: $($M.Horas) h"
+    $dlg.FindName("TxtHall").Text = ((Get-HallazgosRendimiento $M) -join "`r`n")
+    $dlg.FindName("TxtRec").Text = (Get-PerfilRecomendado $M)
+    $dlg.FindName("TxtPie").Text = "Esta medicion queda guardada: cuando apliques un perfil, el programa vuelve a medir y compara contra estos numeros para decirte si hubo cambios reales. Para que sea justa, cierra tus programas antes de medir."
+    $dlg.FindName("BtnCerrar").Add_Click({ $dlg.Close() }.GetNewClosure())
+    [void]$dlg.ShowDialog()
+}
+
+function Accion-VerificarRendimiento {
+    if ($Global:DiagEnCurso -or $Global:PerfilEnCurso) { Show-Aviso 'Espera a que termine la tarea en curso y vuelve a intentarlo.'; return }
+    $prog = New-VentanaProgreso -Titulo 'Verificando el rendimiento del equipo'
+    $m = $null
+    try {
+        Update-VentanaProgreso -Ventana $prog -Porcentaje 15 -Estado 'Midiendo CPU, memoria y disco (unos segundos, no uses el equipo)...' -LogLinea 'Midiendo el consumo en reposo...'
+        $m = Medir-RendimientoEquipo -Ms 6000
+        Update-VentanaProgreso -Ventana $prog -Porcentaje 90 -Estado 'Calculando la puntuacion...'
+    } finally { Close-VentanaProgreso -Ventana $prog -MensajeFinal 'Medicion terminada.' }
+    if (-not $m) { Write-Log 'No se pudo medir el rendimiento del equipo.' -Tipo AVISO; return }
+    $Script:RendAntes = @{ Cuando = Get-Date; M = $m }
+    Write-Log "Rendimiento del equipo: $($m.Puntos)/100 ($(Texto-CalificacionRendimiento $m.Puntos)). CPU $($m.Cpu)%, RAM $($m.RamPct)%, disco $($m.Disco)%." -Tipo INFO
+    Show-VerificacionRendimiento -M $m
+}
+
+# Despues de aplicar un perfil: se mide otra vez y se compara contra la medicion hecha antes (si existe)
+function Comparar-RendimientoTrasPerfil {
+    if (-not $Script:RendAntes) { return }
+    if (((Get-Date) - $Script:RendAntes.Cuando).TotalHours -gt 12) { $Script:RendAntes = $null; return }
+    $a = $Script:RendAntes.M
+    $Script:RendAntes = $null
+    $d = Medir-RendimientoEquipo -Ms 4000
+    $cmp = { param($Tema, $Antes, $Despues, $Unidad, $Umbral)
+        $dif = $Despues - $Antes
+        if ($dif -le (-1 * $Umbral)) { Reg-Verif $Tema 'OK' "${Antes}${Unidad} -> ${Despues}${Unidad} (mejora real de $([math]::Abs($dif))${Unidad})" }
+        else { Reg-Verif $Tema 'PARCIAL' "${Antes}${Unidad} -> ${Despues}${Unidad}: SIN MEJORA MEDIBLE todavia (varios cambios actuan al reiniciar)" }
+    }
+    & $cmp 'Medicion: CPU en uso' $a.Cpu $d.Cpu '%' 5
+    & $cmp 'Medicion: RAM en uso' $a.RamUsadaMB $d.RamUsadaMB ' MB' 100
+    & $cmp 'Medicion: actividad del disco' $a.Disco $d.Disco '%' 5
+    & $cmp 'Medicion: procesos en ejecucion' $a.Procesos $d.Procesos '' 3
+    & $cmp 'Medicion: servicios activos' $a.Servicios $d.Servicios '' 3
+    if ($d.Puntos -gt $a.Puntos) { Reg-Verif 'Medicion: puntuacion de rendimiento' 'OK' "$($a.Puntos) -> $($d.Puntos) de 100" }
+    else { Reg-Verif 'Medicion: puntuacion de rendimiento' 'PARCIAL' "$($a.Puntos) -> $($d.Puntos) de 100: sin subida todavia; mide de nuevo despues de reiniciar" }
+}
+
 function Invoke-PasosPerfil {
     param($Ventana, $Pasos)
     $n = [math]::Max(1, @($Pasos).Count)
     $i = 0
-    foreach ($p in $Pasos) {
-        $pct = 3 + [int][math]::Round(($i / $n) * 94)
-        Update-VentanaProgreso -Ventana $Ventana -Porcentaje $pct -Estado $p.Txt -LogLinea $p.Txt
-        try { & $p.Accion } catch { Write-Log "Paso con error ($($p.Txt)): $($_.Exception.Message)" -Tipo AVISO }
-        $i++
+    $Script:Verif = New-Object System.Collections.Generic.List[object]
+    $Global:PerfilEnCurso = $true
+    try {
+        foreach ($p in $Pasos) {
+            $pct = 3 + [int][math]::Round(($i / $n) * 94)
+            Update-VentanaProgreso -Ventana $Ventana -Porcentaje $pct -Estado $p.Txt -LogLinea $p.Txt
+            try { & $p.Accion } catch { Write-Log "Paso con error ($($p.Txt)): $($_.Exception.Message)" -Tipo AVISO }
+            $i++
+        }
+    } finally {
+        $Global:PerfilEnCurso = $false
+        try { $Global:VivoEstado.PausaHasta = (Get-Date).AddMinutes(2) } catch {}
     }
 }
 
@@ -10959,16 +11484,23 @@ function Finalizar-Perfil {
     $pasos = @()
     if ($Script:PasosPerfil) { $pasos = (Como-Arreglo $Script:PasosPerfil) }
     $Script:PasosPerfil = $null
-    Write-Log "$Titulo aplicado." -Tipo OK
-    Show-ResultadoPerfil -Titulo $Titulo -Antes $Antes -Despues $despues -Pasos $pasos -Nota $Nota -OfrecerReinicio $Reinicio
+    if ($Titulo -notmatch 'predeterminada') { try { Comparar-RendimientoTrasPerfil } catch { Write-Log "No se pudo comparar el rendimiento: $($_.Exception.Message)" -Tipo AVISO -SinRegistro } }
+    $verif = $Script:Verif.ToArray()
+    $Script:Verif = New-Object System.Collections.Generic.List[object]
+    $nf = 0; foreach ($vv in $verif) { if ($vv.Estado -eq 'FALLO') { $nf++ } }
+    Write-Log "$Titulo aplicado$(if ($nf -gt 0) { " (con $nf cambio(s) que no se pudieron aplicar: revisa la verificacion)" })." -Tipo $(if ($nf -gt 0) { 'AVISO' } else { 'OK' })
+    # Se guarda la linea base para medir el resultado real despues de reiniciar
+    if ($Titulo -match 'predeterminada') { Descartar-MedicionPendiente } else { Guardar-MedicionAntes -Antes $Antes -Titulo $Titulo }
+    if ($Reinicio) { $Nota = ("$Nota`r`n`r`nImportante: servicios, Defender y el agrupamiento de procesos terminan de aplicarse al REINICIAR. Cuando reinicies y abras de nuevo The Dragon Tool, medira el resultado real y te mostrara la comparacion (RAM, procesos y servicios).").Trim() }
+    Show-ResultadoPerfil -Titulo $Titulo -Antes $Antes -Despues $despues -Pasos $pasos -Nota $Nota -OfrecerReinicio $Reinicio -Verif $verif
 }
 
 # Ventana de resultados: tarjetas con contadores animados + tabla de ajustes antes/despues.
 function Global:Show-ResultadoPerfil {
-    param([string]$Titulo, $Antes, $Despues, $Pasos, [string]$Nota = '', [bool]$OfrecerReinicio = $true)
+    param([string]$Titulo, $Antes, $Despues, $Pasos, [string]$Nota = '', [bool]$OfrecerReinicio = $true, $Verif = $null)
 
     $metricas = @(
-        @{ T = 'Memoria RAM libre';        Ic = '🧠'; A = [double]$Antes.RamLibreMB;       D = [double]$Despues.RamLibreMB;       U = 'MB'; Mejor = 'Sube' },
+        @{ T = 'RAM en uso (real)';        Ic = '🧠'; A = [double]$Antes.RamUsadaMB;       D = [double]$Despues.RamUsadaMB;       U = 'MB'; Mejor = 'Baja' },
         @{ T = 'Procesos en ejecucion';    Ic = '⚙️'; A = [double]$Antes.Procesos;         D = [double]$Despues.Procesos;         U = '';   Mejor = 'Baja' },
         @{ T = 'Subprocesos (hilos)';      Ic = '🧵'; A = [double]$Antes.Hilos;            D = [double]$Despues.Hilos;            U = '';   Mejor = 'Baja' },
         @{ T = 'Servicios activos';        Ic = '🛠️'; A = [double]$Antes.ServiciosActivos; D = [double]$Despues.ServiciosActivos; U = '';   Mejor = 'Baja' },
@@ -11035,8 +11567,8 @@ function Global:Show-ResultadoPerfil {
             </DataGridTextColumn>
           </DataGrid.Columns>
         </DataGrid>
-        <TextBlock Text="📋 Pasos aplicados" FontSize="15" FontWeight="Bold" Foreground="#66AEFF" Margin="5,14,0,6"/>
-        <TextBox x:Name="TxtResPasos" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" Height="170" Margin="5,0,5,0"
+        <TextBlock Text="🔍 Verificacion real de cada cambio (se lee el estado del sistema, no se asume)" FontSize="15" FontWeight="Bold" Foreground="#66AEFF" Margin="5,14,0,6"/>
+        <TextBox x:Name="TxtResPasos" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" Height="230" Margin="5,0,5,0"
                  Background="#070A10" Foreground="#9FE8C8" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto"/>
         <TextBlock x:Name="TxtResNota" Foreground="#FFC857" TextWrapping="Wrap" FontSize="12" Margin="5,10,5,0"/>
       </StackPanel>
@@ -11048,10 +11580,14 @@ function Global:Show-ResultadoPerfil {
     try { if ($window -and $window.IsVisible) { $w.Owner = $window } } catch {}
     Iniciar-EfectosNeon -Ventana $w
 
-    $w.FindName("TxtResTitulo").Text = "✅ $Titulo aplicado"
-    $dRam = [math]::Round($Despues.RamLibreMB - $Antes.RamLibreMB)
+    $vl = New-Object System.Collections.Generic.List[object]
+    if ($Verif) { foreach ($vv in $Verif) { $vl.Add($vv) } }
+    $nOk = 0; $nPend = 0; $nParc = 0; $nFallo = 0
+    foreach ($vv in $vl.ToArray()) { switch ($vv.Estado) { 'OK' { $nOk++ } 'PEND' { $nPend++ } 'PARCIAL' { $nParc++ } 'FALLO' { $nFallo++ } } }
+    $w.FindName("TxtResTitulo").Text = if ($nFallo -gt 0) { "⚠ $Titulo aplicado con $nFallo cambio(s) que NO se pudieron aplicar" } else { "✅ $Titulo aplicado" }
+    $dRam = [math]::Round($Despues.RamUsadaMB - $Antes.RamUsadaMB)
     $dProc = [int]($Despues.Procesos - $Antes.Procesos)
-    $w.FindName("TxtResResumen").Text = "$cambios ajuste(s) del sistema cambiado(s)  |  RAM libre: $(if ($dRam -ge 0) { '+' })$dRam MB  |  Procesos: $(if ($dProc -gt 0) { '+' })$dProc  |  Inicio: $($Antes.InicioActivos) → $($Despues.InicioActivos) programas"
+    $w.FindName("TxtResResumen").Text = "$cambios ajuste(s) del sistema cambiado(s)  |  Comprobado: $nOk OK, $nPend al reiniciar, $nParc parcial, $nFallo fallido  |  RAM en uso ahora: $(if ($dRam -ge 0) { '+' })$dRam MB (aun faltan los servicios que se detienen al reiniciar)  |  Procesos: $(if ($dProc -gt 0) { '+' })$dProc  |  Inicio: $($Antes.InicioActivos) → $($Despues.InicioActivos) programas"
 
     $txtV = @(); $valA = @(); $valD = @(); $fmt = @()
     for ($i = 0; $i -lt $metricas.Count; $i++) {
@@ -11072,8 +11608,16 @@ function Global:Show-ResultadoPerfil {
     }
     $w.FindName("GridAjustes").ItemsSource = $filas
     $listaPasos = New-Object System.Collections.Generic.List[string]
-    foreach ($p in @($Pasos)) { if ($p -and ($listaPasos.Count -eq 0 -or $listaPasos[$listaPasos.Count - 1] -ne $p)) { $listaPasos.Add("✔ $p") } }
-    $w.FindName("TxtResPasos").Text = if ($listaPasos.Count) { $listaPasos -join "`r`n" } else { "(sin pasos registrados)" }
+    foreach ($vv in $vl.ToArray()) {
+        $ic = switch ($vv.Estado) { 'OK' { '✔' } 'PEND' { '⏳' } 'PARCIAL' { '⚠' } default { '✖' } }
+        $listaPasos.Add("$ic  $($vv.Tema): $($vv.Detalle)")
+    }
+    if ($listaPasos.Count -eq 0) { $listaPasos.Add('(este perfil no registro comprobaciones individuales)') }
+    $listaPasos.Add('')
+    $listaPasos.Add('Pasos ejecutados:')
+    $ult = ''
+    foreach ($p in @($Pasos)) { if ($p -and $p -ne $ult) { $listaPasos.Add("   • $p"); $ult = $p } }
+    $w.FindName("TxtResPasos").Text = ($listaPasos -join "`r`n")
     $w.FindName("TxtResNota").Text = $Nota
     if (-not $OfrecerReinicio) { $w.FindName("BtnResReiniciar").Visibility = 'Collapsed' }
 
@@ -11124,7 +11668,7 @@ $Script:ServiciosBCAgresivo = @(
 
 function Get-ServiciosBCTodos {
     $l = New-Object System.Collections.Generic.List[string]
-    foreach ($n in ($Script:ServiciosBloatComun + $Script:ServiciosBCBase + $Script:ServiciosBCAgresivo)) { if (-not $l.Contains($n)) { $l.Add($n) } }
+    foreach ($n in ($Script:ServiciosBloatComun + $Script:ServiciosBCBase + $Script:ServiciosBCAgresivo + $Script:ServiciosBCMax + $Script:ServiciosBCSoloMax + $Script:ServiciosBCCond)) { if (-not $l.Contains($n)) { $l.Add($n) } }
     return $l.ToArray()
 }
 
@@ -11189,57 +11733,410 @@ $Script:ProcesosBCExtra = @(
 
 function Guardar-EstadoBC {
     try {
-        if (Test-Path $Script:RutaEstadoBC) { Write-Log "Estado original ya guardado antes: se conserva el primero para poder restaurar." -Tipo INFO -SinRegistro; return }
         $dir = Split-Path $Script:RutaEstadoBC
         if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+        $existente = $null
+        if (Test-Path $Script:RutaEstadoBC) { try { $existente = Get-Content -Path $Script:RutaEstadoBC -Raw -Encoding UTF8 | ConvertFrom-Json } catch {} }
         $svcs = New-Object System.Collections.ArrayList
+        $ya = @{}
+        # Se conserva el estado ORIGINAL ya guardado; solo se agregan los servicios que aun no estaban en el
+        if ($existente -and $existente.Servicios) {
+            foreach ($s0 in $existente.Servicios) { $ya["$($s0.N)"] = $true; [void]$svcs.Add([ordered]@{ N = "$($s0.N)"; Start = [int]$s0.Start; Delayed = [int]$s0.Delayed }) }
+        }
+        $nuevos = 0
         foreach ($n in (Get-ServiciosBCTodos)) {
+            if ($ya.ContainsKey($n)) { continue }
             $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$n"
             if (-not (Test-Path $k)) { continue }
             $p = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
             if ($null -eq $p -or $null -eq $p.Start) { continue }
             $d = 0; if ($null -ne $p.DelayedAutostart) { $d = [int]$p.DelayedAutostart }
             [void]$svcs.Add([ordered]@{ N = $n; Start = [int]$p.Start; Delayed = $d })
+            $nuevos++
         }
+        if ($existente -and $nuevos -eq 0) { Write-Log "Estado original ya guardado antes: se conserva el primero para poder restaurar." -Tipo INFO -SinRegistro; return }
         $res = $null
-        try { $res = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager' -Name ShippedWithReserves -ErrorAction Stop).ShippedWithReserves } catch {}
-        $obj = [ordered]@{ Fecha = (Get-Date).ToString('s'); Servicios = $svcs.ToArray(); Reserved = $res }
+        if ($existente) { $res = $existente.Reserved }
+        else { try { $res = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\ReserveManager' -Name ShippedWithReserves -ErrorAction Stop).ShippedWithReserves } catch {} }
+        $fecha = if ($existente -and $existente.Fecha) { "$($existente.Fecha)" } else { (Get-Date).ToString('s') }
+        $obj = [ordered]@{ Fecha = $fecha; Servicios = $svcs.ToArray(); Reserved = $res }
         ($obj | ConvertTo-Json -Depth 4) | Set-Content -Path $Script:RutaEstadoBC -Encoding UTF8
         Write-Log "Estado original guardado ($($svcs.Count) servicios) en $Script:RutaEstadoBC para poder restaurarlo." -Tipo OK
     } catch { Write-Log "No se pudo guardar el estado original: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
 }
 
+# Servicios del nivel agresivo que se apagan en AMBOS perfiles (escritorio remoto, carpetas sin conexion, sincronizacion de contactos, etc.)
+$Script:ServiciosBCMax = @(
+    'TermService','SessionEnv','UmRdpService','CscService','WebClient','iphlpsvc','NcdAutoSetup','DusmSvc',
+    'OneSyncSvc','PimIndexMaintenanceSvc','UnistoreSvc','UserDataSvc','MessagingService','CDPUserSvc','BcastDVRUserService'
+)
+# Solo en el nivel maximo (MUY LIMITADO o el manual con confirmacion): compartir carpetas. El Centro de seguridad se conserva para que tu antivirus original pueda registrarse
+$Script:ServiciosBCSoloMax = @('LanmanServer')
+# Se apagan solo si NO se detecta el dispositivo (impresora, Bluetooth, huella)
+$Script:ServiciosBCCond = @('Spooler','bthserv','BthAvctpSvc','WbioSrvc')
+
+$Script:RutaDefenderOff = Join-Path $env:ProgramData 'TheDragonTool\defender_desactivado.txt'
+
+# Apps preinstaladas de la Tienda que se desinstalan (no incluye Tienda, Calculadora, Fotos, Bloc de notas, Paint ni Edge)
+$Script:AppsPreinstaladas = @(
+    'Microsoft.XboxApp','Microsoft.Xbox.TCUI','Microsoft.XboxGameOverlay','Microsoft.XboxGamingOverlay','Microsoft.XboxIdentityProvider',
+    'Microsoft.XboxSpeechToTextOverlay','Microsoft.GamingApp','Microsoft.ZuneMusic','Microsoft.ZuneVideo','Microsoft.BingNews',
+    'Microsoft.BingWeather','Microsoft.BingFinance','Microsoft.BingSports','Microsoft.BingTranslator','Microsoft.GetHelp','Microsoft.Getstarted',
+    'Microsoft.WindowsFeedbackHub','Microsoft.MicrosoftOfficeHub','Microsoft.MicrosoftSolitaireCollection','Microsoft.People','Microsoft.SkypeApp',
+    'Microsoft.WindowsMaps','Microsoft.YourPhone','Microsoft.Messaging','Microsoft.Microsoft3DViewer','Microsoft.Print3D','Microsoft.MixedReality.Portal',
+    'Microsoft.Wallet','Microsoft.OneConnect','Microsoft.549981C3F5F10','Microsoft.Todos','Microsoft.PowerAutomateDesktop','Clipchamp.Clipchamp',
+    'MicrosoftTeams','MSTeams','MicrosoftCorporationII.MicrosoftFamily','Microsoft.WindowsCommunicationsApps','Microsoft.Office.OneNote',
+    'Microsoft.MicrosoftStickyNotes','SpotifyAB.SpotifyMusic','Disney*','*CandyCrush*','king.com.*','*Facebook*','*Twitter*','*TikTok*','*Netflix*',
+    '*Instagram*','*AmazonPrimeVideo*','*Duolingo*','*EclipseManager*','*ActiproSoftware*','*AdobeSystemsIncorporated.AdobePhotoshopExpress*'
+)
+
+function Accion-DesactivarServicios {
+    param([string[]]$Nombres, [string]$Etiqueta = 'Servicios')
+    if (-not $Nombres -or $Nombres.Count -eq 0) { return }
+    [void](Invoke-EnSegundoPlano -Argumentos @(, $Nombres) -TimeoutSeg 180 -Bloque {
+        param($lista)
+        foreach ($n in $lista) {
+            try {
+                $s = Get-Service -Name $n -ErrorAction Stop
+                try { if ("$($s.Status)" -ne 'Stopped') { & sc.exe stop $n | Out-Null } } catch {}
+                $hecho = $false
+                try { Set-Service -Name $n -StartupType Disabled -ErrorAction Stop; $hecho = $true } catch {}
+                if (-not $hecho) { try { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$n" -Name Start -Value 4 -Type DWord -ErrorAction Stop } catch {} }
+            } catch {}
+        }
+    })
+    # Comprobacion real: se lee de nuevo el tipo de inicio y el estado de cada servicio que existe
+    $objetivo = 0; $fallan = New-Object System.Collections.Generic.List[string]; $activos = New-Object System.Collections.Generic.List[string]
+    foreach ($n in $Nombres) {
+        $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$n"
+        if (-not (Test-Path $k)) { continue }
+        $objetivo++
+        $st = $null; try { $st = (Get-ItemProperty -Path $k -Name Start -ErrorAction Stop).Start } catch {}
+        if ($st -ne 4) { $fallan.Add($n); continue }
+        $sv = Get-Service -Name $n -ErrorAction SilentlyContinue
+        if ($sv -and "$($sv.Status)" -ne 'Stopped') { $activos.Add($n) }
+    }
+    if ($objetivo -eq 0) { return }
+    $ok = $objetivo - $fallan.Count
+    if ($fallan.Count -eq $objetivo) { Reg-Verif $Etiqueta 'FALLO' "ninguno de $objetivo se pudo desactivar (Windows los protege): $((@($fallan.ToArray() | Select-Object -First 6)) -join ', ')" }
+    elseif ($fallan.Count -gt 0) { Reg-Verif $Etiqueta 'PARCIAL' "$ok de $objetivo desactivados; los protege Windows: $((@($fallan.ToArray() | Select-Object -First 6)) -join ', ')" }
+    elseif ($activos.Count -gt 0) { Reg-Verif $Etiqueta 'PEND' "$objetivo desactivados; $($activos.Count) seguiran en memoria hasta reiniciar ($((@($activos.ToArray() | Select-Object -First 5)) -join ', '))" }
+    else { Reg-Verif $Etiqueta 'OK' "$objetivo desactivados y detenidos" }
+}
+
 function Accion-ServiciosBCAgresivo {
     if (-not (Requiere-Admin)) { return }
-    $ok = 0; $omitidos = 0
-    foreach ($n in $Script:ServiciosBCAgresivo) {
-        $svc = Get-Service -Name $n -ErrorAction SilentlyContinue
-        if (-not $svc) { continue }
+    Accion-DesactivarServicios -Nombres $Script:ServiciosBCAgresivo -Etiqueta 'Servicios extra'
+    Accion-DesactivarServicios -Nombres $Script:ServiciosBCMax -Etiqueta 'Servicios de escritorio remoto, sincronizacion y red'
+    # Impresion, Bluetooth y huella: solo si el equipo NO tiene ese dispositivo
+    $det = Invoke-EnSegundoPlano -TimeoutSeg 60 -Bloque {
+        $quitar = New-Object System.Collections.Generic.List[string]
+        $txt = New-Object System.Collections.Generic.List[string]
         try {
-            Stop-Service -Name $n -Force -ErrorAction SilentlyContinue
-            Set-Service -Name $n -StartupType Disabled -ErrorAction Stop
-            $ok++
-        } catch { $omitidos++ }
+            $imp = @(Get-CimInstance Win32_Printer -ErrorAction Stop | Where-Object { $_.Name -notmatch 'PDF|XPS|OneNote|Fax|Send To|Enviar' })
+            if ($imp.Count -eq 0) { $quitar.Add('Spooler'); $txt.Add('impresoras') } else { $txt.Add("(se conserva la impresion: hay $($imp.Count) impresora/s)") }
+        } catch {}
+        try { if (@(Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Bluetooth'" -ErrorAction Stop).Count -eq 0) { $quitar.Add('bthserv'); $quitar.Add('BthAvctpSvc'); $txt.Add('Bluetooth') } } catch {}
+        try { if (@(Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Biometric'" -ErrorAction Stop).Count -eq 0) { $quitar.Add('WbioSrvc'); $txt.Add('huella digital') } } catch {}
+        @{ Quitar = $quitar.ToArray(); Txt = ($txt.ToArray() -join ', ') }
     }
-    Write-Log "Servicios extra desactivados: $ok$(if ($omitidos) { " ($omitidos protegidos por Windows, se omiten)" }) - menos procesos y RAM en reposo." -Tipo OK
+    $d = $null; foreach ($x in $det) { $d = $x }
+    if ($d -and @($d.Quitar).Count -gt 0) {
+        Accion-DesactivarServicios -Nombres @($d.Quitar) -Etiqueta "Servicios sin uso (no se detecto: $($d.Txt))"
+    } elseif ($d) { Write-Log "Servicios de impresion/Bluetooth/huella: se conservan porque hay dispositivos que los usan." -Tipo INFO -SinRegistro }
+    if ($Script:BCExtremo) { Accion-DesactivarServicios -Nombres $Script:ServiciosBCSoloMax -Etiqueta 'Servicio de carpetas compartidas' }
+}
+
+function Accion-QuitarAppsPreinstaladas {
+    if (-not (Requiere-Admin)) { return }
+    Write-Log "Desinstalando apps preinstaladas que no se usan (Xbox, Noticias, Clima, Solitario, Mapas, Teams, juegos promocionados...). Puede tardar un par de minutos..." -Tipo INFO
+    $r = Invoke-EnSegundoPlano -Argumentos @(, $Script:AppsPreinstaladas) -TimeoutSeg 420 -Bloque {
+        param($patrones)
+        $pk = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { -not $_.NonRemovable -and -not $_.IsFramework })
+        $hechos = @{}
+        foreach ($pat in $patrones) {
+            foreach ($p in @($pk | Where-Object { $_.Name -like $pat })) {
+                if ($hechos.ContainsKey($p.PackageFullName)) { continue }
+                $hechos[$p.PackageFullName] = $true
+                try { Remove-AppxPackage -Package $p.PackageFullName -AllUsers -ErrorAction Stop } catch {
+                    try { Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop } catch {}
+                }
+            }
+        }
+        $vistos = @{}
+        $despues = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { -not $_.NonRemovable -and -not $_.IsFramework })
+        foreach ($pat in $patrones) {
+            foreach ($p in @($despues | Where-Object { $_.Name -like $pat })) { if (-not $vistos.ContainsKey($p.Name)) { $vistos[$p.Name] = $true; "QUEDA|$($p.Name)" } }
+        }
+        "INTENTADAS|$($hechos.Count)"
+    }
+    $quedan = New-Object System.Collections.Generic.List[string]; $intentadas = 0
+    foreach ($x in $r) { $q = "$x" -split '\|'; if ($q[0] -eq 'QUEDA') { $quedan.Add($q[1]) } elseif ($q[0] -eq 'INTENTADAS') { $intentadas = [int]$q[1] } }
+    if ($intentadas -eq 0) { Write-Log "No habia apps preinstaladas de la lista (ya estaban quitadas)." -Tipo INFO -SinRegistro; return }
+    $quitadas = [math]::Max(0, $intentadas - $quedan.Count)
+    if ($quedan.Count -eq 0) { Reg-Verif 'Apps preinstaladas desinstaladas' 'OK' "$quitadas desinstaladas (se reinstalan desde la Tienda si la restauras)" }
+    elseif ($quitadas -gt 0) { Reg-Verif 'Apps preinstaladas desinstaladas' 'PARCIAL' "$quitadas desinstaladas; Windows no dejo quitar: $((@($quedan.ToArray() | Select-Object -First 6)) -join ', ')" }
+    else { Reg-Verif 'Apps preinstaladas desinstaladas' 'FALLO' "Windows no dejo quitar ninguna: $((@($quedan.ToArray() | Select-Object -First 6)) -join ', ')" }
+}
+
+$Script:RutaTiendaOff = Join-Path $env:ProgramData 'TheDragonTool\tienda_desinstalada.txt'
+
+function Accion-QuitarTienda {
+    if (-not (Requiere-Admin)) { return }
+    Write-Log "Desinstalando Microsoft Store..." -Tipo INFO
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 300 -Bloque {
+        $nombres = @('Microsoft.WindowsStore', 'Microsoft.StorePurchaseApp')
+        try { Get-Process -Name WinStore.App, StoreExperienceHost, WinStore.Mobile -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+        $antes = 0
+        foreach ($n in $nombres) {
+            foreach ($p in @(Get-AppxPackage -AllUsers -Name $n -ErrorAction SilentlyContinue)) {
+                $antes++
+                try { Remove-AppxPackage -Package $p.PackageFullName -AllUsers -ErrorAction Stop } catch {
+                    try { Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop } catch {}
+                }
+            }
+        }
+        try {
+            foreach ($pp in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object { $nombres -contains $_.DisplayName })) {
+                try { Remove-AppxProvisionedPackage -Online -PackageName $pp.PackageName -ErrorAction Stop | Out-Null } catch {}
+            }
+        } catch {}
+        try {
+            $k = 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore'
+            if (-not (Test-Path $k)) { New-Item -Path $k -Force | Out-Null }
+            Set-ItemProperty -Path $k -Name RemoveWindowsStore -Value 1 -Type DWord
+        } catch {}
+        $queda = @(Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsStore' -ErrorAction SilentlyContinue).Count
+        "ANTES|$antes"; "QUEDA|$queda"
+    }
+    $antes = -1; $queda = -1
+    foreach ($x in $r) { $q = "$x" -split '\|'; if ($q[0] -eq 'ANTES') { $antes = [int]$q[1] } elseif ($q[0] -eq 'QUEDA') { $queda = [int]$q[1] } }
+    if ($queda -eq 0) {
+        try {
+            $dir = Split-Path $Script:RutaTiendaOff
+            if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+            Set-Content -Path $Script:RutaTiendaOff -Value (Get-Date).ToString('s') -Encoding UTF8
+        } catch {}
+        Reg-Verif 'Microsoft Store desinstalada' 'OK' "$(if ($antes -gt 0) { 'quitada' } else { 'ya no estaba instalada' }) (los programas normales y winget siguen funcionando)"
+    } elseif ($queda -gt 0) { Reg-Verif 'Microsoft Store desinstalada' 'FALLO' 'Windows no permitio quitarla en esta version/edicion' }
+    else { Reg-Verif 'Microsoft Store desinstalada' 'FALLO' 'no se pudo comprobar (tiempo agotado)' }
+}
+
+function Restaurar-TiendaCompleto {
+    if (-not (Test-Path $Script:RutaTiendaOff)) { return }
+    try { Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore' -Name RemoveWindowsStore -ErrorAction SilentlyContinue } catch {}
+    Write-Log "Reinstalando Microsoft Store (necesita Internet; puede tardar unos minutos)..." -Tipo INFO
+    [void](Invoke-EnSegundoPlano -TimeoutSeg 300 -Bloque {
+        try { $p = Start-Process -FilePath "$env:WINDIR\System32\wsreset.exe" -ArgumentList '-i' -PassThru -WindowStyle Hidden -ErrorAction Stop; [void]$p.WaitForExit(280000) } catch {}
+    })
+    $hay = $false
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 60 -Bloque { @(Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsStore' -ErrorAction SilentlyContinue).Count }
+    foreach ($x in $r) { if ([int]$x -gt 0) { $hay = $true } }
+    if ($hay) { Remove-Item -Path $Script:RutaTiendaOff -Force -ErrorAction SilentlyContinue; Write-Log "Microsoft Store reinstalada." -Tipo OK }
+    else { Write-Log "Microsoft Store aun no aparece: la reinstalacion termina en segundo plano (revisa en unos minutos o ejecuta 'wsreset -i' como administrador)." -Tipo AVISO }
+}
+
+function Get-EstadoDefenderBg {
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 60 -Bloque {
+        try { $s = Get-MpComputerStatus -ErrorAction Stop; @{ Ok = $true; Tamper = [bool]$s.IsTamperProtected; Rtp = [bool]$s.RealTimeProtectionEnabled } }
+        catch { @{ Ok = $false; Tamper = $false; Rtp = $false } }
+    }
+    $o = @{ Ok = $false; Tamper = $false; Rtp = $false }
+    foreach ($x in $r) { $o = $x }
+    return $o
+}
+
+function Accion-DefenderDesactivar {
+    if (-not (Requiere-Admin)) { return }
+    $e = Get-EstadoDefenderBg
+    if (-not $e.Ok) { Reg-Verif 'Windows Defender quitado' 'OK' 'no hay Windows Defender activo en este equipo (otro antivirus o ya estaba quitado)'; return }
+    # La clave HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\DisableAntiSpyware = 1 se puede escribir aunque la
+    # Proteccion contra alteraciones este activa; por eso se escribe SIEMPRE primero (igual que hacerlo a mano en regedit).
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 120 -Bloque {
+        $t = New-Object System.Collections.Generic.List[string]
+        try {
+            $k = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+            foreach ($p in @($k, "$k\Real-Time Protection", "$k\Spynet")) { if (-not (Test-Path $p)) { New-Item -Path $p -Force | Out-Null } }
+            Set-ItemProperty -Path $k -Name DisableAntiSpyware -Value 1 -Type DWord
+            Set-ItemProperty -Path $k -Name DisableAntiVirus -Value 1 -Type DWord
+            foreach ($n in 'DisableRealtimeMonitoring', 'DisableBehaviorMonitoring', 'DisableOnAccessProtection', 'DisableScanOnRealtimeEnable', 'DisableIOAVProtection') {
+                Set-ItemProperty -Path "$k\Real-Time Protection" -Name $n -Value 1 -Type DWord
+            }
+            Set-ItemProperty -Path "$k\Spynet" -Name SpynetReporting -Value 0 -Type DWord
+            Set-ItemProperty -Path "$k\Spynet" -Name SubmitSamplesConsent -Value 2 -Type DWord
+            $kn = 'HKLM:\SOFTWARE\Microsoft\Windows Defender Security Center\Notifications'
+            if (-not (Test-Path $kn)) { New-Item -Path $kn -Force | Out-Null }
+            Set-ItemProperty -Path $kn -Name DisableNotifications -Value 1 -Type DWord
+        } catch {}
+        try { Set-MpPreference -DisableRealtimeMonitoring $true -DisableBehaviorMonitoring $true -DisableIOAVProtection $true -DisableScriptScanning $true -MAPSReporting 0 -SubmitSamplesConsent 2 -ErrorAction Stop } catch {}
+        foreach ($n in 'Windows Defender Cache Maintenance', 'Windows Defender Cleanup', 'Windows Defender Scheduled Scan', 'Windows Defender Verification') {
+            try {
+                $task = Get-ScheduledTask -TaskPath '\Microsoft\Windows\Windows Defender\' -TaskName $n -ErrorAction Stop
+                if ("$($task.State)" -ne 'Disabled') { Disable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null; "TAREA|\Microsoft\Windows\Windows Defender\|$n" }
+            } catch {}
+        }
+        try { Get-Process -Name SecurityHealthSystray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+    }
+    $tareas = New-Object System.Collections.Generic.List[string]
+    foreach ($x in $r) { $q = "$x" -split '\|'; if ($q[0] -eq 'TAREA' -and $q.Count -ge 3) { $tareas.Add("$($q[1])|$($q[2])") } }
+    try {
+        $dir = Split-Path $Script:RutaDefenderOff
+        if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+        Set-Content -Path $Script:RutaDefenderOff -Value (Get-Date).ToString('s') -Encoding UTF8
+        if ($tareas.Count -gt 0) { Add-Content -Path $Script:RutaTareasBC -Value $tareas.ToArray() -Encoding UTF8 }
+    } catch {}
+    # Comprobacion real
+    $e2 = Get-EstadoDefenderBg
+    $pol = Leer-Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' 'DisableAntiSpyware' 0
+    if ([int]$pol -eq 1) { Reg-Verif 'Windows Defender: clave DisableAntiSpyware = 1' 'OK' 'guardada y comprobada en el registro (HKLM\SOFTWARE\Policies\Microsoft\Windows Defender)' }
+    else { Reg-Verif 'Windows Defender: clave DisableAntiSpyware = 1' 'FALLO' 'no se pudo guardar la clave en el registro' }
+    if (-not $e2.Rtp) { Reg-Verif 'Windows Defender: proteccion en tiempo real' 'OK' 'desactivada ahora mismo' }
+    elseif ([int]$pol -eq 1) { Reg-Verif 'Windows Defender: proteccion en tiempo real' 'PEND' "sigue encendida hasta reiniciar$(if ($e2.Tamper) { ' (la Proteccion contra alteraciones impide apagarla en caliente)' }); con la clave guardada, queda apagado por completo al reiniciar (se comprobara tras reiniciar)" }
+    else { Reg-Verif 'Windows Defender: proteccion en tiempo real' 'FALLO' 'Windows la mantiene activa' }
+}
+
+# ---------------------------------------------------------------------------
+#  MEDICION REAL TRAS REINICIAR: antes de aplicar un perfil se guarda la linea base; cuando el equipo se
+#  reinicia y se asienta (unos minutos), el programa vuelve a medir y compara de verdad.
+# ---------------------------------------------------------------------------
+$Script:RutaMedicion = Join-Path $env:ProgramData 'TheDragonTool\medicion_pendiente.json'
+$Script:RutaHistorialMed = Join-Path $env:ProgramData 'TheDragonTool\historial_mediciones.txt'
+
+function Get-InicioSistema {
+    try { return (Get-Process -Id 4 -ErrorAction Stop).StartTime } catch {}
+    try { return (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch {}
+    return (Get-Date)
+}
+
+function Guardar-MedicionAntes {
+    param($Antes, [string]$Titulo)
+    try {
+        if (Test-Path $Script:RutaMedicion) { return }   # se conserva la primera linea base hasta medir el resultado
+        $dir = Split-Path $Script:RutaMedicion
+        if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+        $o = [ordered]@{
+            Fecha = (Get-Date).ToString('yyyyMMddHHmmss'); Boot = (Get-InicioSistema).ToString('yyyyMMddHHmmss'); Perfil = $Titulo
+            RamUsadaMB = [int]$Antes.RamUsadaMB; Procesos = [int]$Antes.Procesos; Servicios = [int]$Antes.ServiciosActivos; Inicio = [int]$Antes.InicioActivos
+            Defender = [bool](Get-Process -Name MsMpEng -ErrorAction SilentlyContinue)
+        }
+        ($o | ConvertTo-Json) | Set-Content -Path $Script:RutaMedicion -Encoding UTF8
+    } catch {}
+}
+
+function Descartar-MedicionPendiente { try { Remove-Item -Path $Script:RutaMedicion -Force -ErrorAction SilentlyContinue } catch {} }
+
+# Devuelve $true cuando ya no queda nada pendiente (medido, descartado o sin reinicio todavia no aplica) y $false si hay que esperar mas
+function Global:Evaluar-MedicionPostReinicio {
+    if (-not (Test-Path $Script:RutaMedicion)) { return $true }
+    $j = $null
+    try { $j = Get-Content -Path $Script:RutaMedicion -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Descartar-MedicionPendiente; return $true }
+    $cult = [System.Globalization.CultureInfo]::InvariantCulture
+    $fecha = $null
+    try { $fecha = [datetime]::ParseExact("$($j.Fecha)", 'yyyyMMddHHmmss', $cult) } catch { Descartar-MedicionPendiente; return $true }
+    if (((Get-Date) - $fecha).TotalDays -gt 14) { Descartar-MedicionPendiente; return $true }
+    $boot = Get-InicioSistema
+    if ($boot -le $fecha) { return $true }          # todavia no se reinicio despues de aplicar el perfil: nada que medir
+    if (((Get-Date) - $boot).TotalMinutes -lt 4) { return $false }   # se espera a que el equipo termine de arrancar
+    $ahora = Get-InstantaneaSistema
+    $defActivo = [bool](Get-Process -Name MsMpEng -ErrorAction SilentlyContinue)
+    $defQuitado = (Test-Path $Script:RutaDefenderOff)
+    $tiendaQuitada = (Test-Path $Script:RutaTiendaOff)
+    $tiendaHay = $false
+    if ($tiendaQuitada) {
+        $r = Invoke-EnSegundoPlano -TimeoutSeg 60 -Bloque { @(Get-AppxPackage -AllUsers -Name 'Microsoft.WindowsStore' -ErrorAction SilentlyContinue).Count }
+        foreach ($x in $r) { if ([int]$x -gt 0) { $tiendaHay = $true } }
+    }
+    $antesRam = [int]$j.RamUsadaMB; $ahoraRam = [int]$ahora.RamUsadaMB
+    $dRam = $ahoraRam - $antesRam
+    $pct = if ($antesRam -gt 0) { [math]::Round(100.0 * $dRam / $antesRam) } else { 0 }
+    $veredicto = if ($dRam -le -150 -or $pct -le -10) { 'MEJORA REAL: el equipo usa menos memoria en reposo.' }
+                 elseif ($dRam -lt -30) { 'Mejora pequena: el equipo ya estaba bastante ligero o hay programas abiertos ocupando memoria.' }
+                 else { 'SIN MEJORA MEDIBLE en memoria: cierra los programas que tengas abiertos y vuelve a medir, o el equipo ya estaba al minimo.' }
+    $lineas = New-Object System.Collections.Generic.List[string]
+    $lineas.Add("Resultado REAL del perfil '$($j.Perfil)', medido tras reiniciar (equipo en reposo, con The Dragon Tool abierto):")
+    $lineas.Add('')
+    $lineas.Add("RAM en uso:           $antesRam MB  ->  $ahoraRam MB   ($(if ($dRam -gt 0) { '+' })$dRam MB, $(if ($pct -gt 0) { '+' })$pct%)")
+    $lineas.Add("Procesos:             $($j.Procesos)  ->  $($ahora.Procesos)")
+    $lineas.Add("Servicios activos:    $($j.Servicios)  ->  $($ahora.ServiciosActivos)")
+    $lineas.Add("Programas de inicio:  $($j.Inicio)  ->  $($ahora.InicioActivos)")
+    if ($defQuitado) { $lineas.Add("Windows Defender:    " + $(if ($defActivo) { 'SIGUE ACTIVO (tu version de Windows ignora la directiva). Se apaga solo al instalar un antivirus original, o desactivalo en Seguridad de Windows.' } else { 'DESACTIVADO (comprobado)' })) }
+    if ($tiendaQuitada) { $lineas.Add("Microsoft Store:     " + $(if ($tiendaHay) { 'SIGUE INSTALADA (Windows la reinstalo)' } else { 'DESINSTALADA (comprobado)' })) }
+    $lineas.Add('')
+    $lineas.Add($veredicto)
+    $txt = $lineas -join "`r`n"
+    try {
+        $dir = Split-Path $Script:RutaHistorialMed
+        if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+        Add-Content -Path $Script:RutaHistorialMed -Value ("{0} | {1} | RAM {2}->{3} MB | procesos {4}->{5} | servicios {6}->{7}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm'), $j.Perfil, $antesRam, $ahoraRam, $j.Procesos, $ahora.Procesos, $j.Servicios, $ahora.ServiciosActivos) -Encoding UTF8
+    } catch {}
+    Descartar-MedicionPendiente
+    Write-Log ("Medicion real tras reiniciar: RAM en uso $antesRam -> $ahoraRam MB; procesos $($j.Procesos) -> $($ahora.Procesos); servicios $($j.Servicios) -> $($ahora.ServiciosActivos). $veredicto") -Tipo INFO
+    try { Show-Aviso $txt 'Resultado real del perfil - The Dragon Tool' } catch {}
+    return $true
+}
+
+function Restaurar-DefenderCompleto {
+    if (-not (Test-Path $Script:RutaDefenderOff)) { return }
+    try {
+        $k = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender'
+        foreach ($n in 'DisableAntiSpyware','DisableAntiVirus') { Remove-ItemProperty -Path $k -Name $n -ErrorAction SilentlyContinue }
+        foreach ($n in 'DisableRealtimeMonitoring','DisableBehaviorMonitoring','DisableOnAccessProtection','DisableScanOnRealtimeEnable','DisableIOAVProtection') { Remove-ItemProperty -Path "$k\Real-Time Protection" -Name $n -ErrorAction SilentlyContinue }
+        foreach ($n in 'SpynetReporting','SubmitSamplesConsent') { Remove-ItemProperty -Path "$k\Spynet" -Name $n -ErrorAction SilentlyContinue }
+        Remove-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows Defender Security Center\Notifications' -Name DisableNotifications -ErrorAction SilentlyContinue
+        Set-MpPreference -DisableRealtimeMonitoring $false -DisableBehaviorMonitoring $false -DisableIOAVProtection $false -DisableScriptScanning $false -MAPSReporting 2 -SubmitSamplesConsent 1 -ErrorAction SilentlyContinue
+        Remove-Item -Path $Script:RutaDefenderOff -Force -ErrorAction SilentlyContinue
+        Write-Log "Windows Defender reactivado." -Tipo OK
+    } catch { Write-Log "No se pudo reactivar Windows Defender por completo; abre Seguridad de Windows y activa la proteccion en tiempo real." -Tipo AVISO }
+}
+
+function Accion-OneDriveDesinstalar {
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 180 -Bloque {
+        try { Get-Process -Name OneDrive -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
+        $exe = "$env:SystemRoot\SysWOW64\OneDriveSetup.exe"
+        if (-not (Test-Path $exe)) { $exe = "$env:SystemRoot\System32\OneDriveSetup.exe" }
+        if (Test-Path $exe) {
+            try { $p = Start-Process -FilePath $exe -ArgumentList '/uninstall' -PassThru -WindowStyle Hidden -ErrorAction Stop; [void]$p.WaitForExit(150000); 'OK' } catch {}
+        } else { 'NOEXE' }
+    }
+    $v = ''; foreach ($x in $r) { $v = "$x" }
+    if ($v -eq 'OK') { Write-Log "OneDrive desinstalado (tus archivos de la carpeta OneDrive no se borran). Se puede volver a instalar desde microsoft.com." -Tipo OK }
+    else { Write-Log "OneDrive ya no estaba instalado o no se pudo desinstalar." -Tipo INFO -SinRegistro }
+}
+
+function Accion-AhorroAvanzado {
+    $hdd = ((Get-TipoDiscoSistema) -eq 'HDD')
+    $r = Invoke-EnSegundoPlano -Argumentos @($hdd) -TimeoutSeg 60 -Bloque {
+        param($esHdd)
+        try { Disable-MMAgent -ApplicationPreLaunch -ErrorAction Stop; if (-not $esHdd) { Disable-MMAgent -ApplicationLaunchPrefetching -ErrorAction Stop }; 'OK' } catch {}
+    }
+    $v = ''; foreach ($x in $r) { $v = "$x" }
+    if ($v -eq 'OK') { Write-Log "Precarga de aplicaciones desactivada (menos RAM y menos lecturas del disco$(if ($hdd) { '; en disco mecanico se conserva la lectura anticipada que acelera abrir programas' }))." -Tipo OK }
+    else { Write-Log "No se pudo ajustar la precarga de aplicaciones en este equipo." -Tipo INFO -SinRegistro }
+}
+function Restaurar-AhorroAvanzado {
+    try { Enable-MMAgent -ApplicationPreLaunch -ApplicationLaunchPrefetching -ErrorAction SilentlyContinue } catch {}
 }
 
 function Aplicar-AjustesRegBC {
     param([switch]$Extremo)
-    $ok = 0
     $esHdd = ((Get-TipoDiscoSistema) -eq 'HDD')
     $tabla = New-Object System.Collections.Generic.List[object]
     foreach ($a in $Script:AjustesRegBC) { $tabla.Add($a) }
     if ($Extremo) { foreach ($a in $Script:AjustesRegBCExtremo) { $tabla.Add($a) } }
+    $ok = 0; $mal = New-Object System.Collections.Generic.List[string]
     foreach ($a in $tabla.ToArray()) {
         if ($esHdd -and $a.SoloSSD) { continue }   # en disco mecanico Prefetch ayuda a arrancar: no se toca
         try {
             if (-not (Test-Path $a.R)) { New-Item -Path $a.R -Force -ErrorAction Stop | Out-Null }
             Set-ItemProperty -Path $a.R -Name $a.N -Value $a.V -Type DWord -ErrorAction Stop
-            $ok++
-        } catch {}
+            $real = (Get-ItemProperty -Path $a.R -Name $a.N -ErrorAction Stop).($a.N)   # se vuelve a leer para comprobar
+            if ([int]$real -eq [int]$a.V) { $ok++ } else { $mal.Add($a.N) }
+        } catch { $mal.Add($a.N) }
     }
-    Write-Log "Ajustes de registro de ahorro aplicados: $ok (Edge en segundo plano, telemetria, Cortana/Copilot/Widgets, Tienda, mantenimiento automatico$(if (-not $esHdd) { ', Prefetch' })$(if ($Extremo) { ', Windows Update con aviso' }))." -Tipo OK
+    $desc = "Edge en segundo plano, telemetria, Cortana/Copilot/Widgets, mantenimiento automatico$(if (-not $esHdd) { ', Prefetch' })$(if ($Extremo) { ', Windows Update con aviso' })"
+    if ($mal.Count -eq 0) { Reg-Verif 'Ajustes de registro de ahorro' 'OK' "$ok ajustes comprobados ($desc)" }
+    elseif ($ok -gt 0) { Reg-Verif 'Ajustes de registro de ahorro' 'PARCIAL' "$ok aplicados; no se pudieron: $((@($mal.ToArray() | Select-Object -First 6)) -join ', ')" }
+    else { Reg-Verif 'Ajustes de registro de ahorro' 'FALLO' "no se pudo escribir en el registro: $((@($mal.ToArray() | Select-Object -First 6)) -join ', ')" }
 }
 function Restaurar-AjustesRegBC {
     $tabla = New-Object System.Collections.Generic.List[object]
@@ -11255,14 +12152,25 @@ function Restaurar-AjustesRegBC {
 
 function Accion-TareasBCAgresivoOff {
     if (-not (Requiere-Admin)) { return }
-    $reg = New-Object System.Collections.Generic.List[string]
-    foreach ($t in ($Script:TareasDiagnostico + $Script:TareasBCExtra)) {
-        try {
-            $task = Get-ScheduledTask -TaskPath $t.Path -TaskName $t.Name -ErrorAction Stop
-            if ("$($task.State)" -eq 'Disabled') { continue }
-            Disable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null
-            $reg.Add("$($t.Path)|$($t.Name)")
-        } catch {}
+    $lista = New-Object System.Collections.Generic.List[string]
+    foreach ($t in ($Script:TareasDiagnostico + $Script:TareasBCExtra)) { $lista.Add("$($t.Path)|$($t.Name)") }
+    $r = Invoke-EnSegundoPlano -Argumentos @(, $lista.ToArray()) -TimeoutSeg 180 -Bloque {
+        param($tareas)
+        foreach ($l in $tareas) {
+            $q = "$l".Split('|')
+            $task = $null
+            try { $task = Get-ScheduledTask -TaskPath $q[0] -TaskName $q[1] -ErrorAction Stop } catch { continue }
+            try {
+                if ("$($task.State)" -ne 'Disabled') { Disable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null; "NUEVA|$l" }
+                $t2 = Get-ScheduledTask -TaskPath $q[0] -TaskName $q[1] -ErrorAction Stop
+                if ("$($t2.State)" -eq 'Disabled') { "OK|$l" } else { "NO|$l" }
+            } catch { "NO|$l" }
+        }
+    }
+    $reg = New-Object System.Collections.Generic.List[string]; $ok = 0; $no = New-Object System.Collections.Generic.List[string]
+    foreach ($x in $r) {
+        $q = "$x" -split '\|', 2
+        if ($q[0] -eq 'NUEVA') { $reg.Add($q[1]) } elseif ($q[0] -eq 'OK') { $ok++ } elseif ($q[0] -eq 'NO') { $no.Add(($q[1] -split '\|')[-1]) }
     }
     if ($reg.Count -gt 0) {
         try {
@@ -11271,15 +12179,11 @@ function Accion-TareasBCAgresivoOff {
             Add-Content -Path $Script:RutaTareasBC -Value $reg.ToArray() -Encoding UTF8
         } catch {}
     }
-    Write-Log "Tareas programadas de diagnostico/telemetria desactivadas: $($reg.Count)." -Tipo OK
+    if ($no.Count -gt 0) { Reg-Verif 'Tareas programadas de telemetria y diagnostico' 'PARCIAL' "$ok desactivadas; Windows no dejo desactivar: $((@($no.ToArray() | Select-Object -First 5)) -join ', ')" }
+    elseif ($ok -gt 0) { Reg-Verif 'Tareas programadas de telemetria y diagnostico' 'OK' "$ok desactivadas y comprobadas" }
+    else { Write-Log "No habia tareas de telemetria/diagnostico activas que desactivar." -Tipo INFO -SinRegistro }
 }
 
-function Accion-DefenderLigero {
-    try {
-        Set-MpPreference -ScanAvgCPULoadFactor 15 -EnableLowCpuPriority $true -DisableCatchupFullScan $true -DisableCatchupQuickScan $true -ErrorAction Stop
-        Write-Log "Windows Defender en modo ligero: analisis con maximo 15% de CPU y baja prioridad (la proteccion sigue activa)." -Tipo OK
-    } catch { Write-Log "Defender no se pudo ajustar (puede haber otro antivirus instalado)." -Tipo INFO -SinRegistro }
-}
 function Restaurar-DefenderLigero {
     try { Set-MpPreference -ScanAvgCPULoadFactor 50 -EnableLowCpuPriority $false -DisableCatchupFullScan $false -DisableCatchupQuickScan $false -ErrorAction Stop } catch {}
 }
@@ -11315,19 +12219,17 @@ function Accion-UltimoAccesoNtfsOff {
     catch { Write-Log "No se pudo ajustar el ultimo acceso de NTFS." -Tipo INFO -SinRegistro }
 }
 function Accion-AlmacenamientoReservadoOff {
-    try {
-        & "$env:WINDIR\System32\Dism.exe" /Online /Set-ReservedStorageState /State:Disabled | Out-Null
-        if ($LASTEXITCODE -eq 0) { Write-Log "Almacenamiento reservado de Windows desactivado (libera varios GB; se recupera al restaurar)." -Tipo OK }
-        else { Write-Log "El almacenamiento reservado no se pudo cambiar ahora (hay actualizaciones pendientes o no esta disponible)." -Tipo INFO -SinRegistro }
-    } catch { Write-Log "No se pudo cambiar el almacenamiento reservado." -Tipo INFO -SinRegistro }
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 180 -Bloque {
+        try { & "$env:WINDIR\System32\Dism.exe" /Online /Set-ReservedStorageState /State:Disabled | Out-Null; "$LASTEXITCODE" } catch { '-1' }
+    }
+    $c = ''; foreach ($x in $r) { $c = "$x" }
+    if ($c -eq '0') { Write-Log "Almacenamiento reservado de Windows desactivado (libera varios GB; se recupera al restaurar)." -Tipo OK }
+    else { Write-Log "El almacenamiento reservado no se pudo cambiar ahora (hay actualizaciones pendientes o no esta disponible)." -Tipo INFO -SinRegistro }
 }
 
 function Accion-LimpiezaProfundaDisco {
     if (-not (Requiere-Admin)) { return }
     $antes = 0; try { $antes = (New-Object System.IO.DriveInfo("$env:SystemDrive")).AvailableFreeSpace } catch {}
-    $wuCorria = $false
-    try { $wuCorria = ((Get-Service -Name wuauserv -ErrorAction Stop).Status -eq 'Running') } catch {}
-    try { Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue; Stop-Service -Name bits -Force -ErrorAction SilentlyContinue } catch {}
     $rutas = @(
         "$env:WINDIR\SoftwareDistribution\Download\*",
         "$env:ProgramData\Microsoft\Windows\WER\ReportQueue\*",
@@ -11345,8 +12247,14 @@ function Accion-LimpiezaProfundaDisco {
         "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Code Cache\*",
         "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\GPUCache\*"
     )
-    foreach ($r in $rutas) { try { Remove-Item -Path $r -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
-    if ($wuCorria) { try { Start-Service -Name wuauserv -ErrorAction SilentlyContinue } catch {} }
+    Invoke-EnSegundoPlano -Argumentos @(, $rutas) -TimeoutSeg 400 -Bloque {
+        param($rutas)
+        $wu = $false
+        try { $wu = ((Get-Service -Name wuauserv -ErrorAction Stop).Status -eq 'Running') } catch {}
+        try { & sc.exe stop wuauserv | Out-Null; & sc.exe stop bits | Out-Null; Start-Sleep -Seconds 2 } catch {}
+        foreach ($r in $rutas) { try { Remove-Item -Path $r -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
+        if ($wu) { try { Start-Service -Name wuauserv -ErrorAction SilentlyContinue } catch {} }
+    } | Out-Null
     $despues = $antes; try { $despues = (New-Object System.IO.DriveInfo("$env:SystemDrive")).AvailableFreeSpace } catch {}
     $mb = [math]::Max(0, [math]::Round(($despues - $antes) / 1MB))
     Write-Log "Limpieza profunda: cache de Windows Update, informes de errores, volcados de memoria, miniaturas y cache de Edge/Chrome. Liberado aprox.: $mb MB." -Tipo OK
@@ -11388,6 +12296,9 @@ function Restaurar-BajoConsumoAgresivo {
     }
     Restaurar-AjustesRegBC
     Restaurar-DefenderLigero
+    Restaurar-DefenderCompleto
+    Restaurar-TiendaCompleto
+    Restaurar-AhorroAvanzado
     try { fsutil behavior set disablelastaccess 2 | Out-Null } catch {}
     if ($estado -and [int]$estado.Reserved -eq 1) { try { & "$env:WINDIR\System32\Dism.exe" /Online /Set-ReservedStorageState /State:Enabled | Out-Null } catch {} }
     try {
@@ -11407,6 +12318,16 @@ function Restaurar-BajoConsumoAgresivo {
 # ---------------------------------------------------------------------------
 
 function Get-TipoDiscoSistema {
+    # La consulta es lenta (Get-Partition/Get-Disk/Get-PhysicalDisk): se hace una sola vez por sesion
+    if (-not $Script:CacheTipoDisco) {
+        $t = Get-TipoDiscoSistemaReal
+        if ($t -ne 'Desconocido') { $Script:CacheTipoDisco = $t }
+        return $t
+    }
+    return $Script:CacheTipoDisco
+}
+
+function Get-TipoDiscoSistemaReal {
     try {
         $l = "$env:SystemDrive".TrimEnd(':')
         $d = Get-Partition -DriveLetter $l -ErrorAction Stop | Get-Disk -ErrorAction Stop | Get-PhysicalDisk -ErrorAction Stop | Select-Object -First 1
@@ -11449,9 +12370,9 @@ function Get-HardwareInfo {
 # instala apps en segundo plano consume mucha CPU en equipos lentos. Se frena y se evita que vuelva a empezar sola.
 function Accion-FrenarStoreAppx {
     if (-not (Requiere-Admin)) { return }
-    foreach ($n in @('AppXSvc','ClipSVC')) { try { Stop-Service -Name $n -Force -ErrorAction SilentlyContinue } catch {} }
+    foreach ($n in @('AppXSvc','ClipSVC')) { try { & sc.exe stop $n | Out-Null } catch {} }
     foreach ($n in @('WinStore.App','StoreExperienceHost')) { foreach ($p in @(Get-Process -Name $n -ErrorAction SilentlyContinue)) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch {} } }
-    Write-Log "Microsoft Store frenada: instalacion de apps (wsappx) detenida y actualizaciones automaticas de la Tienda desactivadas. La Tienda sigue funcionando al abrirla." -Tipo OK
+    Write-Log "Instalacion de apps en segundo plano (wsappx) detenida." -Tipo OK
 }
 
 # Mide durante unos segundos que procesos usan CPU, identifica que servicios hay dentro de cada svchost y
@@ -11486,7 +12407,7 @@ function Accion-AnalizarYFrenarCPU {
             $txt = if ($nombres.Count) { $nombres -join ', ' } else { 'servicios del sistema' }
             $detenidos = New-Object System.Collections.Generic.List[string]
             foreach ($n in $nombres) {
-                if ($segurosSvc -contains $n) { try { Stop-Service -Name $n -Force -ErrorAction Stop; $detenidos.Add($n) } catch {} }
+                if ($segurosSvc -contains $n) { try { & sc.exe stop $n | Out-Null; $detenidos.Add($n) } catch {} }
             }
             if ($detenidos.Count) { Write-Log "CPU $($x.Pct)% - svchost ($txt): detenidos temporalmente $($detenidos -join ', ')." -Tipo OK }
             else { Write-Log "CPU $($x.Pct)% - svchost ($txt): servicio del sistema, no se toca." -Tipo INFO -SinRegistro }
@@ -11583,11 +12504,17 @@ function Get-PlanAutomatico {
     $adv.Add("Tarjetas inteligentes y escaneres/camaras de adquisicion: dejan de funcionar.")
     $adv.Add("Zona Wi-Fi movil: no se podra compartir Internet desde el equipo.")
     $adv.Add("Programas de inicio: OneDrive, Teams, Spotify, Discord y similares ya no arrancan solos.")
-    $adv.Add("Tienda de Windows: las apps no se actualizan solas (actualizalas a mano desde la Tienda).")
+    $adv.Add("Microsoft Store: se DESINSTALA; no podras instalar ni actualizar apps de la Tienda (los programas normales y winget siguen funcionando).")
     $adv.Add("Restaurar sistema: limitado al 3% del disco (menos puntos de restauracion).")
     $adv.Add("Mantenimiento automatico: desactivado; Windows no hara limpieza ni optimizacion por su cuenta.")
-    $adv.Add("Windows Defender: los analisis seran mas lentos (maximo 15% de CPU); la proteccion en tiempo real sigue activa.")
+    $adv.Add("Windows Defender: se QUITA por completo. Sin antivirus no abras archivos ni enlaces desconocidos; instala tu antivirus original despues (se reactiva con 'Restaurar'). Si la 'Proteccion contra alteraciones' esta activa, te pedira desactivarla en Seguridad de Windows.")
+    $adv.Add("Apps preinstaladas: se desinstalan Xbox, Noticias, Clima, Solitario, Mapas, Mail y Calendario, Teams, Clipchamp y juegos promocionados (se reinstalan desde la Tienda).")
+    $adv.Add("Escritorio remoto, carpetas sin conexion y sincronizacion de contactos/calendario: apagados. Si no se detecta impresora, Bluetooth o lector de huella, esos servicios tambien se apagan.")
     $adv.Add("Almacenamiento reservado: desactivado; con el disco casi lleno, una actualizacion grande podria fallar.")
+    if ($extremo) {
+        $adv.Add("OneDrive: se desinstala (los archivos de su carpeta no se borran).")
+        $adv.Add("Carpetas compartidas en red: apagadas (se puede acceder a otros equipos, pero este no comparte).")
+    }
     if ($extremo) { $adv.Add("Windows Update: ya no se instala solo; tendras que buscar e instalar las actualizaciones tu mismo (hazlo cada cierto tiempo por seguridad).") }
     [PSCustomObject]@{ Nivel = $nivel; Extremo = $extremo; Opciones = $op; Motivos = $motivos.ToArray(); Advertencias = $adv.ToArray(); Abiertas = $abiertas.ToArray() }
 }
@@ -11653,30 +12580,31 @@ $Script:BCOpc = @{ SaltarComponentes = $false; AnalisisTemprano = $false }
 function Get-PasosBC {
     $todos = @(
         @{ Id='guardar'; Txt="Guardando el estado original para poder restaurarlo..."; Accion={ Guardar-EstadoBC } },
-        @{ Txt="Desactivando servicios de telemetria y funciones poco usadas..."; Accion={ foreach ($s in $Script:ServiciosBloatComun) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener } } },
-        @{ Txt="Desactivando SysMain, indexacion, panel tactil, fax y Xbox..."; Accion={
-            foreach ($s in $Script:ServiciosBCBase) { Set-ServicioSeguro -Nombre $s -StartupType Disabled -Detener }
-        } },
-        @{ Txt="Desactivando servicios extra (errores, diagnostico, UPnP, dispositivos conectados...)..."; Accion={ Accion-ServiciosBCAgresivo } },
-        @{ Txt="Frenando Microsoft Store e instalacion de apps en segundo plano (wsappx)..."; Accion={ Accion-FrenarStoreAppx } },
+        @{ Txt="Desactivando servicios de telemetria y funciones poco usadas..."; Accion={ Accion-DesactivarServicios -Nombres $Script:ServiciosBloatComun -Etiqueta 'Servicios de telemetria' } },
+        @{ Txt="Desactivando SysMain, indexacion, panel tactil, fax y Xbox..."; Accion={ Accion-DesactivarServicios -Nombres $Script:ServiciosBCBase -Etiqueta 'SysMain, busqueda, Xbox y fax' } },
+        @{ Txt="Desactivando servicios extra (errores, diagnostico, escritorio remoto, sincronizacion, impresion/Bluetooth sin uso...)..."; Accion={ Accion-ServiciosBCAgresivo } },
+        @{ Txt="Desinstalando apps preinstaladas que no se usan (puede tardar unos minutos)..."; Accion={ Accion-QuitarAppsPreinstaladas } },
+        @{ Txt="Desinstalando Microsoft Store..."; Accion={ Accion-QuitarTienda } },
+        @{ Txt="Deteniendo la instalacion de apps en segundo plano (wsappx)..."; Accion={ Accion-FrenarStoreAppx } },
         @{ Txt="Quitando transparencia, animaciones y sombras (cambio visible al instante)..."; Accion={ Accion-TransparenciaOff; Accion-EfectosRendimientoMaximo } },
         @{ Txt="Bloqueando apps en segundo plano y sugerencias de Windows..."; Accion={ Accion-BackgroundAppsOff; Accion-SugerenciasOff } },
         @{ Txt="Aplicando ajustes de ahorro (Edge, Cortana, Copilot, Widgets, telemetria, Tienda)..."; Accion={ Aplicar-AjustesRegBC -Extremo:$Script:BCExtremo } },
         @{ Txt="Desactivando programas de inicio no esenciales (OneDrive, Teams, Spotify, Discord...)..."; Accion={ Accion-OneDriveStartupOff; Accion-InicioNoEsencialOff } },
         @{ Txt="Desactivando tareas programadas de telemetria y diagnostico..."; Accion={ Accion-TareasBCAgresivoOff } },
-        @{ Txt="Poniendo Windows Defender en modo ligero..."; Accion={ Accion-DefenderLigero } },
+        @{ Txt="Quitando Windows Defender por completo..."; Accion={ Accion-DefenderDesactivar } },
+        @{ Txt="Desinstalando OneDrive (nivel maximo)..."; Accion={ if ($Script:BCExtremo) { Accion-OneDriveDesinstalar } } },
         @{ Txt="Desactivando hibernacion y Delivery Optimization..."; Accion={ Accion-HibernacionOff; Accion-DeliveryOptimizationOff } },
         @{ Txt="Limitando espacio de Restaurar sistema..."; Accion={ Accion-RestaurarSistemaLimitar } },
         @{ Txt="Agrupando servicios de Windows para reducir procesos en ejecucion..."; Accion={ Accion-AgruparServiciosSvcHost } },
         @{ Txt="Cerrando aplicaciones y actualizadores en segundo plano..."; Accion={ Accion-CerrarProcesosNoEsenciales; Accion-CerrarProcesosBCExtra } },
-        @{ Txt="Configurando la CPU en modo eficiente y priorizando primer plano..."; Accion={ Aplicar-CPUEficienteSilencioso; Accion-PriorizarPrimerPlano } },
+        @{ Txt="Configurando la CPU en modo eficiente y priorizando primer plano..."; Accion={ Aplicar-CPUEficienteSilencioso; Accion-PriorizarPrimerPlano; Accion-AhorroAvanzado } },
         @{ Txt="Reduciendo escrituras en disco y liberando almacenamiento reservado..."; Accion={ Accion-UltimoAccesoNtfsOff; Accion-AlmacenamientoReservadoOff } },
-        @{ Txt="Limpiando temporales, papelera y cache DNS..."; Accion={ Accion-LimpiarTemporales; Accion-VaciarPapelera; Accion-VaciarDNS } },
+        @{ Txt="Limpiando temporales y papelera..."; Accion={ Accion-LimpiarTemporales; Accion-VaciarPapelera } },
         @{ Txt="Limpieza profunda del disco (Windows Update, errores, navegadores)..."; Accion={ Accion-LimpiezaProfundaDisco } },
         @{ Id='comp'; Txt="Limpiando componentes antiguos de Windows (puede tardar unos minutos)..."; Accion={ Accion-LimpiarComponentesWindows } },
         @{ Txt="Buscando que proceso sigue consumiendo CPU y frenando los innecesarios..."; Accion={ Accion-AnalizarYFrenarCPU } },
         @{ Txt="Recargando el escritorio para aplicar los efectos visuales..."; Accion={ Reiniciar-ExplorerSilencioso } },
-        @{ Txt="Liberando memoria RAM (incluida la lista en espera)..."; Accion={ Liberar-RAMSilencioso -Profundo } }
+        @{ Txt="Comprobando que cada cambio se aplico de verdad..."; Accion={ Verificar-AjustesPerfil -Perfil 'BC' } }
     )
     $res = New-Object System.Collections.Generic.List[object]
     foreach ($p in $todos) {
@@ -11708,8 +12636,9 @@ function Ejecutar-PerfilBC {
 
 function Perfil-BajoConsumo {
     if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "PERFIL BAJO CONSUMO (AGRESIVO) - para equipos con poca RAM, CPU lenta o disco lleno/lento.`n`nRAM: apaga servicios extra (SysMain, busqueda, diagnostico, telemetria, Xbox, UPnP, etc.), bloquea todas las apps en segundo plano, desactiva Cortana/Copilot/Widgets/busqueda web, Edge en segundo plano, cierra actualizadores y limpia la memoria incluida la lista en espera.`n`nCPU: frena la Tienda y la instalacion de apps (wsappx), plan Equilibrado eficiente, Defender en modo ligero, tareas de telemetria y mantenimiento automatico desactivados, servicios agrupados en menos procesos y, al final, mide que proceso sigue consumiendo y detiene los innecesarios.`n`nALMACENAMIENTO: hibernacion desactivada, menos escrituras de NTFS, almacenamiento reservado desactivado, limpieza profunda (Windows Update, informes de error, volcados, miniaturas, cache de Edge/Chrome, componentes antiguos de Windows) y Restaurar sistema limitado.`n`nTodo se puede revertir con 'Restaurar configuracion predeterminada' (guarda el estado original de los servicios). La limpieza de componentes puede tardar unos minutos.`n`n¿Aplicar perfil de Bajo consumo agresivo?")) { return }
-    Ejecutar-PerfilBC -Titulo "Perfil Bajo consumo (agresivo)" -Extremo $false -Nota "REINICIA el equipo para que se apliquen por completo los servicios desactivados y el agrupamiento de procesos. Si algo te hace falta (impresion, busqueda de Windows, etc.), usa 'Restaurar configuracion predeterminada': devuelve los servicios a su estado original exacto."
+    if (-not (Show-Confirm "PERFIL BAJO CONSUMO (AGRESIVO) - para equipos con poca RAM, CPU lenta o disco lleno/lento.`n`nRAM: apaga servicios extra (SysMain, busqueda, diagnostico, telemetria, Xbox, UPnP, etc.), bloquea todas las apps en segundo plano, desactiva Cortana/Copilot/Widgets/busqueda web, Edge en segundo plano, cierra actualizadores y desactiva programas de inicio.`n`nCPU: desinstala Microsoft Store, quita Windows Defender por completo (instala despues tu antivirus original), plan Equilibrado eficiente, tareas de telemetria y mantenimiento automatico desactivados, servicios agrupados en menos procesos y, al final, mide que proceso sigue consumiendo y detiene los innecesarios.`n`nAPPS Y SERVICIOS: desinstala las apps preinstaladas que no se usan (Xbox, Noticias, Clima, Solitario, Mapas, Teams, Mail y Calendario, juegos promocionados...; se reinstalan desde la Tienda) y apaga servicios sin uso: escritorio remoto, sincronizacion de contactos, carpetas sin conexion y, si no tienes impresora, Bluetooth o lector de huella, esos tambien.`n`nALMACENAMIENTO: hibernacion desactivada, menos escrituras de NTFS, almacenamiento reservado desactivado, limpieza profunda (Windows Update, informes de error, volcados, miniaturas, cache de Edge/Chrome, componentes antiguos de Windows) y Restaurar sistema limitado.`n`nTodo se puede revertir con 'Restaurar configuracion predeterminada' (guarda el estado original de los servicios). La limpieza de componentes puede tardar unos minutos.`n`n¿Aplicar perfil de Bajo consumo agresivo?")) { return }
+    $max = Show-Confirm "NIVEL MAXIMO (opcional) - para dejar el equipo lo mas ligero posible.`n`nAdemas de lo anterior:`n• Desinstala OneDrive (tus archivos no se borran).`n• Apaga el servicio de carpetas compartidas en red.`n• Windows Update solo avisa, no instala solo.`n`n¿Activar tambien el NIVEL MAXIMO?"
+    Ejecutar-PerfilBC -Titulo "Perfil Bajo consumo (agresivo)" -Extremo $max -Nota "REINICIA el equipo para que se apliquen por completo los servicios desactivados y el agrupamiento de procesos. Si algo te hace falta (impresion, busqueda de Windows, etc.), usa 'Restaurar configuracion predeterminada': devuelve los servicios a su estado original exacto."
 }
 
 function Perfil-Automatico {
@@ -11732,7 +12661,7 @@ function Perfil-Automatico {
 
 function Perfil-EquipoModerno {
     if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "Perfil para equipos con buen hardware (SSD/NVMe, 8GB+ RAM).`n`nSe desactivaran servicios de telemetria y funciones poco usadas (mapas, fax, Xbox, etc.), sugerencias de Windows, Delivery Optimization y programas de inicio no esenciales, manteniendo la busqueda, el precargado y la apariencia de Windows; se activara Storage Sense e Inicio rapido, se optimizara el SSD (TRIM), se limpiaran temporales y se liberara RAM; el plan de energia quedara en Equilibrado.`n`nAl final veras un resumen con los cambios.`n`n¿Aplicar perfil de Equipo moderno?")) { return }
+    if (-not (Show-Confirm "Perfil para equipos con buen hardware (SSD/NVMe, 8GB+ RAM).`n`nSe desactivaran servicios de telemetria y funciones poco usadas (mapas, fax, Xbox, etc.), sugerencias de Windows, Delivery Optimization y programas de inicio no esenciales, manteniendo la busqueda, el precargado y la apariencia de Windows; se activara Storage Sense e Inicio rapido, se optimizara el SSD (TRIM), se limpiaran temporales; el plan de energia quedara en Equilibrado.`n`nAl final veras un resumen con los cambios.`n`n¿Aplicar perfil de Equipo moderno?")) { return }
 
     $antes = Get-InstantaneaSistema
     $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
@@ -11756,7 +12685,7 @@ function Perfil-EquipoModerno {
         @{ Txt="Optimizando el SSD (TRIM)..."; Accion={ Optimizar-DiscoTrimSilencioso } },
         @{ Txt="Limpiando archivos temporales..."; Accion={ Accion-LimpiarTemporales } },
         @{ Txt="Estableciendo plan de energia Equilibrado..."; Accion={ powercfg -setactive SCHEME_BALANCED; Write-Log "Plan de energia establecido en Equilibrado." -Tipo OK } },
-        @{ Txt="Liberando memoria RAM..."; Accion={ Liberar-RAMSilencioso } }
+        @{ Txt="Comprobando que cada cambio se aplico de verdad..."; Accion={ Verificar-AjustesPerfil -Perfil 'Moderno' } }
     )
     Invoke-PasosPerfil -Ventana $prog -Pasos $pasos
     Finalizar-Perfil -Ventana $prog -Titulo "Perfil Equipo moderno" -Antes $antes -Nota "Reinicia el equipo para que todos los cambios surtan efecto."
@@ -11764,7 +12693,7 @@ function Perfil-EquipoModerno {
 
 function Perfil-Gamer {
     if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "Perfil para mejorar el rendimiento en juegos.`n`nAlto rendimiento, CPU con todos los nucleos disponibles, Modo juego, GPU acelerada por hardware, baja latencia (prioridad de tareas en tiempo real), sin limite de red para multimedia ni algoritmo de Nagle (menos ping), mouse sin aceleracion (punteria 1:1), animaciones y sombras de Windows desactivadas al instante, grabacion en segundo plano desactivada, SysMain/indexacion desactivados, Delivery Optimization desactivado, apps no esenciales cerradas (Discord, Spotify, etc.) y la RAM liberada (los servicios de Xbox se mantienen activos).`n`nAl final se recargara el escritorio y veras un resumen con los cambios.`n`n¿Aplicar perfil Gamer?")) { return }
+    if (-not (Show-Confirm "Perfil para mejorar el rendimiento en juegos.`n`nAlto rendimiento, CPU con todos los nucleos disponibles, Modo juego, GPU acelerada por hardware, baja latencia (prioridad de tareas en tiempo real), sin limite de red para multimedia ni algoritmo de Nagle (menos ping), mouse sin aceleracion (punteria 1:1), animaciones y sombras de Windows desactivadas al instante, grabacion en segundo plano desactivada, SysMain/indexacion desactivados, Delivery Optimization desactivado, apps no esenciales cerradas (Discord, Spotify, etc.) (los servicios de Xbox se mantienen activos).`n`nAl final se recargara el escritorio y veras un resumen con los cambios.`n`n¿Aplicar perfil Gamer?")) { return }
 
     $antes = Get-InstantaneaSistema
     $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
@@ -11799,7 +12728,7 @@ function Perfil-Gamer {
         @{ Txt="Desactivando la aceleracion del mouse (punteria 1:1)..."; Accion={ Accion-AceleracionMouseOff } },
         @{ Txt="Quitando animaciones y sombras de Windows (cambio visible al instante)..."; Accion={ Accion-EfectosRendimientoMaximo } },
         @{ Txt="Recargando el escritorio para aplicar los efectos visuales..."; Accion={ Reiniciar-ExplorerSilencioso } },
-        @{ Txt="Liberando memoria RAM (incluida la lista en espera)..."; Accion={ Liberar-RAMSilencioso -Profundo } }
+        @{ Txt="Comprobando que cada cambio se aplico de verdad..."; Accion={ Verificar-AjustesPerfil -Perfil 'Gamer' } }
     )
     Invoke-PasosPerfil -Ventana $prog -Pasos $pasos
     Finalizar-Perfil -Ventana $prog -Titulo "Perfil Gamer" -Antes $antes -Nota "Reinicia el equipo para que la GPU por hardware y la baja latencia surtan efecto completo."
@@ -11807,7 +12736,7 @@ function Perfil-Gamer {
 
 function Perfil-Restaurar {
     if (-not (Requiere-Admin)) { return }
-    if (-not (Show-Confirm "Esto revertira los cambios de los perfiles rapidos y del modo manual: servicios a Automatico/Manual, plan de energia a Equilibrado, efectos visuales, transparencia, apps en segundo plano, sugerencias, hibernacion, Delivery Optimization y prioridad de CPU a sus valores por defecto.`n`n¿Restaurar configuracion predeterminada?")) { return }
+    if (-not (Show-Confirm "Esto revertira los cambios de los perfiles rapidos y del modo manual: servicios a Automatico/Manual, plan de energia a Equilibrado, efectos visuales, transparencia, apps en segundo plano, sugerencias, hibernacion, Delivery Optimization y prioridad de CPU a sus valores por defecto. Tambien reactiva Windows Defender y reinstala Microsoft Store si los quitaste (necesita Internet); las apps preinstaladas y OneDrive no se restauran solas.`n`n¿Restaurar configuracion predeterminada?")) { return }
 
     $antes = Get-InstantaneaSistema
     $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
@@ -13718,6 +14647,10 @@ function Global:Tick-GraficosInicio {
     $E = $Global:GrafInicio
     $w = $Global:VentanaPrincipal
     if (-not $E.Iniciado -or $E.Pausa -or -not $w) { return }
+    # Con la ventana minimizada solo se vigilan las temperaturas; fuera de la pestaña Inicio no se leen GPU ni se redibuja
+    if ($w.WindowState -eq [System.Windows.WindowState]::Minimized) { try { Gestionar-LecturaTemperaturas } catch {}; return }
+    $enInicio = $true
+    try { $enInicio = ($w.FindName('TabControlPrincipal').SelectedIndex -eq 0) } catch {}
     # CPU total y por hilo logico
     try {
         if ($E.CtrCpu) {
@@ -13755,7 +14688,7 @@ function Global:Tick-GraficosInicio {
     } catch { Registrar-FalloGrafico 'lectura disco' $_ }
     # GPU: una tarjeta (con su grafico) por cada adaptador
     try {
-        if ($E.GpuDisponible -and $E.GpuCardsLista) {
+        if ($enInicio -and $E.GpuDisponible -and $E.GpuCardsLista) {
             $ad = @(Leer-UsoGpu)
             $porKey = @{}
             foreach ($a in $ad) { $porKey[$a.Luid] = $a }
@@ -13773,7 +14706,7 @@ function Global:Tick-GraficosInicio {
             }
         }
     } catch { Registrar-FalloGrafico 'lectura GPU' $_ }
-    Redibujar-GraficosInicio
+    if ($enInicio) { Redibujar-GraficosInicio }
     try { Gestionar-LecturaTemperaturas } catch { Registrar-FalloGrafico 'temperaturas (ciclo)' $_ }
     # Espacio libre de los discos: se refresca cada ~30 s
     $E.TickDiscos = $E.TickDiscos + 1
@@ -13965,6 +14898,16 @@ function Iniciar-GraficosInicio {
 }
 
 function Actualizar-PanelInicio {
+    # Solo lecturas ligeras (sin consultas WMI lentas): se ejecuta en el hilo de la ventana y no debe congelarla.
+    if (-not $Script:InfoOsInicio) {
+        $cap = 'Windows'; $bld = ''
+        try { $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop; $cap = "$($cv.ProductName)"; $bld = "$($cv.CurrentBuild)" } catch {}
+        try { if ([int]$bld -ge 22000) { $cap = $cap -replace 'Windows 10', 'Windows 11' } } catch {}
+        $boot = $null
+        try { $boot = (Get-Process -Id 4 -ErrorAction Stop).StartTime } catch {}
+        if (-not $boot) { try { $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { $boot = Get-Date } }
+        $Script:InfoOsInicio = @{ Caption = $cap; Build = $bld; Boot = $boot }
+    }
     # La CPU y la RAM se actualizan cada segundo desde los graficos en vivo;
     # esta consulta (mas lenta) solo se usa si los contadores no estan disponibles.
     if (-not $Global:GrafInicio.ContadoresCpu) {
@@ -13976,24 +14919,22 @@ function Actualizar-PanelInicio {
     }
 
     try {
-        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-        $ramTotalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
-        $ramLibreGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
-        $ramUsadaGB = [math]::Round($ramTotalGB - $ramLibreGB, 1)
-        $ramPct = if ($os.TotalVisibleMemorySize -gt 0) { [math]::Round((($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) / $os.TotalVisibleMemorySize) * 100) } else { 0 }
-        $window.FindName("TxtInicioRAM").Text = "$ramPct%"
-
-        $tiempoActivo = (Get-Date) - $os.LastBootUpTime
-        $window.FindName("TxtInicioUptime").Text = "{0}d {1}h {2}m" -f $tiempoActivo.Days, $tiempoActivo.Hours, $tiempoActivo.Minutes
-
-        $window.FindName("TxtInicioSistema").Text = "$($os.Caption) (Build $($os.BuildNumber)) | RAM: $ramUsadaGB GB usados de $ramTotalGB GB"
+        $m = [DragonMem]::Leer()
+        if ($m) {
+            $ramTotalGB = [math]::Round($m[1] / 1GB, 1)
+            $ramUsadaGB = [math]::Round(($m[1] - $m[2]) / 1GB, 1)
+            $window.FindName("TxtInicioRAM").Text = "$([int]$m[0])%"
+            $t = (Get-Date) - $Script:InfoOsInicio.Boot
+            $window.FindName("TxtInicioUptime").Text = "{0}d {1}h {2}m" -f $t.Days, $t.Hours, $t.Minutes
+            $window.FindName("TxtInicioSistema").Text = "$($Script:InfoOsInicio.Caption) (Build $($Script:InfoOsInicio.Build)) | RAM: $ramUsadaGB GB usados de $ramTotalGB GB"
+        }
     } catch {}
 
     try {
-        $discoC = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop
-        if ($discoC -and $discoC.Size -gt 0) {
-            $pctUsado = [math]::Round((($discoC.Size - $discoC.FreeSpace) / $discoC.Size) * 100)
-            $window.FindName("TxtInicioDisco").Text = "Unidad C: usada al $pctUsado%"
+        $di = New-Object System.IO.DriveInfo("$env:SystemDrive")
+        if ($di.TotalSize -gt 0) {
+            $pctUsado = [math]::Round((($di.TotalSize - $di.AvailableFreeSpace) / $di.TotalSize) * 100)
+            $window.FindName("TxtInicioDisco").Text = "Unidad $($di.Name.TrimEnd('\')) usada al $pctUsado%"
         }
     } catch {}
 }
@@ -16159,10 +17100,16 @@ Marcar-Arranque 'funciones y recursos'
                         <Grid>
                             <!-- Panel: Perfiles de Optimizacion -->
                             <WrapPanel x:Name="PanelPerfiles">
+                                <Button x:Name="BtnPerfilVerificar" Width="300" Height="90" BorderBrush="#29D398">
+                                    <StackPanel>
+                                        <TextBlock Text="📊 Verificar rendimiento del equipo" FontWeight="Bold" TextWrapping="Wrap"/>
+                                        <TextBlock Text="Mide como rinde el equipo ahora y te dice que perfil usar. Al aplicar un perfil vuelve a medir y compara para confirmar los cambios reales." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
+                                    </StackPanel>
+                                </Button>
                                 <Button x:Name="BtnPerfilBajo" Width="300" Height="90">
                                     <StackPanel>
                                         <TextBlock Text="🔋 Equipo de bajo consumo" FontWeight="Bold" TextWrapping="Wrap"/>
-                                        <TextBlock Text="MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios y tareas, limita Defender, limpia a fondo el disco y libera RAM. Reversible." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
+                                        <TextBlock Text="MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios y tareas, quita apps preinstaladas, Microsoft Store y Windows Defender, y limpia a fondo el disco. Reversible." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
                                     </StackPanel>
                                 </Button>
                                 <Button x:Name="BtnPerfilAuto" Width="300" Height="90" BorderBrush="#29D398">
@@ -17132,6 +18079,11 @@ Marcar-Arranque 'funciones y recursos'
                                     <ComboBoxItem Content="Aplicacion / servicio"/>
                                     <ComboBoxItem Content="Controlador (driver)"/>
                                     <ComboBoxItem Content="Autoverificacion"/>
+                                    <ComboBoxItem Content="Rendimiento (saturacion)"/>
+                                    <ComboBoxItem Content="Red"/>
+                                    <ComboBoxItem Content="Seguridad"/>
+                                    <ComboBoxItem Content="Programa (Dragon Tool)"/>
+                                    <ComboBoxItem Content="Servicio critico"/>
                                 </ComboBox>
                                 <TextBlock Text="Tipo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <ComboBox x:Name="CmbFiltroTipoError" Width="140">
@@ -17535,6 +18487,7 @@ $window.FindName("BtnMinLog").Add_Click({
     } catch {}
 })
 
+$window.FindName("BtnPerfilVerificar").Add_Click({ try { Accion-VerificarRendimiento } catch { Registrar-FalloInterno 'verificar rendimiento' $_ } })
 $window.FindName("BtnPerfilBajo").Add_Click({ Perfil-BajoConsumo })
 $window.FindName("BtnPerfilModerno").Add_Click({ Perfil-EquipoModerno })
 $window.FindName("BtnPerfilGamer").Add_Click({ Perfil-Gamer })
@@ -18785,14 +19738,14 @@ function Global:Cargar-RegistroErrores {
 # ---------------------------------------------------------------------------
 $Global:NotifActiva = $true
 $Global:CfgCargando = $false
-$Global:CategoriasNotif = @('Hardware','Apagado inesperado','Pantalla azul','Congelamiento','Bateria / energia','Aplicacion / servicio','Controlador (driver)')
+$Global:CategoriasNotif = @('Hardware','Apagado inesperado','Pantalla azul','Congelamiento','Bateria / energia','Aplicacion / servicio','Controlador (driver)','Seguridad','Programa (Dragon Tool)','Servicio critico','Disco: varios indicios de fallo')
 $Global:ToastAbiertos = New-Object System.Collections.ArrayList
 $Global:ToastCola = New-Object System.Collections.ArrayList
 $Global:ToastUltimos = @{}
 $Global:ToastProcesando = $false
 $Global:ResumenAntiguos = @{ N = 0; Err = 0; Timer = $null }
 $Global:ConfigRuta = Join-Path $env:LOCALAPPDATA 'TheDragonTool'
-$Global:VivoEstado = [hashtable]::Synchronized(@{ Hist = (New-Object System.Collections.ArrayList); NR = @{}; NoCargaDesde = $null; DescDesde = $null; TeniaBat = $false })
+$Global:VivoEstado = [hashtable]::Synchronized(@{ Hist = (New-Object System.Collections.ArrayList); NR = @{}; NoCargaDesde = $null; DescDesde = $null; TeniaBat = $false; Crash = @{}; Pausa = $false; PausaHasta = $null; CpuAlto = 0; DiscoAlto = 0; MemAlta = 0; YoAlto = 0; GwFalla = 0; NetFalla = 0 })
 $Script:VivoScan = $null
 $Script:VivoTimer = $null
 $Script:VivoPoll = $null
@@ -19047,6 +20000,8 @@ $Script:ScanVivoSB = {
     }
     function Corta($t, $n) { $t = "$t"; if ($t.Length -gt $n) { return $t.Substring(0, $n) + '...' } else { return $t } }
     function Cubo($min) { return [int64][math]::Floor($ahora.Ticks / ($min * 600000000)) }
+    $enPausa0 = ($Estado.Pausa -eq $true) -or ($Estado.PausaHasta -and $ahora -lt $Estado.PausaHasta)
+    if (-not $Estado.Crash) { $Estado.Crash = @{} }
 
     # 1) Errores de programas, servicios y controladores (visor de sucesos)
     $defs = @(
@@ -19069,6 +20024,10 @@ $Script:ScanVivoSB = {
                                elseif ($mod -match '(?i)ntdll|kernelbase|kernel32') { "Fallo generico del programa: actualiza o reinstala '$app' y ejecuta 'sfc /scannow' para reparar archivos de Windows." }
                                elseif ($mod -match '(?i)\.dll$') { "Repara o reinstala '$app'. El modulo '$mod' fallo (componente danado, complemento incompatible o controlador)." }
                                else { "Actualiza o reinstala '$app'. Si se repite, revisa si hay una version mas nueva o un conflicto con otro programa." }
+                        if ($app) {
+                            if (-not $Estado.Crash.ContainsKey($app)) { $Estado.Crash[$app] = New-Object System.Collections.ArrayList }
+                            if (-not $Estado.Crash[$app].Contains($e.TimeCreated)) { [void]$Estado.Crash[$app].Add($e.TimeCreated) }
+                        }
                         Nuevo $e.TimeCreated 'ERROR' 'Aplicacion / servicio' "Programa: $app" "El programa '$app' se cerro por un error (modulo: $mod, excepcion: $cod)." $sol "app|$app|$mod|$cubo10"
                     }
                     'Application Hang' {
@@ -19088,12 +20047,31 @@ $Script:ScanVivoSB = {
                             default { 'Un servicio o controlador no pudo iniciarse. Reinicia el equipo; si persiste, repara o reinstala el programa o controlador relacionado.' }
                         }
                         $tipo = if ($e.Level -le 2) { 'ERROR' } else { 'AVISO' }
+                        # No son fallos: servicios de Intel que se detienen solos, o servicios que Windows/perfiles detienen a proposito
+                        $ruido = ($linea -match '(?i)queencreek|Intel\(R\) Energy Server|Energy Server Service') -or ($enPausa0 -and $e.Id -in 7031, 7034)
+                        if (-not $ruido) {
                         Nuevo $e.TimeCreated $tipo $(if ($drv) { 'Controlador (driver)' } else { 'Aplicacion / servicio' }) "Servicio de Windows (Id $($e.Id))" $linea $sol "scm|$($e.Id)|$linea|$cubo10"
+                        }
                     }
                 }
             } catch {}
         }
     }
+
+
+    # 1b) Programas inestables: el mismo programa falla 3 o mas veces en 24 h (un solo cierre aislado no se considera)
+    try {
+        $lim = $ahora.AddHours(-24)
+        foreach ($k in @($Estado.Crash.Keys)) {
+            $lst = $Estado.Crash[$k]
+            $nuevaL = New-Object System.Collections.ArrayList
+            foreach ($t in $lst.ToArray()) { if ($t -ge $lim) { [void]$nuevaL.Add($t) } }
+            $Estado.Crash[$k] = $nuevaL
+            if ($nuevaL.Count -ge 3 -and $k -ne '') {
+                Nuevo $ahora 'ERROR' 'Aplicacion / servicio' "Programa inestable: $k" "El programa '$k' fallo $($nuevaL.Count) veces en las ultimas 24 horas." "No es un fallo aislado: actualiza o reinstala '$k', revisa si hay un complemento o controlador en conflicto y ejecuta 'sfc /scannow'. Si es un juego o programa de video, reinstala el controlador de la tarjeta grafica." "inest|$k|$(Cubo 180)"
+            }
+        }
+    } catch {}
 
     # 2) Apagado inesperado (solo al abrir): falta de energia, bateria agotada, congelamiento o pantalla azul
     if ($Inicio) {
@@ -19245,6 +20223,124 @@ $Script:ScanVivoSB = {
         }
     } catch {}
 
+    # 6) Saturacion sostenida de CPU / disco / memoria (solo si dura varios minutos; no cuenta pruebas, perfiles ni los primeros 10 min tras arrancar)
+    try {
+        $enPausa = ($Estado.Pausa -eq $true) -or ($Estado.PausaHasta -and $ahora -lt $Estado.PausaHasta)
+        if (-not $Estado.Boot) { try { $Estado.Boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { $Estado.Boot = $ahora.AddHours(-1) } }
+        $upMin = ($ahora - $Estado.Boot).TotalMinutes
+        if ($enPausa -or $upMin -lt 10) {
+            $Estado.CpuAlto = 0; $Estado.DiscoAlto = 0; $Estado.MemAlta = 0; $Estado.SnapProc = $null
+        } else {
+            $cpuU = -1; $dskU = -1; $dskQ = 0; $commit = -1; $ramU = -1
+            try { $cpuU = [int](Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'" -ErrorAction Stop).PercentProcessorTime } catch {}
+            try { $pdk = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction Stop; $dskU = [int]$pdk.PercentDiskTime; $dskQ = [double]$pdk.CurrentDiskQueueLength } catch {}
+            try { $commit = [int](Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory -ErrorAction Stop).PercentCommittedBytesInUse } catch {}
+            $totMB = 0
+            try { $o2 = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $totMB = [math]::Round($o2.TotalVisibleMemorySize / 1024); $ramU = [int][math]::Round(100 * (1 - ($o2.FreePhysicalMemory / $o2.TotalVisibleMemorySize))) } catch {}
+            $Estado.CpuAlto = if ($cpuU -ge 95) { [int]$Estado.CpuAlto + 1 } else { 0 }
+            $Estado.DiscoAlto = if ($dskU -ge 98 -and $dskQ -ge 2) { [int]$Estado.DiscoAlto + 1 } else { 0 }
+            $Estado.MemAlta = if ($commit -ge 95 -or $ramU -ge 96) { [int]$Estado.MemAlta + 1 } else { 0 }
+            $hayAlto = ($Estado.CpuAlto -ge 1) -or ($Estado.DiscoAlto -ge 1) -or ($Estado.MemAlta -ge 1)
+            # Quien consume: se compara la CPU de cada proceso con la muestra anterior (solo mientras hay carga alta)
+            if ($hayAlto) {
+                $snap = @{}
+                foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) { try { $snap[[int]$p.Id] = @{ N = "$($p.ProcessName)"; T = [double]$p.TotalProcessorTime.TotalSeconds; M = [double]$p.WorkingSet64 } } catch {} }
+                if ($Estado.SnapProc -and (($ahora - $Estado.SnapProc.At).TotalSeconds -le 75)) {
+                    $seg = [math]::Max(1.0, ($ahora - $Estado.SnapProc.At).TotalSeconds)
+                    $nc = [math]::Max(1, [Environment]::ProcessorCount)
+                    $mejor = $null; $mejorPct = 0.0
+                    foreach ($id in $snap.Keys) {
+                        if ($Estado.SnapProc.D.ContainsKey($id)) {
+                            $pc = (($snap[$id].T - $Estado.SnapProc.D[$id].T) / ($seg * $nc)) * 100
+                            if ($pc -gt $mejorPct) { $mejorPct = $pc; $mejor = @{ Id = $id; N = $snap[$id].N } }
+                        }
+                    }
+                    $Estado.TopCpu = $mejor; $Estado.TopCpuPct = [math]::Round($mejorPct)
+                    $mm = $null; $mmMB = 0.0
+                    foreach ($id in $snap.Keys) { if ($snap[$id].M -gt $mmMB) { $mmMB = $snap[$id].M; $mm = @{ Id = $id; N = $snap[$id].N } } }
+                    $Estado.TopMem = $mm; $Estado.TopMemMB = [math]::Round($mmMB / 1MB)
+                }
+                $Estado.SnapProc = @{ At = $ahora; D = $snap }
+            } else { $Estado.SnapProc = $null }
+
+            $benigno = '^(MsMpEng|MpDefenderCoreService|TiWorker|TrustedInstaller|MoUsoCoreWorker|UsoClient|SearchIndexer|SearchProtocolHost|wuauclt|CompatTelRunner|MicrosoftEdgeUpdate|GoogleUpdate|OneDrive)$'
+            $quien = { param($t, $pct, $n, $id)
+                if ($id -eq $PidPropio) { return @{ Txt = "El propio programa (The Dragon Tool) esta usando $pct$t."; Sol = "Cierra y vuelve a abrir The Dragon Tool. Si se repite, desactiva el monitoreo en tiempo real un momento y envia el registro de errores para corregirlo."; Notif = $true } }
+                if ("$n" -match $benigno) { return @{ Txt = "Lo esta usando '$n'$t (tarea normal de Windows: analisis, actualizacion o indexado)."; Sol = "Suele ser temporal: deja que termine. Si dura horas, reinicia el equipo."; Notif = $false } }
+                return @{ Txt = "El mayor consumo es de '$n'$t."; Sol = "Cierra o reinicia '$n'; si se repite, actualizalo o reinstalalo. Revisa tambien el Administrador de tareas (Ctrl+Mayus+Esc)."; Notif = $true }
+            }
+            if ($Estado.CpuAlto -ge 10) {
+                $q = if ($Estado.TopCpu) { & $quien (" ($($Estado.TopCpuPct)% de la CPU)") '' $Estado.TopCpu.N $Estado.TopCpu.Id } else { @{ Txt = 'No se pudo identificar el proceso.'; Sol = 'Revisa el Administrador de tareas (Ctrl+Mayus+Esc) para ver que consume.'; Notif = $true } }
+                Nuevo $ahora 'AVISO' 'Rendimiento (saturacion)' 'CPU saturada' "La CPU lleva mas de 5 minutos al 95% o mas. $($q.Txt)" $q.Sol "sat|cpu|$(Cubo 30)" $false $q.Notif
+            }
+            if ($Estado.DiscoAlto -ge 10) {
+                $q = if ($Estado.TopMem) { & $quien (" ($($Estado.TopMemMB) MB de RAM)") '' $Estado.TopMem.N $Estado.TopMem.Id } else { @{ Txt = ''; Sol = 'Revisa el Administrador de tareas > Disco.'; Notif = $true } }
+                Nuevo $ahora 'AVISO' 'Rendimiento (saturacion)' 'Disco saturado' "El disco lleva mas de 5 minutos al 100% de actividad con cola de espera ($([math]::Round($dskQ,1)))." "Cierra lo que escribe/lee mucho (descargas, actualizaciones, antivirus). Si el disco es mecanico y siempre esta al 100%, es el momento de pasar a un SSD; si ademas hay errores en el registro, revisa su SMART." "sat|disco|$(Cubo 30)" $false $true
+            }
+            if ($Estado.MemAlta -ge 6) {
+                $q = if ($Estado.TopMem) { & $quien (" ($($Estado.TopMemMB) MB)") '' $Estado.TopMem.N $Estado.TopMem.Id } else { @{ Txt = ''; Sol = 'Cierra programas pesados.'; Notif = $true } }
+                Nuevo $ahora 'AVISO' 'Rendimiento (saturacion)' 'Memoria saturada' "La memoria lleva mas de 3 minutos casi llena (RAM $ramU%, confirmada $commit%). El mayor consumo es '$(if ($Estado.TopMem) { $Estado.TopMem.N } else { 'desconocido' })' ($($Estado.TopMemMB) MB)." "Cierra programas y pestañas del navegador, usa Liberar RAM o amplia la memoria ($totMB MB instalados). Si un solo programa crece sin parar, tiene una fuga de memoria: actualizalo o reinstalalo." "sat|ram|$(Cubo 30)" $false $true
+            }
+        }
+    } catch {}
+
+    # 7) Salud del propio programa (fuga de memoria o exceso de recursos)
+    try {
+        $yo = Get-Process -Id $PidPropio -ErrorAction Stop
+        $wsMB = [math]::Round($yo.WorkingSet64 / 1MB); $hnd = [int]$yo.HandleCount
+        $tope = 700
+        try { $tm = [math]::Round((Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).TotalVisibleMemorySize / 1024); $tope = [math]::Max(700, [math]::Round($tm * 0.25)) } catch {}
+        if ($wsMB -gt $tope -or $hnd -gt 15000) { $Estado.YoAlto = [int]$Estado.YoAlto + 1 } else { $Estado.YoAlto = 0 }
+        if ($Estado.YoAlto -ge 6) {
+            Nuevo $ahora 'AVISO' 'Programa (Dragon Tool)' 'The Dragon Tool' "The Dragon Tool usa $wsMB MB de RAM y $hnd manejadores desde hace mas de 3 minutos (posible fuga de memoria)." 'Cierra y vuelve a abrir The Dragon Tool. Si vuelve a pasar, desactiva el monitoreo en tiempo real y envia este registro para corregirlo.' "yo|$(Cubo 60)" $false $true
+        }
+    } catch {}
+
+    # 8) Servicios criticos de Windows detenidos (solo si siguen detenidos 90 s seguidos)
+    try {
+        if ($Estado.Pausa -ne $true -and -not ($Estado.PausaHasta -and $ahora -lt $Estado.PausaHasta)) {
+            $crit = [ordered]@{ EventLog = 'Registro de eventos'; Winmgmt = 'WMI (Instrumental de administracion)'; BFE = 'Motor de filtrado base (firewall)'; mpssvc = 'Firewall de Windows'; Dhcp = 'Cliente DHCP (red)'; Dnscache = 'Cliente DNS (red)'; Audiosrv = 'Audio de Windows'; AudioEndpointBuilder = 'Generador de extremos de audio'; PlugPlay = 'Plug and Play (dispositivos)'; ProfSvc = 'Perfiles de usuario'; Power = 'Administracion de energia' }
+            foreach ($n in $crit.Keys) {
+                $s = Get-Service -Name $n -ErrorAction SilentlyContinue
+                $k = "svc|$n"
+                if ($s -and "$($s.StartType)" -eq 'Automatic' -and "$($s.Status)" -ne 'Running') {
+                    $Estado[$k] = [int]$Estado[$k] + 1
+                    if ($Estado[$k] -ge 3) {
+                        Nuevo $ahora 'ERROR' 'Servicio critico' "Servicio: $($crit[$n])" "El servicio '$($crit[$n])' ($n) deberia estar en ejecucion y esta detenido desde hace mas de 90 segundos." "Abre services.msc, busca '$n' y pulsa Iniciar. Si se vuelve a detener, ejecuta 'sfc /scannow' y revisa el Visor de eventos; puede haber un programa o virus que lo detiene." "svc|$n|$(Cubo 60)"
+                    }
+                } else { $Estado[$k] = 0 }
+            }
+        }
+    } catch {}
+
+    # 9) Red: el router no responde / hay red local pero no hay Internet (se exige varias fallas seguidas)
+    try {
+        if ($Estado.Pausa -ne $true) {
+            if (-not $Estado.GwAt -or (($ahora - $Estado.GwAt).TotalMinutes -ge 5)) {
+                $Estado.GwAt = $ahora; $Estado.Gw = $null
+                try { $cfg = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=true' -ErrorAction Stop | Where-Object { $_.DefaultIPGateway } | Select-Object -First 1; if ($cfg) { $Estado.Gw = "$(@($cfg.DefaultIPGateway)[0])" } } catch {}
+            }
+            if ($Estado.Gw) {
+                $png = New-Object System.Net.NetworkInformation.Ping
+                $gwOk = $false; try { $gwOk = ($png.Send($Estado.Gw, 1500).Status -eq 'Success') } catch {}
+                $netOk = $true
+                if ($gwOk) {
+                    $a1 = $false; $a2 = $false
+                    try { $a1 = ($png.Send('1.1.1.1', 1500).Status -eq 'Success') } catch {}
+                    if (-not $a1) { try { $a2 = ($png.Send('8.8.8.8', 1500).Status -eq 'Success') } catch {} }
+                    $netOk = ($a1 -or $a2)
+                }
+                $Estado.GwFalla = if (-not $gwOk) { [int]$Estado.GwFalla + 1 } else { 0 }
+                $Estado.NetFalla = if ($gwOk -and -not $netOk) { [int]$Estado.NetFalla + 1 } else { 0 }
+                if ($Estado.GwFalla -ge 4) {
+                    Nuevo $ahora 'AVISO' 'Red' 'Conexion con el router' "El equipo tiene red pero el router ($($Estado.Gw)) no responde desde hace mas de 2 minutos." 'Revisa el cable o la senal Wi-Fi, reinicia el router y ejecuta "netsh winsock reset" si solo falla este equipo. Si falla en varios equipos, el problema es el router.' "red|gw|$(Cubo 30)" $false $false
+                }
+                if ($Estado.NetFalla -ge 6) {
+                    Nuevo $ahora 'AVISO' 'Red' 'Sin Internet' 'El router responde pero no hay salida a Internet desde hace mas de 3 minutos.' 'Reinicia el modem/router y espera 2 minutos. Si sigue, es un corte del proveedor; si solo falla este equipo, ejecuta "ipconfig /flushdns" y revisa el DNS.' "red|net|$(Cubo 30)" $false $false
+                }
+            }
+        }
+    } catch {}
     # 5) Dato de energia para saber, la proxima vez, como se apago el equipo
     try {
         $dir = Split-Path -Parent $RutaSnap
@@ -19262,6 +20358,10 @@ function Global:Iniciar-EscaneoVivo {
         $ahora = Get-Date
         $desde = if ($Inicio) { $ahora.AddHours(-24) } elseif ($Script:VivoUlt) { $Script:VivoUlt.AddSeconds(-20) } else { $ahora.AddMinutes(-2) }
         $prev = if ($Inicio) { Leer-SnapEnergia } else { $null }
+        # Durante pruebas o perfiles no se vigila saturacion ni servicios (se detienen a proposito)
+        $enPausaAhora = [bool]($Global:DiagEnCurso -or $Global:PerfilEnCurso)
+        $Global:VivoEstado.Pausa = $enPausaAhora
+        if ($enPausaAhora) { $Global:VivoEstado.PausaHasta = $ahora.AddMinutes(2) }
         $ps = [powershell]::Create()
         $null = $ps.AddScript($Script:ScanVivoSB.ToString()).AddArgument($desde).AddArgument($Global:VivoEstado).AddArgument($Inicio).AddArgument((Join-Path $Global:ConfigRuta 'energia.json')).AddArgument($prev).AddArgument([int]$PID)
         $Script:VivoScan = @{ PS = $ps; H = $ps.BeginInvoke(); Inicio = $ahora }
@@ -20244,8 +21344,15 @@ $window.FindName("BtnInicioDiagnostico").Add_Click({ Accion-DiagnosticoCompletoE
 $window.FindName("BtnInicioActualizar").Add_Click({ Actualizar-PanelInicio; Cargar-InfoEstaticaInicio })
 
 $Script:TimerInicio = New-Object System.Windows.Threading.DispatcherTimer
-$Script:TimerInicio.Interval = [TimeSpan]::FromSeconds(3)
-$Script:TimerInicio.Add_Tick({ try { Actualizar-PanelInicio } catch { Registrar-FalloGrafico 'panel de inicio' $_ } })
+$Script:TimerInicio.Interval = [TimeSpan]::FromSeconds(5)
+$Script:TimerInicio.Add_Tick({
+    try {
+        # No se actualiza si la ventana esta minimizada o si no se esta viendo la pestaña Inicio
+        if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) { return }
+        if ($window.FindName('TabControlPrincipal').SelectedIndex -ne 0) { return }
+        Actualizar-PanelInicio
+    } catch { Registrar-FalloGrafico 'panel de inicio' $_ }
+})
 $Script:TimerInicio.Start()
 Actualizar-PanelInicio
 try { Iniciar-GraficosInicio } catch { Write-Log "Resumen del equipo: no se pudieron iniciar los graficos en vivo: $($_.Exception.Message)" -Tipo ERROR }
@@ -20266,9 +21373,18 @@ $Script:TimerArranqueMonitor.Add_Tick({
 })
 $Script:TimerArranqueMonitor.Start()
 
+# Medicion REAL del perfil aplicado: solo actua si el equipo se reinicio despues de aplicar un perfil
+$Script:TimerPostReinicio = New-Object System.Windows.Threading.DispatcherTimer
+$Script:TimerPostReinicio.Interval = [TimeSpan]::FromSeconds(45)
+$Script:TimerPostReinicio.Add_Tick({
+    try { if (Evaluar-MedicionPostReinicio) { $Script:TimerPostReinicio.Stop() } }
+    catch { $Script:TimerPostReinicio.Stop(); Registrar-FalloInterno 'medicion post-reinicio' $_ }
+})
+$Script:TimerPostReinicio.Start()
+
 # Autoverificacion de todas las pestañas y opciones, unos segundos despues de abrir
 $Script:TimerAutoVer = New-Object System.Windows.Threading.DispatcherTimer
-$Script:TimerAutoVer.Interval = [TimeSpan]::FromSeconds(8)
+$Script:TimerAutoVer.Interval = [TimeSpan]::FromSeconds(20)
 $Script:TimerAutoVer.Add_Tick({
     $Script:TimerAutoVer.Stop()
     try { Iniciar-Autoverificacion } catch { Registrar-FalloInterno 'autoverificacion' $_ }
@@ -20541,7 +21657,8 @@ $Global:AyudaControles = @{
     'BtnInicioActualizar' = 'Vuelve a leer ahora la informacion del equipo mostrada en el resumen.'
     # --- Optimizar Windows ---
     'CmbCategoriaOptimizar' = 'Cambia entre perfiles de optimizacion, acelerar procesador y liberar RAM.'
-    'BtnPerfilBajo' = 'MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios extra, tareas y apps en segundo plano, pone Defender en modo ligero, limpia el disco a fondo y libera RAM. Guarda el estado original: se revierte con Restaurar. Muestra ANTES y DESPUES.'
+    'BtnPerfilVerificar' = 'Mide unos segundos el consumo de CPU, RAM y disco con el equipo en reposo, da una puntuacion de 0 a 100, explica que lo frena y recomienda un perfil. Al aplicar un perfil vuelve a medir y compara con esta medicion para confirmar si hubo cambios reales.'
+    'BtnPerfilBajo' = 'MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios extra, tareas y apps en segundo plano, quita apps preinstaladas, Microsoft Store y Windows Defender, y limpia el disco a fondo. Guarda el estado original: se revierte con Restaurar. Verifica cada cambio y mide el resultado real.'
     'BtnPerfilModerno' = 'Para equipos con buen hardware: quita bloatware y telemetria manteniendo las funciones utiles. Muestra un ANTES y DESPUES.'
     'BtnPerfilGamer' = 'Mejora el rendimiento en juegos: energia al maximo, modo juego, GPU y red optimizadas.'
     'BtnPerfilAuto' = 'Detecta tu hardware (CPU, RAM, HDD/SSD) y MIDE el consumo actual de CPU, RAM y disco para ajustar el perfil de ahorro; antes de aplicar te avisa que funciones dejaran de estar disponibles. Si el equipo es potente y no esta saturado te recomienda Equipo moderno. Reversible con Restaurar.'
@@ -20743,7 +21860,7 @@ $Global:AyudaControles = @{
     'BtnDiscoEstres' = 'Prueba de estres del disco durante el tiempo que elijas, para detectar fallos bajo carga.'
     'BtnProbarGrafica' = 'Muestra la tarjeta grafica: modelo, memoria y driver.'
     'BtnProbarPantalla' = 'Abre una prueba de colores para detectar pixeles muertos o manchas.'
-    'BtnDetallesPantalla' = 'Muestra resolucion, frecuencia, tamano y datos de la pantalla.'
+    'BtnDetallesPantalla' = 'Lee el EDID real de la pantalla: fabricante, codigo y numero de parte del panel (por ejemplo N156BGA-EA2) si el panel lo informa, tamano en pulgadas, resolucion nativa, fecha de fabricacion y si es el panel interno del portatil. Evita abrir la tapa para ver la etiqueta. Si el panel no informa un dato, lo indica.'
     'BtnProbarAudioIzq' = 'Reproduce un sonido solo por el altavoz izquierdo.'
     'BtnProbarAudioDer' = 'Reproduce un sonido solo por el altavoz derecho.'
     'BtnProbarAudioAmbos' = 'Reproduce un sonido por ambos altavoces.'
