@@ -1347,7 +1347,7 @@ function Global:Identificar-EquipoHistorial {
         $o
     }
     $d = @{ Serie = ''; Uuid = ''; Marca = ''; Modelo = '' }
-    foreach ($x in $r) { $h = $x; if ($x -is [System.Management.Automation.PSObject]) { $h = $x.BaseObject }; if ($h -is [hashtable]) { $d = $h } }
+    foreach ($x in $r) { $h = $x.PSObject.BaseObject; if ($h -is [hashtable]) { $d = $h } }
     return $d
 }
 
@@ -13352,7 +13352,7 @@ function Global:Medir-ConsumoGuiado {
         if ($ar.IsCompleted) {
             try {
                 foreach ($x in $ps.EndInvoke($ar)) {
-                    $h = $x; if ($x -is [System.Management.Automation.PSObject]) { $h = $x.BaseObject }
+                    $h = $x.PSObject.BaseObject
                     if ($h -is [hashtable]) {
                         $res = [PSCustomObject]@{ Seg = [double]$h['Seg']; Procs = @($h['Procs']); Servicios = @($h['Servicios']); CpuProm = [double]$h['CpuProm']
                             DiscoProm = [double]$h['DiscoProm']; RamProm = [double]$h['RamProm']; RamTotalMB = [double]$h['RamTotalMB']; Muestras = [int]$h['Muestras'] }
@@ -13374,7 +13374,7 @@ function Global:Detectar-DispositivosOG {
         $o
     }
     $d = @{ Impresora = $false; Bluetooth = $false; Huella = $false }
-    foreach ($x in $r) { $d = $x }
+    foreach ($x in $r) { $h = $x.PSObject.BaseObject; if ($h -is [hashtable]) { $d = $h } }
     return $d
 }
 
