@@ -1221,11 +1221,519 @@ function Global:Get-SolucionSugeridaError {
     }
 }
 
+# ---------------------------------------------------------------------------
+#  REGISTRO DE ERRORES: ambito (equipo del cliente / programa), gravedad, causa probable,
+#  prueba sugerida y historial por equipo guardado en disco (identificado por numero de serie).
+# ---------------------------------------------------------------------------
+$Script:CatEquipoErr = @('Hardware','Apagado inesperado','Pantalla azul','Congelamiento','Bateria / energia','Aplicacion / servicio','Controlador (driver)','Rendimiento (saturacion)','Rendimiento (lentitud)','Red','Seguridad','Servicio critico','Disco: varios indicios de fallo')
+$Global:HistErr = @{ Listo = $false; Sucio = $false; Clave = ''; Serie = ''; Marca = ''; Modelo = ''; Fuente = ''; Ruta = ''; Visitas = (New-Object System.Collections.ArrayList); Timer = $null; Inicio = (Get-Date); Cargadas = 0 }
+
+function Global:Get-AmbitoError {
+    param([string]$Categoria)
+    if ($Script:CatEquipoErr -contains $Categoria) { return 'Equipo' }
+    return 'Programa'
+}
+
+function Global:Get-CodigoBsodError {
+    param($E)
+    if ("$($E.Mensaje)" -match '(?i)codigo 0x([0-9A-F]+)') { return ([Convert]::ToInt32($Matches[1], 16)) }
+    return -1
+}
+
+# 3 Critica, 2 Alta, 1 Media, 0 Baja. Lo del programa nunca pasa de Media.
+function Global:Get-GravedadError {
+    param($E, [string]$Ambito)
+    $err = ("$($E.Tipo)" -eq 'ERROR'); $v = [int]$E.Veces; $cat = "$($E.Categoria)"
+    if ($Ambito -ne 'Equipo') { if ($err) { return 1 } else { return 0 } }
+    $n = if ($err) { 2 } else { 1 }
+    $t = "$($E.Origen) $($E.Mensaje)"
+    if ($cat -eq 'Pantalla azul' -or $cat -eq 'Disco: varios indicios de fallo') { $n = 3 }
+    elseif ($t -match '(?i)sectores danados sin resolver|predice que va a fallar|estado de salud del disco|errores de lectura/escritura sin corregir|estado del disco como|Prueba de memoria RAM de Windows') { $n = 3 }
+    elseif ($cat -eq 'Rendimiento (lentitud)') { $n = 0 }
+    elseif ($cat -eq 'Apagado inesperado') { $n = if ($v -ge 2) { 3 } else { 2 } }
+    if ($v -ge 3 -and $n -ge 1 -and $n -lt 3 -and $cat -ne 'Rendimiento (lentitud)') { $n++ }
+    return $n
+}
+
+# Causa probable + prueba del programa que la confirma (nombre del control para saltar a ella)
+function Global:Get-CausaPruebaError {
+    param($E, [string]$Ambito)
+    $r = @{ Causa = ''; Control = ''; Prueba = '' }
+    if ($Ambito -ne 'Equipo') { $r.Causa = 'Aviso interno de The Dragon Tool (no es del equipo del cliente)'; return $r }
+    $cat = "$($E.Categoria)"; $t = "$($E.Origen) $($E.Mensaje)"
+    $set = { param($c, $b, $p) $r.Causa = $c; $r.Control = $b; $r.Prueba = $p }
+    switch ($cat) {
+        'Pantalla azul' { & $set 'Controlador defectuoso o RAM (segun el codigo de la pantalla azul)' 'BtnActualizarBSODTab' 'Analizar pantallas azules (BSOD)'; return $r }
+        'Disco: varios indicios de fallo' { & $set 'Disco o su cable/conector' 'BtnDiscoSmart' 'Estado S.M.A.R.T. del disco'; return $r }
+        'Apagado inesperado' { & $set 'Energia: bateria, cargador o fuente (o sobrecalentamiento)' 'BtnAlimBateria' 'Revision de bateria'; return $r }
+        'Bateria / energia' { & $set 'Energia: bateria o cargador' 'BtnAlimBateria' 'Revision de bateria'; return $r }
+        'Congelamiento' { & $set 'Sobrecarga de RAM/CPU/disco o programa colgado' 'BtnProcesos' 'Procesos y consumo (Memoria y rendimiento)'; return $r }
+        'Rendimiento (saturacion)' { & $set 'Sobrecarga de RAM/CPU/disco o programa pesado' 'BtnProcesos' 'Procesos y consumo (Memoria y rendimiento)'; return $r }
+        'Rendimiento (lentitud)' { & $set 'Lentitud puntual (carga alta en ese momento)' 'BtnProcesos' 'Procesos y consumo (Memoria y rendimiento)'; return $r }
+        'Red' { & $set 'Red, router o adaptador' 'BtnProbarWifi' 'Prueba de Wi-Fi / red'; return $r }
+        'Seguridad' { & $set 'Posible malware detectado por Defender' 'BtnDefenderFull' 'Analisis completo con Defender'; return $r }
+        'Controlador (driver)' { & $set 'Controlador o dispositivo con problemas' 'BtnDetectarTodo' 'Detectar controladores'; return $r }
+        'Servicio critico' { & $set 'Servicio de Windows detenido o danado' 'BtnSFC' 'Verificar archivos del sistema (SFC)'; return $r }
+        'Aplicacion / servicio' { & $set 'Windows o una aplicacion danada' 'BtnSFC' 'Verificar archivos del sistema (SFC)'; return $r }
+    }
+    switch -Regex ($t) {
+        '(?i)Poco espacio libre' { & $set 'Disco casi lleno' 'BtnProbarAlmacenamiento' 'Espacio en almacenamiento'; return $r }
+        '(?i)Uso de RAM|Memoria RAM\s+Uso' { & $set 'Poca RAM o programas pesados' 'BtnProcesos' 'Procesos y consumo (Memoria y rendimiento)'; return $r }
+        '(?i)WHEA|prueba de memoria|MemoryDiagnostics' { & $set 'RAM, CPU o placa (error de hardware)' 'BtnProbarRAM' 'Prueba de memoria RAM'; return $r }
+        '(?i)Temperatura|throttling|firmware' { & $set 'Refrigeracion insuficiente (polvo o pasta termica)' 'BtnProbarTemperatura' 'Prueba de temperatura'; return $r }
+        '(?i)Bateria' { & $set 'Energia: bateria o cargador' 'BtnAlimBateria' 'Revision de bateria'; return $r }
+        '(?i)video|GPU|nvlddmkm|Display' { & $set 'Tarjeta de video o su controlador' 'BtnProbarGrafica' 'Prueba de graficos'; return $r }
+        '(?i)NTFS|Sistema de archivos|volumen' { & $set 'Sistema de archivos o disco' 'BtnDiscoChkdsk' 'Revisar el sistema de archivos (chkdsk)'; return $r }
+        '(?i)disco|SMART|SSD|SATA|NVMe|almacenamiento|sectores|storport' { & $set 'Disco o su cable/conector' 'BtnDiscoSmart' 'Estado S.M.A.R.T. del disco'; return $r }
+        '(?i)Bluetooth|Dispositivo|PnP|controlador' { & $set 'Controlador o dispositivo con problemas' 'BtnDetectarTodo' 'Detectar controladores'; return $r }
+    }
+    & $set 'Sin clasificar (revisa los eventos del sistema)' 'BtnProbarEventos' 'Eventos del sistema'
+    return $r
+}
+
+# Agrega a la entrada: Ambito, GravedadN, Gravedad, Causa, Control, Prueba (se recalcula si cambian las repeticiones)
+function Global:Enriquecer-Error {
+    param($E)
+    try {
+        $v = [int]$E.Veces
+        if ($E.PSObject.Properties['VecesCalc'] -and [int]$E.VecesCalc -eq $v -and $E.PSObject.Properties['Gravedad']) { return }
+        $amb = Get-AmbitoError -Categoria "$($E.Categoria)"
+        $g = Get-GravedadError -E $E -Ambito $amb
+        $cp = Get-CausaPruebaError -E $E -Ambito $amb
+        $txt = switch ($g) { 3 { 'Critica' } 2 { 'Alta' } 1 { 'Media' } default { 'Baja' } }
+        Add-Member -InputObject $E -NotePropertyName Ambito -NotePropertyValue $amb -Force
+        Add-Member -InputObject $E -NotePropertyName GravedadN -NotePropertyValue ([int]$g) -Force
+        Add-Member -InputObject $E -NotePropertyName Gravedad -NotePropertyValue $txt -Force
+        Add-Member -InputObject $E -NotePropertyName Causa -NotePropertyValue "$($cp.Causa)" -Force
+        Add-Member -InputObject $E -NotePropertyName Control -NotePropertyValue "$($cp.Control)" -Force
+        Add-Member -InputObject $E -NotePropertyName Prueba -NotePropertyValue "$($cp.Prueba)" -Force
+        Add-Member -InputObject $E -NotePropertyName VecesCalc -NotePropertyValue $v -Force
+        if (-not $E.PSObject.Properties['Persistente']) { Add-Member -InputObject $E -NotePropertyName Persistente -NotePropertyValue $false -Force }
+        if (-not $E.PSObject.Properties['Clave']) { Add-Member -InputObject $E -NotePropertyName Clave -NotePropertyValue '' -Force }
+    } catch {}
+}
+
+# ---- Historial por equipo en disco -----------------------------------------------------
+function Global:Get-DirHistorialErrores {
+    $d = Join-Path $env:ProgramData 'TheDragonTool\errores'
+    try { if (-not (Test-Path $d)) { New-Item -Path $d -ItemType Directory -Force -ErrorAction Stop | Out-Null }; return $d } catch {}
+    $d = Join-Path $env:LOCALAPPDATA 'TheDragonTool\errores'
+    try { if (-not (Test-Path $d)) { New-Item -Path $d -ItemType Directory -Force | Out-Null } } catch {}
+    return $d
+}
+
+# Identifica el equipo (serie > UUID de la placa > nombre del PC). Se consulta en otro hilo para no frenar la ventana.
+function Global:Identificar-EquipoHistorial {
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 45 -Bloque {
+        $util = { param($v)
+            $t = "$v".Trim()
+            if (-not $t) { return $false }
+            if ($t -match '(?i)to be filled|default string|system (serial|manufacturer|product|version)|o\.e\.m|^none$|not specified|not applicable|^n/?a$|^0+$|^x+$|0123456789|^unknown$|serial ?number|chassis') { return $false }
+            return $true
+        }
+        $o = @{ Serie = ''; Uuid = ''; Marca = ''; Modelo = '' }
+        $cs = $null; $csp = $null; $bios = $null; $bb = $null; $enc = $null
+        try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop | Select-Object -First 1 } catch {}
+        try { $csp = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop | Select-Object -First 1 } catch {}
+        try { $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop | Select-Object -First 1 } catch {}
+        try { $bb = Get-CimInstance Win32_BaseBoard -ErrorAction Stop | Select-Object -First 1 } catch {}
+        try { $enc = Get-CimInstance Win32_SystemEnclosure -ErrorAction Stop | Select-Object -First 1 } catch {}
+        if ($cs -and (& $util $cs.Manufacturer)) { $o.Marca = "$($cs.Manufacturer)".Trim() }
+        if ($cs -and (& $util $cs.Model)) { $o.Modelo = "$($cs.Model)".Trim() }
+        foreach ($s in @($(if ($bios) { $bios.SerialNumber }), $(if ($csp) { $csp.IdentifyingNumber }), $(if ($enc) { $enc.SerialNumber }), $(if ($bb) { $bb.SerialNumber }))) {
+            if (& $util $s) { $o.Serie = "$s".Trim(); break }
+        }
+        if ($csp -and "$($csp.UUID)" -match '^[0-9A-Fa-f-]{32,36}$' -and "$($csp.UUID)" -notmatch '^[0F-]+$') { $o.Uuid = "$($csp.UUID)" }
+        $o
+    }
+    $d = @{ Serie = ''; Uuid = ''; Marca = ''; Modelo = '' }
+    foreach ($x in $r) { $h = $x; if ($x -is [System.Management.Automation.PSObject]) { $h = $x.BaseObject }; if ($h -is [hashtable]) { $d = $h } }
+    return $d
+}
+
+function Global:Cargar-HistorialErrores {
+    $H = $Global:HistErr
+    try {
+        $id = Identificar-EquipoHistorial
+        $H.Serie = "$($id.Serie)"; $H.Marca = "$($id.Marca)"; $H.Modelo = "$($id.Modelo)"
+        if ($H.Serie) { $H.Clave = 'S_' + ($H.Serie -replace '[^A-Za-z0-9\-_]', '_'); $H.Fuente = 'numero de serie' }
+        elseif ($id.Uuid) { $H.Clave = 'U_' + ("$($id.Uuid)" -replace '[^A-Za-z0-9\-_]', '_'); $H.Fuente = 'identificador de la placa (no se encontro numero de serie)' }
+        else { $H.Clave = 'N_' + ($env:COMPUTERNAME -replace '[^A-Za-z0-9\-_]', '_'); $H.Fuente = 'nombre del PC (no se encontro numero de serie)' }
+        $H.Ruta = Join-Path (Get-DirHistorialErrores) "$($H.Clave).json"
+        $cult = [System.Globalization.CultureInfo]::InvariantCulture
+        if (Test-Path $H.Ruta) {
+            $j = [System.IO.File]::ReadAllText($H.Ruta, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            foreach ($vz in @($j.Visitas)) { if ($vz) { [void]$H.Visitas.Add("$vz") } }
+            $claves = @{}
+            foreach ($e in @($Script:RegistroErrores.ToArray())) {
+                if ("$($e.Clave)") { $claves["$($e.Clave)"] = $true }
+                $claves["$($e.Fecha)|$($e.Origen)|$($e.Mensaje)"] = $true
+            }
+            $n = 0
+            foreach ($p in @($j.Entradas)) {
+                if (-not $p -or -not $p.Fecha) { continue }
+                $k1 = "$($p.Clave)"; $k2 = "$($p.Fecha)|$($p.Origen)|$($p.Mensaje)"
+                if (($k1 -and $claves.ContainsKey($k1)) -or $claves.ContainsKey($k2)) { continue }
+                $mom = $null; try { $mom = [datetime]::ParseExact("$($p.Fecha)", 'yyyy-MM-dd HH:mm:ss', $cult) } catch { continue }
+                $hora = if ($mom.Date -eq (Get-Date).Date) { $mom.ToString('HH:mm:ss') } else { $mom.ToString('dd/MM HH:mm') }
+                $ne = [PSCustomObject]@{
+                    Hora = $hora; Fecha = "$($p.Fecha)"; Momento = $mom; Tipo = "$($p.Tipo)"; Categoria = "$($p.Categoria)"; Origen = "$($p.Origen)"
+                    Mensaje = "$($p.Mensaje)"; Solucion = "$($p.Solucion)"; Detalle = "$($p.Detalle)"; Veces = [int]$p.Veces
+                    Persistente = $true; Clave = $k1
+                }
+                Enriquecer-Error $ne
+                [void]$Script:RegistroErrores.Add($ne)
+                if ($k1) { $Script:HwVistos[$k1] = $true }
+                $claves[$k2] = $true; $n++
+            }
+            $H.Cargadas = $n
+        }
+        [void]$H.Visitas.Add($H.Inicio.ToString('yyyy-MM-dd HH:mm:ss'))
+        while ($H.Visitas.Count -gt 300) { $H.Visitas.RemoveAt(0) }
+        $H.Listo = $true; $H.Sucio = $true
+        if (-not $H.Timer) {
+            $t = New-Object System.Windows.Threading.DispatcherTimer
+            $t.Interval = [TimeSpan]::FromSeconds(30)
+            $t.Add_Tick({ try { if ($Global:HistErr.Sucio) { Guardar-HistorialErrores } } catch {} })
+            $t.Start(); $H.Timer = $t
+        }
+        Guardar-HistorialErrores
+        try { Cargar-RegistroErrores -ConVeredicto } catch {}
+    } catch { Write-Log "No se pudo cargar el historial de errores del equipo: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
+}
+
+function Global:Guardar-HistorialErrores {
+    $H = $Global:HistErr
+    if (-not $H.Listo -or -not $H.Ruta) { return }
+    try {
+        $lim = (Get-Date).AddDays(-400)
+        $lista = New-Object System.Collections.Generic.List[object]
+        $todas = @($Script:RegistroErrores.ToArray() | Where-Object { "$($_.Ambito)" -eq 'Equipo' -and $_.Momento -ge $lim } | Sort-Object Momento)
+        if ($todas.Count -gt 3000) { $todas = @($todas | Select-Object -Last 3000) }
+        foreach ($e in $todas) {
+            $det = "$($e.Detalle)"; if ($det.Length -gt 600) { $det = $det.Substring(0, 600) + '...' }
+            $lista.Add([PSCustomObject]@{ Fecha = "$($e.Fecha)"; Tipo = "$($e.Tipo)"; Categoria = "$($e.Categoria)"; Origen = "$($e.Origen)"; Mensaje = "$($e.Mensaje)"
+                Solucion = "$($e.Solucion)"; Detalle = $det; Veces = [int]$e.Veces; Clave = "$($e.Clave)" })
+        }
+        $o = [PSCustomObject]@{ Version = 1; Clave = $H.Clave; Serie = $H.Serie; Marca = $H.Marca; Modelo = $H.Modelo; Equipo = "$env:COMPUTERNAME"; Visitas = @($H.Visitas.ToArray()); Entradas = $lista.ToArray() }
+        $json = ConvertTo-Json -InputObject $o -Depth 5
+        $tmp = "$($H.Ruta).tmp"
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($true)))
+        Move-Item -Path $tmp -Destination $H.Ruta -Force
+        $H.Sucio = $false
+    } catch { Write-Log "No se pudo guardar el historial de errores: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
+}
+
+function Global:Get-ResumenHistorialEquipo {
+    $H = $Global:HistErr
+    if (-not $H.Listo) { return 'Historial del equipo: cargando...' }
+    $cult = [System.Globalization.CultureInfo]::InvariantCulture
+    $primera = $null
+    foreach ($vz in $H.Visitas) { try { $d = [datetime]::ParseExact("$vz", 'yyyy-MM-dd HH:mm:ss', $cult); if (-not $primera -or $d -lt $primera) { $primera = $d } } catch {} }
+    $nEq = @($Script:RegistroErrores.ToArray() | Where-Object { "$($_.Ambito)" -eq 'Equipo' }).Count
+    $dias = @($H.Visitas.ToArray() | ForEach-Object { "$_".Substring(0, 10) } | Select-Object -Unique).Count
+    $s = "Historial de este equipo ($(if ($H.Marca -or $H.Modelo) { "$($H.Marca) $($H.Modelo)".Trim() + ', ' })identificado por $($H.Fuente)$(if ($H.Serie) { ': ' + $H.Serie })): "
+    $s += "The Dragon Tool se abrio $($H.Visitas.Count) vez/veces en $dias dia(s) distintos$(if ($primera) { ', la primera el ' + $primera.ToString('dd/MM/yyyy') }); $nEq hallazgo(s) del equipo guardados en disco."
+    return $s
+}
+
+# Cuantas veces y en cuantos dias distintos se vio ESTE mismo problema (misma categoria y origen) en el historial
+function Global:Get-ReincidenciaError {
+    param($E)
+    try {
+        $k = "$($E.Categoria)|$(("$($E.Origen)" -replace '\s*\(Id \d+\)', '' -replace ' - \d+ eventos', ''))"
+        $mis = @($Script:RegistroErrores.ToArray() | Where-Object { "$($_.Categoria)|$(("$($_.Origen)" -replace '\s*\(Id \d+\)', '' -replace ' - \d+ eventos', ''))" -eq $k })
+        if ($mis.Count -lt 2) { return '' }
+        $dias = @($mis | Group-Object { $_.Momento.ToString('yyyyMMdd') }).Count
+        if ($dias -lt 2) { return '' }
+        $pri = ($mis | Sort-Object Momento | Select-Object -First 1).Momento
+        $ult = ($mis | Sort-Object Momento | Select-Object -Last 1).Momento
+        if (($ult - $pri).TotalHours -lt 12) { return '' }
+        return "REINCIDENTE: este mismo problema aparecio en $dias dias distintos (la primera vez el $($pri.ToString('dd/MM/yyyy')))."
+    } catch { return '' }
+}
+
+# ---- Veredicto automatico: cruza lo registrado y solo concluye con evidencias que se refuerzan entre si ----
+function Global:Get-VeredictoEquipo {
+    $ent = @($Script:RegistroErrores.ToArray() | Where-Object { "$($_.Ambito)" -eq 'Equipo' })
+    $v = New-Object System.Collections.Generic.List[object]
+    $corta = { param($s, $n) $s = "$s"; if ($s.Length -gt $n) { $s.Substring(0, $n) + '...' } else { $s } }
+    $ev = { param($lista, [int]$n)
+        @($lista | Sort-Object Momento -Descending | Select-Object -First $n | ForEach-Object { "$($_.Momento.ToString('dd/MM HH:mm'))  $($_.Origen): $(& $corta $_.Mensaje 100)" })
+    }
+    $add = { param($Icono, $Titulo, $Conf, $Lista, $Accion, $Control, $Prueba)
+        $lista = @($Lista | Sort-Object Momento)
+        $reinc = ''
+        $dias = @($lista | Group-Object { $_.Momento.ToString('yyyyMMdd') }).Count
+        if ($dias -ge 2 -and ($lista[$lista.Count - 1].Momento - $lista[0].Momento).TotalHours -ge 12) { $reinc = "REINCIDENTE: estas senales aparecieron en $dias dias distintos (la primera vez el $($lista[0].Momento.ToString('dd/MM/yyyy')))." }
+        $v.Add([PSCustomObject]@{ Icono = $Icono; Titulo = $Titulo; Confianza = $Conf; N = $lista.Count; Evidencias = (& $ev $lista 4); Accion = $Accion; Control = $Control; Prueba = $Prueba; Reincidencia = $reinc })
+    }
+    $bsod = @($ent | Where-Object { $_.Categoria -eq 'Pantalla azul' })
+    $codigoEn = { param($lista, $cods) ,@($lista | Where-Object { $cods -contains (Get-CodigoBsodError -E $_) }) }
+    $apag = @($ent | Where-Object { $_.Categoria -eq 'Apagado inesperado' })
+    $cong = @($ent | Where-Object { $_.Categoria -eq 'Congelamiento' -and $_.Tipo -eq 'ERROR' })
+
+    # --- Disco ---
+    $strong = @($ent | Where-Object { "$($_.Origen) $($_.Mensaje)" -match '(?i)sectores danados sin resolver|predice que va a fallar|estado de salud del disco|errores de lectura/escritura sin corregir|estado del disco como' })
+    $fs = @($ent | Where-Object { "$($_.Origen)" -match '(?i)NTFS|Sistema de archivos' -or "$($_.Mensaje)" -match '(?i)esta marcado como sucio' })
+    $ctl = @($ent | Where-Object { "$($_.Origen)" -match '(?i)Disco duro/SSD|Controlador de almacenamiento|SSD NVMe|Controlador SATA|Administrador de volumenes' -or $_.Categoria -eq 'Disco: varios indicios de fallo' })
+    $bsDisco = & $codigoEn $bsod @(0x7A, 0x24, 0x23, 0x7B)
+    $apoyo = @($fs) + @($ctl) + @($bsDisco)
+    if ($strong.Count -gt 0 -and $apoyo.Count -gt 0) {
+        & $add '💽' 'Probable disco fallando: el propio disco reporta danos y ademas hay errores del sistema de archivos / controlador' 'Alta' (@($strong) + $apoyo) 'Haz copia de seguridad de los datos del cliente YA. Revisa S.M.A.R.T., ejecuta chkdsk y, si los sectores danados siguen subiendo, cambia el disco (revisa tambien el cable SATA).' 'BtnDiscoSmart' 'Estado S.M.A.R.T. del disco'
+    } elseif ($strong.Count -gt 0) {
+        & $add '💽' 'El disco reporta danos propios (SMART / estado de salud)' 'Alta' $strong 'Haz copia de seguridad de los datos y comprueba S.M.A.R.T.; un disco con sectores danados o fallo predicho debe cambiarse.' 'BtnDiscoSmart' 'Estado S.M.A.R.T. del disco'
+    } elseif ($apoyo.Count -ge 2) {
+        & $add '💽' 'Errores repetidos del disco, su controlador o el sistema de archivos' 'Media' $apoyo 'Ejecuta chkdsk /f /r y revisa S.M.A.R.T.; cambia el cable/puerto SATA si es un disco SATA. Si los errores vuelven, cambia el disco.' 'BtnDiscoChkdsk' 'Revisar el sistema de archivos (chkdsk)'
+    }
+    $crc = @($ent | Where-Object { "$($_.Mensaje)" -match '(?i)errores de comunicacion \(CRC\)' })
+    if ($crc.Count -gt 0) { & $add '🔌' 'Errores de comunicacion con el disco (CRC): casi siempre cable o conector SATA' 'Media' $crc 'Cambia el cable SATA, prueba otro puerto y vuelve a comprobar S.M.A.R.T.' 'BtnDiscoSmart' 'Estado S.M.A.R.T. del disco' }
+
+    # --- Energia ---
+    $bat = @($ent | Where-Object { ("$($_.Origen)" -eq 'Bateria' -and "$($_.Mensaje)" -match '(?i)perdio') -or "$($_.Origen)" -match '(?i)Estado de la bateria|Bateria no detectada' -or ("$($_.Origen)" -match 'Carga de la bateria' -and $_.Tipo -eq 'ERROR') })
+    if ($apag.Count -gt 0 -and $bat.Count -gt 0) {
+        & $add '🔋' 'Apagados inesperados + bateria deteriorada: revisar la bateria' $(if ($apag.Count -ge 2) { 'Alta' } else { 'Media' }) (@($apag) + @($bat)) 'Mide la capacidad real de la bateria; si perdio mucha capacidad o no sostiene la carga, reemplazala. Prueba tambien con otro cargador.' 'BtnAlimBateria' 'Revision de bateria'
+    } elseif ($apag.Count -ge 2) {
+        & $add '⚡' 'Apagados inesperados repetidos sin falla de bateria registrada: revisar cargador, fuente de poder y temperatura' 'Media' $apag 'Prueba con otro cargador/fuente, revisa temperaturas y que el equipo no se este reiniciando por un fallo de hardware.' 'BtnAlimBateria' 'Revision de bateria'
+    }
+
+    # --- Memoria ---
+    $ramDiag = @($ent | Where-Object { "$($_.Origen)" -match 'Prueba de memoria RAM de Windows' })
+    $whea = @($ent | Where-Object { "$($_.Origen)" -match 'WHEA' })
+    $bsRam = & $codigoEn $bsod @(0x1A, 0x4E, 0x50)
+    if ($ramDiag.Count -gt 0) {
+        & $add '🧠' 'Windows encontro errores en la memoria RAM' 'Alta' (@($ramDiag) + @($whea) + @($bsRam)) 'Retira los modulos de RAM de uno en uno para ubicar el defectuoso y reemplazalo; quita XMP/overclock.' 'BtnProbarRAM' 'Prueba de memoria RAM'
+    } elseif (($whea.Count + $bsRam.Count) -ge 2) {
+        & $add '🧠' 'Errores de hardware repetidos (WHEA / pantallas azules de memoria): RAM, CPU o placa' 'Media' (@($whea) + @($bsRam)) 'Ejecuta la prueba de RAM, quita overclock/XMP y revisa temperaturas y fuente de poder.' 'BtnProbarRAM' 'Prueba de memoria RAM'
+    }
+
+    # --- Temperatura ---
+    $term = @($ent | Where-Object { "$($_.Origen)" -match '(?i)Temperatura|throttling|CPU limitada' })
+    $efect = @($apag) + @($bsod) + @($cong)
+    # solo se concluye si la falla ocurrio DESPUES (hasta 60 min) de una temperatura alta, o si el propio apagado menciona el calor
+    $corr = @($efect | Where-Object { $ef = $_; "$($ef.Mensaje)" -match '(?i)sobrecalent|temperatura' -or @($term | Where-Object { $mm = ($ef.Momento - $_.Momento).TotalMinutes; $mm -ge 0 -and $mm -le 60 }).Count -gt 0 })
+    if ($corr.Count -gt 0 -and ($term.Count -gt 0 -or $corr.Count -gt 0)) {
+        & $add '🌡️' 'Sobrecalentamiento probable: la falla ocurrio poco despues de temperaturas altas (o el propio apagado menciona el calor)' $(if ($term.Count -ge 2) { 'Alta' } else { 'Media' }) (@($term) + $corr) 'Limpia ventiladores y disipador, renueva la pasta termica y comprueba que no haya rejillas bloqueadas.' 'BtnProbarTemperatura' 'Prueba de temperatura'
+    } elseif ($term.Count -ge 3) {
+        & $add '🌡️' 'Temperaturas altas repetidas' 'Media' $term 'Limpia ventiladores y disipador y renueva la pasta termica.' 'BtnProbarTemperatura' 'Prueba de temperatura'
+    }
+
+    # --- Video ---
+    $vid = @($ent | Where-Object { "$($_.Origen)" -match '(?i)Controlador de video|GPU NVIDIA|Display' })
+    $bsVid = & $codigoEn $bsod @(0x116, 0x117, 0x119, 0x141)
+    if ($vid.Count -ge 2 -or ($vid.Count -ge 1 -and ($bsVid.Count -ge 1 -or $cong.Count -ge 1))) {
+        & $add '🖥️' 'Driver o hardware de video con problemas' $(if ($bsVid.Count -ge 1) { 'Alta' } else { 'Media' }) (@($vid) + @($bsVid)) 'Reinstala el driver de video de forma limpia, quita overclock y revisa la temperatura de la GPU.' 'BtnProbarGrafica' 'Prueba de graficos'
+    }
+
+    # --- Pantallas azules repetidas con el mismo codigo (si no estan ya explicadas arriba) ---
+    $yaExpl = @(0x7A, 0x24, 0x23, 0x7B, 0x1A, 0x4E, 0x50, 0x116, 0x117, 0x119, 0x141)
+    foreach ($g in @($bsod | Group-Object { Get-CodigoBsodError -E $_ })) {
+        $cod = [int]$g.Name
+        if ($g.Count -ge 2 -and $cod -ge 0 -and $yaExpl -notcontains $cod) {
+            & $add '💀' ("Pantalla azul repetida con el mismo codigo (0x{0:X})" -f $cod) 'Alta' @($g.Group) 'Abre el analisis de pantallas azules para ver el controlador culpable; actualiza o revierte ese controlador y prueba la RAM.' 'BtnActualizarBSODTab' 'Analizar pantallas azules (BSOD)'
+        }
+    }
+    # --- Seguridad / Windows / controladores ---
+    $seg = @($ent | Where-Object { $_.Categoria -eq 'Seguridad' })
+    if ($seg.Count -gt 0) { & $add '🛡️' 'Windows Defender detecto o no pudo eliminar amenazas' 'Alta' $seg 'Ejecuta un analisis completo y revisa el historial de proteccion antes de devolver el equipo.' 'BtnDefenderFull' 'Analisis completo con Defender' }
+    $win = @($ent | Where-Object { $_.Categoria -in 'Aplicacion / servicio', 'Servicio critico' -and ($_.Tipo -eq 'ERROR') })
+    if ($win.Count -ge 2) { & $add '🪟' 'Windows o varios programas inestables' 'Media' $win 'Ejecuta SFC y DISM; si persiste, reinstala los programas afectados o repara Windows.' 'BtnSFC' 'Verificar archivos del sistema (SFC)' }
+    $drv = @($ent | Where-Object { $_.Categoria -eq 'Controlador (driver)' -or "$($_.Origen)" -match '^Dispositivo:' })
+    if ($drv.Count -ge 2) { & $add '🧩' 'Varios controladores o dispositivos con problemas' 'Media' $drv 'Actualiza o reinstala los controladores indicados desde la pestana Controladores.' 'BtnDetectarTodo' 'Detectar controladores' }
+
+    $orden = @($v.ToArray() | Sort-Object @{ Expression = { if ($_.Confianza -eq 'Alta') { 0 } else { 1 } } }, @{ Expression = { $_.N }; Descending = $true })
+    return ,$orden
+}
+
+# Salta a la prueba (controla la barra de busqueda: escribe el nombre y navega a la funcion)
+function Global:Ir-PruebaSugerida {
+    param([string]$Control, [string]$Prueba = '')
+    if (-not $Control) { Show-Aviso 'Este registro no tiene una prueba asociada.' 'Registro de errores'; return }
+    try {
+        $ctl = $window.FindName($Control)
+        if (-not $ctl) { Show-Aviso "No se encontro la prueba '$Prueba' en esta version del programa." 'Registro de errores'; return }
+        $tab = [System.Windows.LogicalTreeHelper]::GetParent($ctl)
+        while ($tab -and -not ($tab -is [System.Windows.Controls.TabItem])) { $tab = [System.Windows.LogicalTreeHelper]::GetParent($tab) }
+        $caja = $window.FindName('TxtBusquedaGlobal')
+        if ($caja -and $Prueba) { $caja.Text = $Prueba }
+        $e = [PSCustomObject]@{ Tipo = 'Funcion'; Tab = $tab; Control = $ctl; Titulo = $Prueba; Combo = ''; ComboItem = '' }
+        Ir-ResultadoBusqueda -E $e
+        try { $pop = $window.FindName('PopBusqueda'); if ($pop) { $pop.IsOpen = $false } } catch {}
+    } catch { Registrar-FalloInterno 'ir a la prueba sugerida' $_ }
+}
+
+function Global:Aplicar-VeredictoError {
+    param($Veredictos)
+    $panel = $window.FindName('PanelVeredicto')
+    if (-not $panel) { return }
+    $panel.Children.Clear()
+    $bc = New-Object System.Windows.Media.BrushConverter
+    $window.FindName('TxtHistorialEquipo').Text = Get-ResumenHistorialEquipo
+    $lista = @($Veredictos)
+    if ($lista.Count -eq 0) {
+        $t = New-Object System.Windows.Controls.TextBlock
+        $nEq = @($Script:RegistroErrores.ToArray() | Where-Object { "$($_.Ambito)" -eq 'Equipo' }).Count
+        $t.Text = "✅ Sin indicios graves cruzados en lo registrado ($nEq hallazgo(s) del equipo analizados). Esto NO descarta fallos que aun no dejaron rastro: ejecuta las pruebas de 'Diagnosticar equipo' y pulsa 'Escanear hardware ahora' para revisar eventos de las ultimas 72 horas."
+        $t.Foreground = $bc.ConvertFromString('#9FE8C8'); $t.TextWrapping = 'Wrap'; $t.FontSize = 12
+        [void]$panel.Children.Add($t)
+        return
+    }
+    foreach ($x in $lista) {
+        $b = New-Object System.Windows.Controls.Border
+        $col = if ($x.Confianza -eq 'Alta') { '#FF6B6B' } else { '#FFC857' }
+        $b.BorderBrush = $bc.ConvertFromString($col); $b.BorderThickness = '3,0,0,0'; $b.Background = $bc.ConvertFromString('#CC0A0D14')
+        $b.Padding = '10,8'; $b.Margin = '0,0,0,8'; $b.CornerRadius = '6'
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $t1 = New-Object System.Windows.Controls.TextBlock
+        $t1.Text = "$($x.Icono) $($x.Titulo)   [confianza $($x.Confianza.ToLower()), $($x.N) indicio(s)]"
+        $t1.FontWeight = 'Bold'; $t1.FontSize = 13; $t1.Foreground = [System.Windows.Media.Brushes]::White; $t1.TextWrapping = 'Wrap'
+        [void]$sp.Children.Add($t1)
+        if ($x.Reincidencia) {
+            $tr = New-Object System.Windows.Controls.TextBlock
+            $tr.Text = "🔁 $($x.Reincidencia)"; $tr.FontSize = 11; $tr.FontWeight = 'SemiBold'; $tr.Foreground = $bc.ConvertFromString('#FF9E9E'); $tr.Margin = '0,3,0,0'; $tr.TextWrapping = 'Wrap'
+            [void]$sp.Children.Add($tr)
+        }
+        $t2 = New-Object System.Windows.Controls.TextBlock
+        $t2.Text = (@($x.Evidencias | ForEach-Object { "• $_" }) -join "`n")
+        $t2.FontSize = 11; $t2.Foreground = $bc.ConvertFromString('#9FB4D8'); $t2.Margin = '0,4,0,0'; $t2.TextWrapping = 'Wrap'
+        [void]$sp.Children.Add($t2)
+        $t3 = New-Object System.Windows.Controls.TextBlock
+        $t3.Text = "➡ $($x.Accion)"; $t3.FontSize = 12; $t3.Foreground = $bc.ConvertFromString('#66AEFF'); $t3.Margin = '0,4,0,0'; $t3.TextWrapping = 'Wrap'
+        [void]$sp.Children.Add($t3)
+        if ($x.Control) {
+            $bt = New-Object System.Windows.Controls.Button
+            $bt.Content = "🧪 Ir a la prueba: $($x.Prueba)"; $bt.Height = 34; $bt.HorizontalAlignment = 'Left'; $bt.Margin = '0,6,0,0'; $bt.Padding = '12,4'
+            $bt.Tag = @{ Control = "$($x.Control)"; Prueba = "$($x.Prueba)" }
+            $bt.Add_Click({ $tg = $args[0].Tag; Ir-PruebaSugerida -Control $tg.Control -Prueba $tg.Prueba })
+            [void]$sp.Children.Add($bt)
+        }
+        $b.Child = $sp
+        [void]$panel.Children.Add($b)
+    }
+}
+
+function Global:Actualizar-VeredictoError {
+    try { Aplicar-VeredictoError -Veredictos (Get-VeredictoEquipo) } catch { Registrar-FalloInterno 'veredicto del registro de errores' $_ }
+}
+
+# ---- Linea de tiempo ------------------------------------------------------------------------
+function Global:Show-LineaTiempoError {
+    [xml]$x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Linea de tiempo del equipo" Height="720" Width="940" MinHeight="480" MinWidth="700"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="16">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <TextBlock Text="🕒 Que paso primero en este equipo" FontSize="20" FontWeight="Bold" Foreground="White"/>
+      <TextBlock x:Name="TxtLTResumen" FontSize="12" Foreground="#66AEFF" TextWrapping="Wrap" Margin="0,4,0,0"/>
+      <WrapPanel Margin="0,8,0,0">
+        <TextBlock Text="Periodo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
+        <ComboBox x:Name="CmbLTPeriodo" Width="230">
+          <ComboBoxItem Content="Ultimas 24 horas"/>
+          <ComboBoxItem Content="Ultimos 7 dias" IsSelected="True"/>
+          <ComboBoxItem Content="Ultimos 30 dias"/>
+          <ComboBoxItem Content="Todo el historial"/>
+        </ComboBox>
+      </WrapPanel>
+    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="PanelLT"/></ScrollViewer>
+  </DockPanel>
+</Window>
+"@
+    $w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
+    try { if ($window -and $window.IsVisible) { $w.Owner = $window } } catch {}
+    Iniciar-EfectosNeon -Ventana $w
+    $Global:LTUi = @{ Panel = $w.FindName('PanelLT'); Resumen = $w.FindName('TxtLTResumen'); Cmb = $w.FindName('CmbLTPeriodo') }
+    $w.FindName('CmbLTPeriodo').Add_SelectionChanged({ try { Dibujar-LineaTiempoError } catch { Registrar-FalloInterno 'linea de tiempo' $_ } })
+    Dibujar-LineaTiempoError
+    [void]$w.ShowDialog()
+    $Global:LTUi = $null
+}
+
+function Global:Dibujar-LineaTiempoError {
+    $u = $Global:LTUi
+    if (-not $u) { return }
+    $panel = $u.Panel; $panel.Children.Clear()
+    $bc = New-Object System.Windows.Media.BrushConverter
+    $desde = [datetime]::MinValue
+    switch ($u.Cmb.SelectedIndex) { 0 { $desde = (Get-Date).AddHours(-24) } 1 { $desde = (Get-Date).AddDays(-7) } 2 { $desde = (Get-Date).AddDays(-30) } }
+    $ev = @($Script:RegistroErrores.ToArray() | Where-Object { "$($_.Ambito)" -eq 'Equipo' -and $_.Momento -ge $desde } | Sort-Object Momento)
+    $u.Resumen.Text = "$($ev.Count) hallazgo(s) del equipo en el periodo, de mas antiguo a mas reciente. Solo se muestra lo del equipo del cliente (no los avisos internos del programa)."
+    $txt = { param($t, $col, $size, $peso, $m)
+        $b = New-Object System.Windows.Controls.TextBlock
+        $b.Text = $t; $b.TextWrapping = 'Wrap'; $b.FontSize = $size; $b.Foreground = $bc.ConvertFromString($col); $b.Margin = $m
+        if ($peso) { $b.FontWeight = $peso }
+        $b
+    }
+    if ($ev.Count -eq 0) { [void]$panel.Children.Add((& $txt 'No hay hallazgos del equipo en este periodo.' '#9FB4D8' 13 $null '0,10,0,0')); return }
+    # Cadenas causa -> consecuencia: lo que paso en los 30 min previos a un apagado / pantalla azul / congelamiento
+    $efectos = @($ev | Where-Object { $_.Categoria -in 'Apagado inesperado', 'Pantalla azul', 'Congelamiento' -and $_.Tipo -eq 'ERROR' })
+    $cadenas = New-Object System.Collections.Generic.List[string]
+    foreach ($f in $efectos) {
+        $prev = @($ev | Where-Object { $_.Momento -lt $f.Momento -and ($f.Momento - $_.Momento).TotalMinutes -le 30 -and $_.Categoria -notin 'Apagado inesperado', 'Pantalla azul', 'Congelamiento' -and $_.GravedadN -ge 1 -and $_.Categoria -notlike 'Rendimiento*' })
+        if ($prev.Count -gt 0) {
+            $p0 = $prev | Sort-Object Momento | Select-Object -First 1
+            $cadenas.Add("$($p0.Momento.ToString('dd/MM HH:mm'))  $($p0.Origen)  ➜  $($f.Momento.ToString('HH:mm'))  $($f.Categoria) ($([int](($f.Momento - $p0.Momento).TotalMinutes)) min despues)$(if ($prev.Count -gt 1) { ", con $($prev.Count - 1) hallazgo(s) mas entre medias" })")
+        }
+    }
+    if ($cadenas.Count -gt 0) {
+        $bx = New-Object System.Windows.Controls.Border
+        $bx.BorderBrush = $bc.ConvertFromString('#FFC857'); $bx.BorderThickness = '3,0,0,0'; $bx.Background = $bc.ConvertFromString('#CC0A0D14'); $bx.Padding = '10,8'; $bx.Margin = '0,0,0,10'
+        $sp = New-Object System.Windows.Controls.StackPanel
+        [void]$sp.Children.Add((& $txt '⛓ Secuencias detectadas (algo paso poco antes de la falla)' '#FFC857' 13 'Bold' '0,0,0,4'))
+        foreach ($c in @($cadenas.ToArray() | Select-Object -Last 8)) { [void]$sp.Children.Add((& $txt "• $c" '#EAF0FA' 11.5 $null '0,2,0,0')) }
+        $bx.Child = $sp
+        [void]$panel.Children.Add($bx)
+    }
+    $dia = ''; $ant = $null
+    foreach ($e in $ev) {
+        $d = $e.Momento.ToString('dddd dd/MM/yyyy')
+        if ($d -ne $dia) { $dia = $d; $ant = $null; [void]$panel.Children.Add((& $txt "📅 $d" '#66AEFF' 14 'Bold' '0,10,0,4')) }
+        if ($ant -and ($e.Momento - $ant).TotalMinutes -ge 1) {
+            $gap = [int]($e.Momento - $ant).TotalMinutes
+            [void]$panel.Children.Add((& $txt "        ↓ $(if ($gap -ge 120) { '' + [math]::Round($gap / 60, 1) + ' h' } else { '' + $gap + ' min' }) despues" '#5B6B8C' 10 $null '0,0,0,0'))
+        }
+        $ant = $e.Momento
+        $col = switch ([int]$e.GravedadN) { 3 { '#FF6B6B' } 2 { '#FF9E57' } 1 { '#FFC857' } default { '#7C93BD' } }
+        $b = New-Object System.Windows.Controls.Border
+        $b.BorderBrush = $bc.ConvertFromString($col); $b.BorderThickness = '3,0,0,0'; $b.Background = $bc.ConvertFromString('#990A0D14'); $b.Padding = '10,5'; $b.Margin = '0,2,0,2'
+        $sp = New-Object System.Windows.Controls.StackPanel
+        [void]$sp.Children.Add((& $txt "$($e.Momento.ToString('HH:mm:ss'))   [$($e.Gravedad)]   $($e.Categoria)  -  $($e.Origen)$(if ([int]$e.Veces -gt 1) { '  (x' + $e.Veces + ')' })" $col 12 'SemiBold' '0,0,0,0'))
+        $m = "$($e.Mensaje)"; if ($m.Length -gt 220) { $m = $m.Substring(0, 220) + '...' }
+        [void]$sp.Children.Add((& $txt $m '#CFE3FF' 11 $null '0,2,0,0'))
+        $b.Child = $sp
+        [void]$panel.Children.Add($b)
+    }
+}
+
+function Global:Iniciar-HistorialErrores {
+    try {
+        $t = New-Object System.Windows.Threading.DispatcherTimer
+        $t.Interval = [TimeSpan]::FromSeconds(5)
+        $Global:HistErrArranque = $t
+        $t.Add_Tick({ try { $Global:HistErrArranque.Stop() } catch {}; try { Cargar-HistorialErrores } catch {} })
+        $t.Start()
+    } catch {}
+}
+
+function Global:Vaciar-HistorialErrores {
+    $H = $Global:HistErr
+    try {
+        if ($H.Ruta -and (Test-Path $H.Ruta)) { Remove-Item -Path $H.Ruta -Force -ErrorAction SilentlyContinue }
+        $H.Visitas.Clear(); [void]$H.Visitas.Add((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))
+        $H.Sucio = $true
+        Guardar-HistorialErrores
+    } catch {}
+}
+
 # Agrega una entrada al registro de errores (con deduplicacion de repeticiones recientes).
 function Global:Add-RegistroError {
     param(
         [string]$Tipo = 'ERROR', [string]$Categoria = 'Programa general', [string]$Origen = 'Desconocido',
-        [string]$Mensaje, [string]$Solucion = '', [string]$Detalle = '', $Momento = $null, [int]$Notif = -1
+        [string]$Mensaje, [string]$Solucion = '', [string]$Detalle = '', $Momento = $null, [int]$Notif = -1, [string]$Clave = ''
     )
     try {
         $ahora = if ($Momento) { [datetime]$Momento } else { Get-Date }
@@ -1236,8 +1744,15 @@ function Global:Add-RegistroError {
                 if ($e.Mensaje -eq $Mensaje -and $e.Origen -eq $Origen -and ($ahora - $e.Momento).TotalSeconds -lt 90) {
                     $e.Veces = [int]$e.Veces + 1; $e.Momento = $ahora
                     $e.Hora = $ahora.ToString('HH:mm:ss')
+                    try { Enriquecer-Error $e; if ("$($e.Ambito)" -eq 'Equipo') { $Global:HistErr.Sucio = $true } } catch {}
                     return
                 }
+            }
+        } else {
+            # evento con su propia hora: si ya esta registrado (por ejemplo, guardado en el historial del equipo) no se repite
+            $fechaTxt = $ahora.ToString('yyyy-MM-dd HH:mm:ss')
+            foreach ($e in $Script:RegistroErrores) {
+                if ($e.Fecha -eq $fechaTxt -and $e.Mensaje -eq $Mensaje -and $e.Origen -eq $Origen) { return }
             }
         }
         $hora = if ($ahora.Date -eq (Get-Date).Date) { $ahora.ToString('HH:mm:ss') } else { $ahora.ToString('dd/MM HH:mm') }
@@ -1245,9 +1760,11 @@ function Global:Add-RegistroError {
             Hora = $hora; Fecha = $ahora.ToString('yyyy-MM-dd HH:mm:ss'); Momento = $ahora
             Tipo = $Tipo; Categoria = $Categoria; Origen = $Origen; Mensaje = $Mensaje
             Solucion = $(if ($Solucion) { $Solucion } else { Get-SolucionSugeridaError -Categoria $Categoria -Mensaje $Mensaje -Origen $Origen })
-            Detalle = $Detalle; Veces = 1
+            Detalle = $Detalle; Veces = 1; Persistente = $false; Clave = $Clave
         }
+        try { Enriquecer-Error $entradaNueva } catch {}
         $Script:RegistroErrores.Add($entradaNueva) | Out-Null
+        try { if ("$($entradaNueva.Ambito)" -eq 'Equipo') { $Global:HistErr.Sucio = $true } } catch {}
         # Notificacion flotante: errores nuevos y recientes (los avisos solo si son de hardware, energia, congelamiento, etc.)
         try {
             if ($Global:NotifActiva -and ($Tipo -eq 'ERROR' -or $Tipo -eq 'AVISO')) {
@@ -1466,7 +1983,7 @@ function Global:Procesar-ResultadosHardware {
         $notif = -1
         if ($r.PSObject.Properties['Forzar'] -and $r.Forzar) { $notif = 1 }
         elseif ($r.PSObject.Properties['Notificar'] -and -not $r.Notificar) { $notif = 0 }
-        Add-RegistroError -Tipo "$($r.Tipo)" -Categoria $cat -Origen "$($r.Origen)" -Mensaje "$($r.Mensaje)" -Solucion "$($r.Solucion)" -Momento $mom -Notif $notif
+        Add-RegistroError -Tipo "$($r.Tipo)" -Categoria $cat -Origen "$($r.Origen)" -Mensaje "$($r.Mensaje)" -Solucion "$($r.Solucion)" -Momento $mom -Notif $notif -Clave "$($r.Clave)"
         if ($notif -eq -1 -and ((Get-Date) - $mom).TotalMinutes -ge 15) { $antiguos++; if ("$($r.Tipo)" -eq 'ERROR') { $antErr++ } }
         $nuevos++
     }
@@ -12070,6 +12587,7 @@ function Global:Evaluar-MedicionPostReinicio {
         if (-not (Test-Path $dir)) { New-Item -Path $dir -ItemType Directory -Force | Out-Null }
         Add-Content -Path $Script:RutaHistorialMed -Value ("{0} | {1} | RAM {2}->{3} MB | procesos {4}->{5} | servicios {6}->{7}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm'), $j.Perfil, $antesRam, $ahoraRam, $j.Procesos, $ahora.Procesos, $j.Servicios, $ahora.ServiciosActivos) -Encoding UTF8
     } catch {}
+    if ("$($j.Perfil)" -like 'Optimizacion guiada*') { try { Registrar-PostReinicioOG -Texto $txt } catch {} }
     Descartar-MedicionPendiente
     Write-Log ("Medicion real tras reiniciar: RAM en uso $antesRam -> $ahoraRam MB; procesos $($j.Procesos) -> $($ahora.Procesos); servicios $($j.Servicios) -> $($ahora.ServiciosActivos). $veredicto") -Tipo INFO
     try { Show-Aviso $txt 'Resultado real del perfil - The Dragon Tool' } catch {}
@@ -12690,6 +13208,793 @@ function Perfil-EquipoModerno {
     )
     Invoke-PasosPerfil -Ventana $prog -Pasos $pasos
     Finalizar-Perfil -Ventana $prog -Titulo "Perfil Equipo moderno" -Antes $antes -Nota "Reinicia el equipo para que todos los cambios surtan efecto."
+}
+
+# ---------------------------------------------------------------------------
+#  OPTIMIZACION GUIADA POR MEDICION
+#  1) Mide 60-90 s que consume de verdad el equipo (procesos, servicios, inicio).
+#  2) Muestra una vista previa con el ahorro ESTIMADO de cada cambio y una casilla por cambio.
+#  3) Crea un punto de restauracion y aplica SOLO lo marcado, comprobando cada cambio.
+#  4) Cada cambio queda guardado en disco y se puede deshacer uno por uno.
+#  5) Mide antes/despues (y tras reiniciar) y genera un informe que se puede guardar en PDF.
+# ---------------------------------------------------------------------------
+$Script:DirOG = Join-Path $env:ProgramData 'TheDragonTool\optguiada'
+$Script:RutaCambiosOG = Join-Path $Script:DirOG 'cambios.json'
+$Script:RutaUltimaSesionOG = Join-Path $Script:DirOG 'ultima_sesion.txt'
+$Global:OGUi = $null
+
+# Servicios que se pueden ofrecer: solo aparecen si estaban EN EJECUCION y costaban recursos en la medicion.
+# Auto = se marca por defecto; Dispositivo = si el equipo tiene ese dispositivo se deja SIN marcar.
+$Script:CatalogoServiciosOG = @(
+    @{ N = 'SysMain';          T = 'SysMain (Superfetch: precarga programas en la RAM)'; Auto = $true;  Disp = '';          Nota = 'En discos HDD o con poca RAM suele estorbar mas de lo que ayuda.' },
+    @{ N = 'WSearch';          T = 'Busqueda de Windows (indexador)';                    Auto = $false; Disp = '';          Nota = 'Sin marcar por defecto: al quitarlo, buscar archivos desde Inicio es mas lento. Marcalo si el cliente casi no busca archivos.' },
+    @{ N = 'DiagTrack';        T = 'Telemetria de Windows (DiagTrack)';                  Auto = $true;  Disp = '';          Nota = 'Solo envia datos de uso a Microsoft.' },
+    @{ N = 'dmwappushservice'; T = 'Mensajes push de telemetria (WAP)';                  Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'MapsBroker';       T = 'Mapas descargados';                                  Auto = $true;  Disp = '';          Nota = 'Solo afecta a la app Mapas sin conexion.' },
+    @{ N = 'lfsvc';            T = 'Servicio de ubicacion';                              Auto = $true;  Disp = '';          Nota = 'Las apps no podran usar la ubicacion.' },
+    @{ N = 'WerSvc';           T = 'Informes de errores de Windows';                     Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'DoSvc';            T = 'Optimizacion de distribucion (Delivery Optimization)'; Auto = $true; Disp = '';         Nota = 'Windows Update seguira funcionando, solo sin compartir descargas.' },
+    @{ N = 'XblAuthManager';   T = 'Xbox: administrador de autenticacion';               Auto = $true;  Disp = '';          Nota = 'Los juegos de Xbox/Tienda no iniciaran sesion.' },
+    @{ N = 'XblGameSave';      T = 'Xbox: partidas guardadas en la nube';                Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'XboxNetApiSvc';    T = 'Xbox: servicio de red';                              Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'XboxGipSvc';       T = 'Xbox: accesorios';                                   Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'RetailDemo';       T = 'Modo demostracion de tienda';                        Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'WMPNetworkSvc';    T = 'Uso compartido de Windows Media Player';             Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'RemoteRegistry';   T = 'Registro remoto';                                    Auto = $true;  Disp = '';          Nota = 'Ademas es mas seguro tenerlo apagado.' },
+    @{ N = 'PhoneSvc';         T = 'Servicio de telefono';                               Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'Fax';              T = 'Fax';                                                Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'TrkWks';           T = 'Seguimiento de vinculos de archivos (cliente)';      Auto = $true;  Disp = '';          Nota = '' },
+    @{ N = 'Spooler';          T = 'Cola de impresion';                                  Auto = $true;  Disp = 'Impresora'; Nota = 'Sin esto no se puede imprimir.' },
+    @{ N = 'bthserv';          T = 'Soporte de Bluetooth';                               Auto = $true;  Disp = 'Bluetooth'; Nota = 'Sin esto no funcionan mouse, audifonos ni teclados Bluetooth.' },
+    @{ N = 'BthAvctpSvc';      T = 'Bluetooth: control de audio y video';                Auto = $true;  Disp = 'Bluetooth'; Nota = '' },
+    @{ N = 'WbioSrvc';         T = 'Biometria de Windows (huella / Hello)';              Auto = $true;  Disp = 'Huella';    Nota = 'Sin esto no funciona el lector de huella ni Windows Hello.' }
+)
+# Programas de inicio que NUNCA se ofrecen (antivirus y utilidades de controladores/teclas de funcion)
+$Script:PatronInicioProtegidoOG = '(?i)Defender|SecurityHealth|Avast|AVG|Kaspersky|ESET|McAfee|Norton|Bitdefender|Malwarebytes|Avira|Sophos|Webroot|Panda|TrendMicro|Realtek|RtkAud|Synaptics|SynTP|ELAN|ETDCtrl|Alps|Touchpad|Hotkey|OSD|ATKOSD|ATKPackage|Dolby|Waves|Nahimic|igfx|IntelGraphics|Wacom|NvBackend|Nvidia|RAVCpl|RAVBg'
+
+function Global:Leer-CambiosOG {
+    $l = New-Object System.Collections.Generic.List[object]
+    try {
+        if (Test-Path $Script:RutaCambiosOG) {
+            $raw = [System.IO.File]::ReadAllText($Script:RutaCambiosOG, [System.Text.Encoding]::UTF8)
+            if ($raw -and $raw.Trim()) { foreach ($x in @($raw | ConvertFrom-Json)) { if ($x) { $l.Add($x) } } }
+        }
+    } catch {}
+    return ,$l
+}
+function Global:Guardar-CambiosOG {
+    param($Lista)
+    try {
+        if (-not (Test-Path $Script:DirOG)) { New-Item -Path $Script:DirOG -ItemType Directory -Force | Out-Null }
+        $arr = $Lista.ToArray()
+        $json = if ($arr.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $arr -Depth 4 }
+        [System.IO.File]::WriteAllText($Script:RutaCambiosOG, $json, (New-Object System.Text.UTF8Encoding($true)))
+        return $true
+    } catch { Write-Log "No se pudo guardar el historial de cambios: $($_.Exception.Message)" -Tipo AVISO; return $false }
+}
+function Global:Agregar-CambioOG {
+    param($Rec)
+    $l = Leer-CambiosOG
+    $l.Add($Rec)
+    [void](Guardar-CambiosOG $l)
+}
+function Global:Actualizar-CambioOG {
+    param($Rec)
+    $l = Leer-CambiosOG
+    for ($i = 0; $i -lt $l.Count; $i++) { if ("$($l[$i].Id)" -eq "$($Rec.Id)") { $l[$i] = $Rec; break } }
+    [void](Guardar-CambiosOG $l)
+}
+
+# ---- 1) MEDICION ----------------------------------------------------------
+# Muestrea cada 5 s en otro hilo (la ventana sigue viva). Devuelve procesos (CPU, E/S y RAM acumulados) y servicios en ejecucion.
+function Global:Medir-ConsumoGuiado {
+    param([int]$Segundos = 75, $Prog)
+    $bloque = {
+        param($dur, $int)
+        $ErrorActionPreference = 'SilentlyContinue'
+        $ult = @{}; $acum = @{}
+        $cpuL = New-Object System.Collections.Generic.List[double]
+        $dskL = New-Object System.Collections.Generic.List[double]
+        $ramL = New-Object System.Collections.Generic.List[double]
+        $totMB = 0
+        $t0 = Get-Date
+        $n = [Math]::Max(2, [int][Math]::Floor($dur / $int) + 1)
+        for ($i = 0; $i -lt $n; $i++) {
+            foreach ($p in @(Get-CimInstance Win32_Process)) {
+                $id = [int]$p.ProcessId
+                if ($id -eq 0) { continue }
+                $k = [double]$p.KernelModeTime + [double]$p.UserModeTime
+                $io = [double]$p.ReadTransferCount + [double]$p.WriteTransferCount
+                if (-not $acum.ContainsKey($id)) { $acum[$id] = @{ N = "$($p.Name)"; Cpu = 0.0; Io = 0.0; Ws = 0.0; Nw = 0 } }
+                $a = $acum[$id]
+                if ($ult.ContainsKey($id)) {
+                    $dk = $k - $ult[$id].K; if ($dk -gt 0) { $a.Cpu += $dk / 1e7 }
+                    $di = $io - $ult[$id].IO; if ($di -gt 0) { $a.Io += $di }
+                }
+                $ult[$id] = @{ K = $k; IO = $io }
+                $a.Ws += [double]$p.WorkingSetSize; $a.Nw++
+            }
+            try { $os = Get-CimInstance Win32_OperatingSystem; $totMB = [double]$os.TotalVisibleMemorySize / 1024; $ramL.Add($totMB - ([double]$os.FreePhysicalMemory / 1024)) } catch {}
+            try { $c = Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average; $cpuL.Add([double]$c.Average) } catch {}
+            try { $d = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'"; $dskL.Add([double]$d.PercentDiskTime) } catch {}
+            if ($i -lt ($n - 1)) { Start-Sleep -Seconds $int }
+        }
+        $seg = ((Get-Date) - $t0).TotalSeconds
+        $procs = New-Object System.Collections.Generic.List[object]
+        foreach ($id in $acum.Keys) {
+            $a = $acum[$id]
+            $procs.Add(@{ Pid = [int]$id; Nombre = "$($a.N)"; CpuSec = [double]$a.Cpu; IoBytes = [double]$a.Io; WsMB = [Math]::Round($a.Ws / [Math]::Max(1, $a.Nw) / 1MB, 1) })
+        }
+        $svcs = New-Object System.Collections.Generic.List[object]
+        foreach ($s in @(Get-CimInstance Win32_Service | Where-Object { $_.State -eq 'Running' })) {
+            $svcs.Add(@{ Nombre = "$($s.Name)"; Display = "$($s.DisplayName)"; Pid = [int]$s.ProcessId; Modo = "$($s.StartMode)" })
+        }
+        $prom = { param($l) if ($l.Count -eq 0) { 0 } else { [Math]::Round(($l | Measure-Object -Average).Average, 1) } }
+        @{ Seg = [double]$seg; Procs = $procs.ToArray(); Servicios = $svcs.ToArray()
+           CpuProm = (& $prom $cpuL); DiscoProm = (& $prom $dskL); RamProm = (& $prom $ramL); RamTotalMB = [Math]::Round($totMB); Muestras = $n }
+    }
+    $ps = $null; $res = $null; $cancelado = $false
+    try {
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript($bloque.ToString()); [void]$ps.AddArgument($Segundos); [void]$ps.AddArgument(5)
+        $ar = $ps.BeginInvoke()
+        $t0 = Get-Date
+        while (-not $ar.IsCompleted) {
+            Wait-UI -Milisegundos 250
+            $el = ((Get-Date) - $t0).TotalSeconds
+            if ($Prog -and $Prog.Tag -eq $true) { $cancelado = $true; try { [void]$ps.BeginStop($null, $null) } catch {}; break }
+            if ($el -gt ($Segundos + 90)) { try { [void]$ps.BeginStop($null, $null) } catch {}; break }
+            if ($Prog) {
+                $pct = [int][math]::Min(94, 3 + 90 * $el / [math]::Max(1, $Segundos))
+                try { Update-VentanaProgreso -Ventana $Prog -Porcentaje $pct -Estado "Midiendo que consume el equipo: $([int]$el) de $Segundos s. No uses el equipo ni abras programas." } catch {}
+            }
+        }
+        if ($ar.IsCompleted) {
+            try {
+                foreach ($x in $ps.EndInvoke($ar)) {
+                    $h = $x; if ($x -is [System.Management.Automation.PSObject]) { $h = $x.BaseObject }
+                    if ($h -is [hashtable]) {
+                        $res = [PSCustomObject]@{ Seg = [double]$h['Seg']; Procs = @($h['Procs']); Servicios = @($h['Servicios']); CpuProm = [double]$h['CpuProm']
+                            DiscoProm = [double]$h['DiscoProm']; RamProm = [double]$h['RamProm']; RamTotalMB = [double]$h['RamTotalMB']; Muestras = [int]$h['Muestras'] }
+                    }
+                }
+            } catch {}
+        }
+    } catch {} finally { if ($ps) { try { $ps.Dispose() } catch {} } }
+    if ($cancelado) { return 'CANCELADO' }
+    return $res
+}
+
+function Global:Detectar-DispositivosOG {
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 60 -Bloque {
+        $o = @{ Impresora = $false; Bluetooth = $false; Huella = $false }
+        try { $o.Impresora = (@(Get-CimInstance Win32_Printer -ErrorAction Stop | Where-Object { $_.Name -notmatch 'PDF|XPS|OneNote|Fax|Send To|Enviar' }).Count -gt 0) } catch {}
+        try { $o.Bluetooth = (@(Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Bluetooth'" -ErrorAction Stop).Count -gt 0) } catch {}
+        try { $o.Huella = (@(Get-CimInstance Win32_PnPEntity -Filter "PNPClass='Biometric'" -ErrorAction Stop).Count -gt 0) } catch {}
+        $o
+    }
+    $d = @{ Impresora = $false; Bluetooth = $false; Huella = $false }
+    foreach ($x in $r) { $d = $x }
+    return $d
+}
+
+# ---- 2) PLAN: candidatos con costo MEDIDO ----------------------------------
+function Global:Get-CandidatosOG {
+    param($M, $Disp)
+    $seg = [math]::Max(1.0, [double]$M.Seg)
+    $nCpu = [math]::Max(1, [Environment]::ProcessorCount)
+    $porPid = @{}; $ioTot = 0.0
+    foreach ($p in $M.Procs) { $porPid[[int]$p.Pid] = $p; $ioTot += [double]$p.IoBytes }
+    $svcPorNombre = @{}; $cuenta = @{}
+    foreach ($s in $M.Servicios) {
+        $svcPorNombre["$($s.Nombre)".ToLower()] = $s
+        if ([int]$s.Pid -gt 0) { $cuenta[[int]$s.Pid] = 1 + [int]$cuenta[[int]$s.Pid] }
+    }
+    $lista = New-Object System.Collections.Generic.List[object]
+    $costo = {
+        param($procs, [int]$div)
+        $ram = 0.0; $cpuS = 0.0; $io = 0.0
+        foreach ($p in $procs) { $ram += [double]$p.WsMB; $cpuS += [double]$p.CpuSec; $io += [double]$p.IoBytes }
+        $d = [math]::Max(1, $div)
+        [PSCustomObject]@{
+            Ram = [math]::Round($ram / $d, 0); Cpu = [math]::Round(100.0 * ($cpuS / $d) / ($seg * $nCpu), 2)
+            IoMBs = [math]::Round(($io / $d) / $seg / 1MB, 2); IoPct = $(if ($ioTot -gt 0) { [math]::Round(100.0 * ($io / $d) / $ioTot, 0) } else { 0 })
+        }
+    }
+    # --- servicios ---
+    foreach ($c in $Script:CatalogoServiciosOG) {
+        $s = $svcPorNombre["$($c.N)".ToLower()]
+        if (-not $s) { continue }
+        $pid0 = [int]$s.Pid
+        if ($pid0 -le 0 -or -not $porPid.ContainsKey($pid0)) { continue }
+        $comparte = [int]$cuenta[$pid0]
+        $k = & $costo @($porPid[$pid0]) $comparte
+        if (-not ($k.Ram -ge 15 -or $k.Cpu -ge 0.3 -or $k.IoMBs -ge 0.1)) { continue }
+        $marcado = [bool]$c.Auto; $nota = "$($c.Nota)"
+        if ($c.Disp -and $Disp -and $Disp[$c.Disp]) {
+            $marcado = $false
+            $nota = "Se detecto $($c.Disp.ToLower()) en este equipo: se deja SIN marcar para no dejar al cliente sin usarlo. $nota"
+        }
+        $ev = "Medido en $([int]$seg) s: $($k.Ram) MB de RAM, $($k.Cpu)% de CPU, $($k.IoMBs) MB/s de E/S ($($k.IoPct)% de la E/S total)."
+        if ($comparte -gt 1) { $ev += " ESTIMADO: comparte proceso con $($comparte - 1) servicio(s) mas, se reparte el costo." }
+        $lista.Add([PSCustomObject]@{ Tipo = 'Servicio'; Titulo = $c.T; Clave = $c.N; Ruta = ''; RutaAp = ''; Marcado = $marcado
+            Ram = $k.Ram; Cpu = $k.Cpu; IoMBs = $k.IoMBs; IoPct = $k.IoPct; Estimado = ($comparte -gt 1); Evidencia = $ev; Nota = $nota.Trim() })
+    }
+    # --- programas de inicio ---
+    $rutas = @(
+        @{ Run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; Ap = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' },
+        @{ Run = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; Ap = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' },
+        @{ Run = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'; Ap = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32' }
+    )
+    $protegidos = 0
+    foreach ($r in $rutas) {
+        $props = Get-ItemProperty -Path $r.Run -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -match '^PS(Path|ParentPath|ChildName|Drive|Provider)$') { continue }
+            $off = $false
+            try { $ap = (Get-ItemProperty -Path $r.Ap -Name $p.Name -ErrorAction Stop).($p.Name); if ($ap -is [byte[]] -and $ap.Length -gt 0 -and (($ap[0] -band 1) -eq 1)) { $off = $true } } catch {}
+            if ($off) { continue }
+            $cmd = "$($p.Value)"
+            $exe = ''
+            if ($cmd -match '^\s*"([^"]+)"') { $exe = $Matches[1] } elseif ($cmd -match '^\s*(\S+\.exe)') { $exe = $Matches[1] } else { $exe = ($cmd.Trim() -split '\s+')[0] }
+            $leaf = ''; try { $leaf = [System.IO.Path]::GetFileName($exe) } catch {}
+            if ($p.Name -match $Script:PatronInicioProtegidoOG -or $leaf -match $Script:PatronInicioProtegidoOG) { $protegidos++; continue }
+            $mis = @(); if ($leaf) { $mis = @($M.Procs | Where-Object { "$($_.Nombre)" -ieq $leaf }) }
+            $k = & $costo $mis 1
+            $conocido = ($p.Name -match $Script:PatronInicioNoEsencial)
+            $corre = ($mis.Count -gt 0)
+            $relevante = ($k.Ram -ge 20 -or $k.Cpu -ge 0.3 -or $k.IoMBs -ge 0.1)
+            $marcado = ($conocido -or $relevante)
+            $ev = if ($corre) { "Medido en $([int]$seg) s: $($k.Ram) MB de RAM, $($k.Cpu)% de CPU, $($k.IoMBs) MB/s de E/S. Al desactivarlo no se carga en los proximos inicios (el ahorro se ve tras reiniciar)." }
+                  else { "No estaba en ejecucion al medir (puede ser un actualizador que se cierra solo). Quitarlo acorta el inicio de Windows." }
+            $nota = if (-not $marcado) { 'Sin marcar: no se vio consumo. Marcalo solo si el cliente no lo usa.' } else { '' }
+            $lista.Add([PSCustomObject]@{ Tipo = 'Inicio'; Titulo = "Programa de inicio: $($p.Name)"; Clave = $p.Name; Ruta = $r.Run; RutaAp = $r.Ap; Marcado = $marcado
+                Ram = $k.Ram; Cpu = $k.Cpu; IoMBs = $k.IoMBs; IoPct = $k.IoPct; Estimado = $false; Evidencia = $ev; Nota = $nota })
+        }
+    }
+    return [PSCustomObject]@{ Items = @($lista.ToArray() | Sort-Object @{Expression = { $_.Tipo }; Descending = $true}, @{Expression = { $_.Ram }; Descending = $true}); Protegidos = $protegidos }
+}
+
+# ---- 3) VISTA PREVIA con casillas ------------------------------------------
+function Global:Actualizar-TotalOG {
+    $u = $Global:OGUi
+    if (-not $u) { return }
+    $ram = 0.0; $cpu = 0.0; $io = 0.0; $n = 0
+    foreach ($cb in $u.Cbs) {
+        if ($cb.IsChecked -eq $true) { $it = $cb.Tag; $n++; $ram += [double]$it.Ram; $cpu += [double]$it.Cpu; $io += [double]$it.IoMBs }
+    }
+    $pctRam = if ($u.RamUsadaMB -gt 0) { [math]::Round(100.0 * $ram / $u.RamUsadaMB, 1) } else { 0 }
+    $u.TxtTotal.Text = "Marcados: $n de $($u.Cbs.Count)   |   Ahorro estimado: ~$([math]::Round($ram)) MB de RAM ($pctRam% de la RAM en uso), ~$([math]::Round($cpu, 1))% de CPU, ~$([math]::Round($io, 2)) MB/s de E/S"
+    $u.BtnAplicar.Content = "✅ Aplicar $n cambio(s)"
+    $u.BtnAplicar.IsEnabled = ($n -gt 0)
+}
+
+function Global:Show-VistaPreviaOG {
+    param($Plan, $M)
+    [xml]$x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Optimizacion guiada - Vista previa" Height="780" Width="1000" MinHeight="560" MinWidth="780"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="16">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <TextBlock Text="🎯 Que se propone cambiar en ESTE equipo" FontSize="20" FontWeight="Bold" Foreground="White"/>
+      <TextBlock x:Name="TxtOGResumen" FontSize="12" Foreground="#66AEFF" TextWrapping="Wrap" Margin="0,4,0,0"/>
+      <TextBlock x:Name="TxtOGTop" FontSize="11" Foreground="#9FB4D8" TextWrapping="Wrap" Margin="0,4,0,0"/>
+      <TextBlock Text="Cada cambio trae lo que se midio y su ahorro ESTIMADO. Destilda lo que el cliente necesite. Antes de aplicar se crea un punto de restauracion y cada cambio se podra deshacer por separado." FontSize="12" Foreground="#FFC857" TextWrapping="Wrap" Margin="0,6,0,0"/>
+    </StackPanel>
+    <StackPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
+      <TextBlock x:Name="TxtOGTotal" FontSize="13" FontWeight="Bold" Foreground="#29D398" TextWrapping="Wrap" Margin="0,0,0,8"/>
+      <TextBlock x:Name="TxtOGPie" FontSize="11" Foreground="#7C93BD" TextWrapping="Wrap" Margin="0,0,0,8"/>
+      <WrapPanel HorizontalAlignment="Right">
+        <Button x:Name="BtnOGTodo" Content="☑ Marcar todo" Width="150" Height="40"/>
+        <Button x:Name="BtnOGNada" Content="☐ Desmarcar todo" Width="160" Height="40"/>
+        <Button x:Name="BtnOGAplicar" Content="✅ Aplicar" Width="220" Height="40" BorderBrush="#29D398"/>
+        <Button x:Name="BtnOGCancelar" Content="Cancelar" Width="120" Height="40"/>
+      </WrapPanel>
+    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <StackPanel x:Name="PanelOG"/>
+    </ScrollViewer>
+  </DockPanel>
+</Window>
+"@
+    $w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
+    try { if ($window -and $window.IsVisible) { $w.Owner = $window } } catch {}
+    Iniciar-EfectosNeon -Ventana $w
+    $bc = New-Object System.Windows.Media.BrushConverter
+    $panel = $w.FindName('PanelOG')
+    $ramUso = [double]$M.RamProm
+    $w.FindName('TxtOGResumen').Text = "Medido durante $([int]$M.Seg) s: CPU promedio $($M.CpuProm)%, RAM en uso $([math]::Round($M.RamProm)) MB de $($M.RamTotalMB) MB ($(if ($M.RamTotalMB -gt 0) { [math]::Round(100.0 * $M.RamProm / $M.RamTotalMB) } else { 0 })%), disco activo $($M.DiscoProm)%."
+    $topR = (@($M.Procs | Sort-Object { [double]$_.WsMB } -Descending | Select-Object -First 5 | ForEach-Object { "$($_.Nombre) $([math]::Round($_.WsMB)) MB" }) -join '  ·  ')
+    $topC = (@($M.Procs | Sort-Object { [double]$_.CpuSec } -Descending | Select-Object -First 3 | ForEach-Object { "$($_.Nombre) $([math]::Round(100.0 * $_.CpuSec / ([math]::Max(1, $M.Seg) * [Environment]::ProcessorCount), 1))%" }) -join '  ·  ')
+    $w.FindName('TxtOGTop').Text = "Mas RAM: $topR`nMas CPU: $topC"
+    $cbs = New-Object System.Collections.Generic.List[object]
+    $grupoActual = ''
+    foreach ($it in $Plan.Items) {
+        if ($it.Tipo -ne $grupoActual) {
+            $grupoActual = $it.Tipo
+            $h = New-Object System.Windows.Controls.TextBlock
+            $h.Text = if ($it.Tipo -eq 'Servicio') { '🛠️ Servicios de Windows que estaban consumiendo' } else { '🚀 Programas que arrancan con Windows' }
+            $h.FontSize = 15; $h.FontWeight = 'Bold'; $h.Foreground = $bc.ConvertFromString('#66AEFF'); $h.Margin = '2,10,0,6'
+            [void]$panel.Children.Add($h)
+        }
+        $b = New-Object System.Windows.Controls.Border
+        $b.Background = $bc.ConvertFromString('#CC0A0D14'); $b.BorderBrush = $bc.ConvertFromString('#2F7CF6'); $b.BorderThickness = '1'
+        $b.CornerRadius = '8'; $b.Padding = '10,8'; $b.Margin = '0,0,0,6'
+        $g = New-Object System.Windows.Controls.Grid
+        $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = New-Object System.Windows.GridLength(1, 'Star')
+        $c2 = New-Object System.Windows.Controls.ColumnDefinition; $c2.Width = New-Object System.Windows.GridLength(230)
+        [void]$g.ColumnDefinitions.Add($c1); [void]$g.ColumnDefinitions.Add($c2)
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $cb = New-Object System.Windows.Controls.CheckBox
+        $cb.Content = $it.Titulo; $cb.FontWeight = 'Bold'; $cb.FontSize = 13; $cb.Foreground = [System.Windows.Media.Brushes]::White
+        $cb.IsChecked = [bool]$it.Marcado; $cb.Tag = $it
+        $cb.Add_Click({ Actualizar-TotalOG })
+        [void]$sp.Children.Add($cb)
+        $t1 = New-Object System.Windows.Controls.TextBlock
+        $t1.Text = $it.Evidencia; $t1.TextWrapping = 'Wrap'; $t1.FontSize = 11; $t1.Foreground = $bc.ConvertFromString('#9FB4D8'); $t1.Margin = '22,3,0,0'
+        [void]$sp.Children.Add($t1)
+        if ($it.Nota) {
+            $t2 = New-Object System.Windows.Controls.TextBlock
+            $t2.Text = "ℹ $($it.Nota)"; $t2.TextWrapping = 'Wrap'; $t2.FontSize = 11; $t2.Foreground = $bc.ConvertFromString('#FFC857'); $t2.Margin = '22,2,0,0'
+            [void]$sp.Children.Add($t2)
+        }
+        [System.Windows.Controls.Grid]::SetColumn($sp, 0)
+        $ahorro = New-Object System.Windows.Controls.TextBlock
+        $ahorro.Text = "$(if ($it.Estimado) { '~' })$([math]::Round($it.Ram)) MB de RAM`n$($it.Cpu)% de CPU`n$($it.IoPct)% de la E/S"
+        $ahorro.FontSize = 12; $ahorro.FontWeight = 'SemiBold'; $ahorro.Foreground = $bc.ConvertFromString('#29D398'); $ahorro.TextAlignment = 'Right'; $ahorro.VerticalAlignment = 'Center'
+        [System.Windows.Controls.Grid]::SetColumn($ahorro, 1)
+        [void]$g.Children.Add($sp); [void]$g.Children.Add($ahorro)
+        $b.Child = $g
+        [void]$panel.Children.Add($b)
+        $cbs.Add($cb)
+    }
+    $w.FindName('TxtOGPie').Text = "$($Plan.Protegidos) programa(s) de inicio protegidos (antivirus, audio, touchpad, teclas de funcion, graficos) NO se tocan. La E/S incluye disco y red. Los ahorros son ESTIMACIONES a partir de lo medido: lo que de verdad cambio se comprueba despues, antes/despues y tras reiniciar."
+    $Global:OGUi = @{ Cbs = $cbs; TxtTotal = $w.FindName('TxtOGTotal'); BtnAplicar = $w.FindName('BtnOGAplicar'); RamUsadaMB = $ramUso; Resultado = $null }
+    $w.FindName('BtnOGTodo').Add_Click({ foreach ($c in $Global:OGUi.Cbs) { $c.IsChecked = $true }; Actualizar-TotalOG })
+    $w.FindName('BtnOGNada').Add_Click({ foreach ($c in $Global:OGUi.Cbs) { $c.IsChecked = $false }; Actualizar-TotalOG })
+    $wRef = $w
+    $w.FindName('BtnOGAplicar').Add_Click({
+        $sel = New-Object System.Collections.Generic.List[object]
+        foreach ($c in $Global:OGUi.Cbs) { if ($c.IsChecked -eq $true) { $sel.Add($c.Tag) } }
+        $Global:OGUi.Resultado = $sel
+        $wRef.Close()
+    }.GetNewClosure())
+    $w.FindName('BtnOGCancelar').Add_Click({ $wRef.Close() }.GetNewClosure())
+    Actualizar-TotalOG
+    [void]$w.ShowDialog()
+    $r = $Global:OGUi.Resultado
+    $Global:OGUi = $null
+    return ,$r
+}
+
+# ---- 4) APLICAR / REVERTIR por item -------------------------------------------
+function Global:Crear-PuntoRestauracionSilencioso {
+    $desc = "The Dragon Tool - Optimizacion guiada $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
+    $r = Invoke-EnSegundoPlano -TimeoutSeg 180 -Argumentos @($desc) -Bloque {
+        param($desc)
+        $res = @{ Ok = $false; Msg = '' }
+        $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+        $prev = $null; $habia = $false
+        try { $prev = (Get-ItemProperty -Path $k -Name SystemRestorePointCreationFrequency -ErrorAction Stop).SystemRestorePointCreationFrequency; $habia = $true } catch {}
+        try {
+            try { Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction SilentlyContinue } catch {}
+            # Windows solo permite 1 punto cada 24 h; se quita ese limite solo durante este paso
+            try { Set-ItemProperty -Path $k -Name SystemRestorePointCreationFrequency -Value 0 -Type DWord -ErrorAction Stop } catch {}
+            Checkpoint-Computer -Description $desc -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+            $res.Ok = (@(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Where-Object { $_.Description -eq $desc }).Count -gt 0)
+            if (-not $res.Ok) { $res.Msg = 'Windows no confirmo el punto de restauracion.' }
+        } catch { $res.Msg = $_.Exception.Message }
+        finally {
+            try { if ($habia) { Set-ItemProperty -Path $k -Name SystemRestorePointCreationFrequency -Value $prev -Type DWord -ErrorAction SilentlyContinue } else { Remove-ItemProperty -Path $k -Name SystemRestorePointCreationFrequency -ErrorAction SilentlyContinue } } catch {}
+        }
+        $res
+    }
+    $o = @{ Ok = $false; Msg = 'sin respuesta' }
+    foreach ($x in $r) { $o = $x }
+    return $o
+}
+
+function Global:Aplicar-ItemOG {
+    param($It, [string]$SesionId)
+    if ($It.Tipo -eq 'Servicio') { Aplicar-ServicioOG -It $It -SesionId $SesionId } else { Aplicar-InicioOG -It $It -SesionId $SesionId }
+}
+
+function Global:Nuevo-RegistroOG {
+    param($It, [string]$SesionId)
+    [PSCustomObject]@{
+        Id = [guid]::NewGuid().ToString('N'); Sesion = $SesionId; Fecha = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        Tipo = "$($It.Tipo)"; Titulo = "$($It.Titulo)"; Clave = "$($It.Clave)"; Ruta = "$($It.Ruta)"; RutaAp = "$($It.RutaAp)"
+        PrevStart = -1; PrevDelayed = -1; PrevEstaba = $false; PrevAprobado = ''
+        Estado = 'Aplicado'; Verif = ''; Detalle = ''; RamMB = [double]$It.Ram; Cpu = [double]$It.Cpu; FechaRev = ''
+    }
+}
+
+function Global:Aplicar-ServicioOG {
+    param($It, [string]$SesionId)
+    $tema = "Servicio: $($It.Titulo)"
+    $n = "$($It.Clave)"
+    $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$n"
+    if (-not (Test-Path $k)) { Reg-Verif $tema 'FALLO' 'el servicio no existe en este equipo'; return }
+    $rec = Nuevo-RegistroOG -It $It -SesionId $SesionId
+    try { $rec.PrevStart = [int](Get-ItemProperty -Path $k -Name Start -ErrorAction Stop).Start } catch {}
+    try { $rec.PrevDelayed = [int](Get-ItemProperty -Path $k -Name DelayedAutostart -ErrorAction Stop).DelayedAutostart } catch {}
+    $sv = Get-Service -Name $n -ErrorAction SilentlyContinue
+    $rec.PrevEstaba = [bool]($sv -and "$($sv.Status)" -eq 'Running')
+    Agregar-CambioOG $rec     # se guarda ANTES de tocar nada: si algo falla a medias, se puede deshacer
+    [void](Invoke-EnSegundoPlano -Argumentos @($n) -TimeoutSeg 90 -Bloque {
+        param($nombre)
+        try { Stop-Service -Name $nombre -Force -ErrorAction SilentlyContinue } catch {}
+        $ok = $false
+        try { Set-Service -Name $nombre -StartupType Disabled -ErrorAction Stop; $ok = $true } catch {}
+        if (-not $ok) { try { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$nombre" -Name Start -Value 4 -Type DWord -ErrorAction Stop } catch {} }
+    })
+    $st = $null; try { $st = [int](Get-ItemProperty -Path $k -Name Start -ErrorAction Stop).Start } catch {}
+    $sv2 = Get-Service -Name $n -ErrorAction SilentlyContinue
+    $parado = (-not $sv2) -or ("$($sv2.Status)" -eq 'Stopped')
+    if ($st -ne 4) {
+        $rec.Estado = 'No aplicado'; $rec.Verif = 'FALLO'; $rec.Detalle = 'Windows protege este servicio: no se pudo desactivar'
+        Reg-Verif $tema 'FALLO' $rec.Detalle
+    } elseif ($parado) {
+        $rec.Verif = 'OK'; $rec.Detalle = 'desactivado y detenido (comprobado)'
+        Reg-Verif $tema 'OK' $rec.Detalle
+    } else {
+        $rec.Verif = 'PEND'; $rec.Detalle = 'desactivado; sigue en memoria hasta reiniciar'
+        Reg-Verif $tema 'PEND' $rec.Detalle
+    }
+    Actualizar-CambioOG $rec
+}
+
+function Global:Aplicar-InicioOG {
+    param($It, [string]$SesionId)
+    $tema = "Inicio: $($It.Clave)"
+    $rec = Nuevo-RegistroOG -It $It -SesionId $SesionId
+    try {
+        $ap = (Get-ItemProperty -Path $It.RutaAp -Name $It.Clave -ErrorAction Stop).($It.Clave)
+        if ($ap -is [byte[]]) { $rec.PrevAprobado = (($ap | ForEach-Object { $_.ToString('X2') }) -join '') }
+    } catch {}
+    Agregar-CambioOG $rec
+    try {
+        if (-not (Test-Path $It.RutaAp)) { New-Item -Path $It.RutaAp -Force | Out-Null }
+        Set-ItemProperty -Path $It.RutaAp -Name $It.Clave -Value ([byte[]](3,0,0,0,0,0,0,0,0,0,0,0)) -Type Binary -ErrorAction Stop
+    } catch {}
+    $off = $false
+    try { $v = (Get-ItemProperty -Path $It.RutaAp -Name $It.Clave -ErrorAction Stop).($It.Clave); if ($v -is [byte[]] -and $v.Length -gt 0 -and (($v[0] -band 1) -eq 1)) { $off = $true } } catch {}
+    if (-not $off) {
+        $rec.Estado = 'No aplicado'; $rec.Verif = 'FALLO'; $rec.Detalle = 'no se pudo desactivar la entrada de inicio'
+        Reg-Verif $tema 'FALLO' $rec.Detalle
+    } else {
+        $leaf = ''; try { $c = "$((Get-ItemProperty -Path $It.Ruta -Name $It.Clave -ErrorAction Stop).($It.Clave))"; if ($c -match '^\s*"([^"]+)"') { $leaf = [System.IO.Path]::GetFileNameWithoutExtension($Matches[1]) } elseif ($c -match '^\s*(\S+\.exe)') { $leaf = [System.IO.Path]::GetFileNameWithoutExtension($Matches[1]) } } catch {}
+        $corre = $false; if ($leaf) { $corre = [bool](Get-Process -Name $leaf -ErrorAction SilentlyContinue) }
+        if ($corre) { $rec.Verif = 'PEND'; $rec.Detalle = 'ya no arrancara con Windows; sigue abierto hasta cerrarlo o reiniciar' } else { $rec.Verif = 'OK'; $rec.Detalle = 'ya no arrancara con Windows (comprobado)' }
+        Reg-Verif $tema $rec.Verif $rec.Detalle
+    }
+    Actualizar-CambioOG $rec
+}
+
+# Deshace UN cambio y lo comprueba. Devuelve @{ Ok; Detalle }
+function Global:Revertir-CambioOG {
+    param($Rec)
+    $r = @{ Ok = $false; Detalle = '' }
+    try {
+        if ($Rec.Tipo -eq 'Servicio') {
+            $n = "$($Rec.Clave)"; $k = "HKLM:\SYSTEM\CurrentControlSet\Services\$n"
+            $ps = [int]$Rec.PrevStart; $pd = [int]$Rec.PrevDelayed; $estaba = [bool]$Rec.PrevEstaba
+            if ($ps -lt 0) { $r.Detalle = 'no se guardo el estado original'; return $r }
+            [void](Invoke-EnSegundoPlano -Argumentos @($n, $ps, $pd, $estaba) -TimeoutSeg 90 -Bloque {
+                param($nombre, $inicio, $retardo, $estaba)
+                try {
+                    switch ($inicio) {
+                        2 { if ($retardo -eq 1) { & sc.exe config $nombre start= delayed-auto | Out-Null } else { Set-Service -Name $nombre -StartupType Automatic -ErrorAction Stop } }
+                        3 { Set-Service -Name $nombre -StartupType Manual -ErrorAction Stop }
+                        4 { Set-Service -Name $nombre -StartupType Disabled -ErrorAction Stop }
+                        default { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$nombre" -Name Start -Value $inicio -Type DWord -ErrorAction Stop }
+                    }
+                } catch { try { Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$nombre" -Name Start -Value $inicio -Type DWord -ErrorAction Stop } catch {} }
+                if ($estaba -and $inicio -ne 4) { try { Start-Service -Name $nombre -ErrorAction SilentlyContinue } catch {} }
+            })
+            $st = $null; try { $st = [int](Get-ItemProperty -Path $k -Name Start -ErrorAction Stop).Start } catch {}
+            if ($st -eq $ps) {
+                $sv = Get-Service -Name $n -ErrorAction SilentlyContinue
+                $corre = ($sv -and "$($sv.Status)" -eq 'Running')
+                $r.Ok = $true
+                $r.Detalle = if ($estaba -and -not $corre) { 'tipo de inicio restaurado (comprobado); el servicio arrancara al reiniciar' } else { 'restaurado al estado original (comprobado)' }
+            } else { $r.Detalle = "no se pudo restaurar (inicio actual $st, original $ps)" }
+        } else {
+            $prev = "$($Rec.PrevAprobado)"
+            if ($prev) {
+                $bytes = New-Object System.Collections.Generic.List[byte]
+                for ($i = 0; $i + 1 -lt $prev.Length; $i += 2) { $bytes.Add([Convert]::ToByte($prev.Substring($i, 2), 16)) }
+                if (-not (Test-Path $Rec.RutaAp)) { New-Item -Path $Rec.RutaAp -Force | Out-Null }
+                Set-ItemProperty -Path $Rec.RutaAp -Name $Rec.Clave -Value ([byte[]]$bytes.ToArray()) -Type Binary -ErrorAction Stop
+            } else {
+                Remove-ItemProperty -Path $Rec.RutaAp -Name $Rec.Clave -ErrorAction SilentlyContinue
+            }
+            $off = $false
+            try { $v = (Get-ItemProperty -Path $Rec.RutaAp -Name $Rec.Clave -ErrorAction Stop).($Rec.Clave); if ($v -is [byte[]] -and $v.Length -gt 0 -and (($v[0] -band 1) -eq 1)) { $off = $true } } catch {}
+            if (-not $off) { $r.Ok = $true; $r.Detalle = 'el programa vuelve a arrancar con Windows (comprobado)' } else { $r.Detalle = 'no se pudo volver a activar' }
+        }
+    } catch { $r.Detalle = $_.Exception.Message }
+    return $r
+}
+
+# ---- 5) FLUJO PRINCIPAL ------------------------------------------------------
+function Global:Guardar-SesionOG {
+    param([string]$SesionId, $Antes, $Despues, $M, $Verif, $Pr)
+    try {
+        if (-not (Test-Path $Script:DirOG)) { New-Item -Path $Script:DirOG -ItemType Directory -Force | Out-Null }
+        $idn = $null; try { $idn = Obtener-IdentidadEquipo } catch {}
+        $vl = New-Object System.Collections.Generic.List[object]
+        foreach ($v in @($Verif)) { $vl.Add([PSCustomObject]@{ Tema = "$($v.Tema)"; Estado = "$($v.Estado)"; Detalle = "$($v.Detalle)" }) }
+        $o = [ordered]@{
+            Id = $SesionId; Fecha = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); Equipo = "$env:COMPUTERNAME"
+            Marca = $(if ($idn) { "$($idn.Marca)" } else { '' }); Modelo = $(if ($idn) { "$($idn.Modelo)" } else { '' }); Serie = $(if ($idn) { "$($idn.Serie)" } else { '' })
+            Seg = [int]$M.Seg; CpuProm = [double]$M.CpuProm; RamProm = [double]$M.RamProm; RamTotalMB = [double]$M.RamTotalMB; DiscoProm = [double]$M.DiscoProm
+            PuntoRestauracion = $(if ($Pr -and $Pr.Ok) { 'Creado y confirmado por Windows' } else { "No se creo ($(if ($Pr) { $Pr.Msg } else { 'sin datos' }))" })
+            AntesRamMB = [int]$Antes.RamUsadaMB; AntesProcesos = [int]$Antes.Procesos; AntesServicios = [int]$Antes.ServiciosActivos; AntesInicio = [int]$Antes.InicioActivos
+            DespuesRamMB = [int]$Despues.RamUsadaMB; DespuesProcesos = [int]$Despues.Procesos; DespuesServicios = [int]$Despues.ServiciosActivos; DespuesInicio = [int]$Despues.InicioActivos
+            Verif = $vl.ToArray(); PostReinicio = ''
+        }
+        $json = ConvertTo-Json -InputObject ([PSCustomObject]$o) -Depth 5
+        [System.IO.File]::WriteAllText((Join-Path $Script:DirOG "sesion_$SesionId.json"), $json, (New-Object System.Text.UTF8Encoding($true)))
+        [System.IO.File]::WriteAllText($Script:RutaUltimaSesionOG, $SesionId, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { Write-Log "No se pudo guardar el informe de la optimizacion: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
+}
+function Global:Leer-SesionOG {
+    param([string]$SesionId = '')
+    try {
+        if (-not $SesionId -and (Test-Path $Script:RutaUltimaSesionOG)) { $SesionId = ([System.IO.File]::ReadAllText($Script:RutaUltimaSesionOG)).Trim() }
+        if (-not $SesionId) { return $null }
+        $f = Join-Path $Script:DirOG "sesion_$SesionId.json"
+        if (-not (Test-Path $f)) { return $null }
+        return ([System.IO.File]::ReadAllText($f, [System.Text.Encoding]::UTF8) | ConvertFrom-Json)
+    } catch { return $null }
+}
+# Lo llama la medicion que se hace al reiniciar: agrega el resultado real a la ultima sesion
+function Global:Registrar-PostReinicioOG {
+    param([string]$Texto)
+    try {
+        $s = Leer-SesionOG
+        if (-not $s) { return }
+        $s.PostReinicio = $Texto
+        [System.IO.File]::WriteAllText((Join-Path $Script:DirOG "sesion_$($s.Id).json"), (ConvertTo-Json -InputObject $s -Depth 5), (New-Object System.Text.UTF8Encoding($true)))
+    } catch {}
+}
+
+function Global:Preparar-MedicionOG {
+    $mm = Medir-RendimientoEquipo -Ms 4000
+    $Script:RendAntes = @{ Cuando = Get-Date; M = $mm }
+    $pr = $Global:OGCtx.Pr
+    if ($pr.Ok) { Reg-Verif 'Punto de restauracion' 'OK' 'creado y confirmado por Windows' } else { Reg-Verif 'Punto de restauracion' 'PARCIAL' "no se pudo crear ($($pr.Msg)); los cambios se pueden deshacer uno por uno" }
+}
+function Global:Aplicar-ItemIdxOG {
+    param([int]$Idx)
+    $it = @($Global:OGCtx.Items)[$Idx]
+    Aplicar-ItemOG -It $it -SesionId "$($Global:OGCtx.Sesion)"
+}
+
+function Global:Optimizacion-Guiada {
+    if (-not (Requiere-Admin)) { return }
+    if ($Global:DiagEnCurso -or $Global:PerfilEnCurso) { Show-Aviso 'Espera a que termine la tarea en curso y vuelve a intentarlo.'; return }
+    if (-not (Show-Confirm "OPTIMIZACION GUIADA POR MEDICION`n`n1) Durante unos 75 segundos se mide que procesos, servicios y programas de inicio consumen CPU, RAM y disco en ESTE equipo (no lo uses ni abras programas mientras tanto).`n2) Veras una lista con cada cambio propuesto, el ahorro estimado y una casilla por cambio para que quites lo que el cliente necesite.`n3) Se crea un punto de restauracion y se aplica solo lo marcado, comprobando cada cambio.`n4) Cada cambio se puede deshacer por separado, y se compara antes/despues (tambien tras reiniciar).`n`n¿Empezar a medir?" 'Optimizacion guiada')) { return }
+    $Global:PerfilEnCurso = $true
+    $m = $null; $plan = $null
+    try {
+        $prog = New-VentanaProgreso -Titulo 'Optimizacion guiada: midiendo el equipo' -PermitirDetener
+        try {
+            Update-VentanaProgreso -Ventana $prog -Porcentaje 2 -Estado 'Iniciando la medicion...' -LogLinea 'Midiendo procesos, servicios y programas de inicio (75 s)...'
+            $m = Medir-ConsumoGuiado -Segundos 75 -Prog $prog
+            if ($m -is [PSCustomObject]) {
+                Update-VentanaProgreso -Ventana $prog -Porcentaje 95 -Estado 'Analizando lo medido y detectando impresora, Bluetooth y huella...' -LogLinea 'Analizando...'
+                $disp = Detectar-DispositivosOG
+                $plan = Get-CandidatosOG -M $m -Disp $disp
+            }
+        } finally { Close-VentanaProgreso -Ventana $prog -MensajeFinal 'Medicion terminada.' }
+    } finally { $Global:PerfilEnCurso = $false }
+    if (($m -is [string]) -and $m -eq 'CANCELADO') { Write-Log 'Optimizacion guiada cancelada: no se cambio nada.' -Tipo INFO; return }
+    if (-not ($m -is [PSCustomObject]) -or -not $plan) { Write-Log 'No se pudo medir el consumo del equipo.' -Tipo AVISO; Show-Aviso 'No se pudo medir el consumo del equipo. Intenta de nuevo.'; return }
+    $mObj = $m
+    if (@($plan.Items).Count -eq 0) {
+        Show-Aviso "Durante la medicion no se encontro ningun servicio ni programa de inicio que consuma lo suficiente como para valer la pena cambiarlo (CPU promedio $($mObj.CpuProm)%, RAM en uso $([math]::Round($mObj.RamProm)) MB).`n`nEl equipo ya esta limpio en ese aspecto: si sigue lento, revisa disco (SMART), temperatura o malware." 'Nada que optimizar'
+        Write-Log 'Optimizacion guiada: no hay nada que valga la pena cambiar.' -Tipo OK
+        return
+    }
+    $sel = Show-VistaPreviaOG -Plan $plan -M $mObj
+    if (-not $sel -or @($sel).Count -eq 0) { Write-Log 'Optimizacion guiada: no se aplico ningun cambio.' -Tipo INFO; return }
+    $seleccion = @($sel)
+
+    # Punto de restauracion ANTES de tocar nada
+    $prog0 = New-VentanaProgreso -Titulo 'Creando punto de restauracion'
+    $pr = $null
+    try {
+        Update-VentanaProgreso -Ventana $prog0 -Porcentaje 20 -Estado 'Creando el punto de restauracion de Windows (puede tardar un minuto)...' -LogLinea 'Punto de restauracion...'
+        $pr = Crear-PuntoRestauracionSilencioso
+    } finally { Close-VentanaProgreso -Ventana $prog0 -MensajeFinal 'Listo.' }
+    if (-not $pr.Ok) {
+        Write-Log "No se pudo crear el punto de restauracion: $($pr.Msg)" -Tipo AVISO
+        if (-not (Show-Confirm "No se pudo crear el punto de restauracion de Windows ($($pr.Msg)).`n`nDe todos modos cada cambio se guarda y se puede deshacer uno por uno.`n`n¿Aplicar los cambios igualmente?")) { return }
+    } else { Write-Log 'Punto de restauracion creado y confirmado.' -Tipo OK }
+
+    $sesion = (Get-Date).ToString('yyyyMMdd_HHmmss')
+    $antes = Get-InstantaneaSistema
+    $Script:PasosPerfil = New-Object System.Collections.Generic.List[string]
+    $prog = New-VentanaProgreso -Titulo 'Aplicando optimizacion guiada'
+    # Los pasos son bloques normales (sin closure): los datos viajan por una variable global
+    $Global:OGCtx = @{ Items = @($seleccion); Sesion = $sesion; Pr = $pr }
+    $pasos = New-Object System.Collections.Generic.List[object]
+    $pasos.Add(@{ Txt = 'Midiendo el estado antes de aplicar (para comparar de verdad)...'; Accion = { Preparar-MedicionOG } })
+    for ($ii = 0; $ii -lt @($seleccion).Count; $ii++) {
+        $pasos.Add(@{ Txt = "Aplicando: $(@($seleccion)[$ii].Titulo)"; Accion = [scriptblock]::Create("Aplicar-ItemIdxOG -Idx $ii") })
+    }
+    Invoke-PasosPerfil -Ventana $prog -Pasos $pasos.ToArray()
+
+    Close-VentanaProgreso -Ventana $prog -MensajeFinal 'Optimizacion guiada aplicada.'
+    Start-Sleep -Milliseconds 300
+    $despues = Get-InstantaneaSistema
+    $pasosTxt = @(); if ($Script:PasosPerfil) { $pasosTxt = (Como-Arreglo $Script:PasosPerfil) }
+    $Script:PasosPerfil = $null
+    try { Comparar-RendimientoTrasPerfil } catch { Write-Log "No se pudo comparar el rendimiento: $($_.Exception.Message)" -Tipo AVISO -SinRegistro }
+    $verif = $Script:Verif.ToArray()
+    $Script:Verif = New-Object System.Collections.Generic.List[object]
+    $nf = 0; foreach ($vv in $verif) { if ($vv.Estado -eq 'FALLO') { $nf++ } }
+    Write-Log "Optimizacion guiada aplicada: $(@($seleccion).Count) cambio(s) elegidos$(if ($nf -gt 0) { ", $nf no se pudieron aplicar" })." -Tipo $(if ($nf -gt 0) { 'AVISO' } else { 'OK' })
+    Guardar-MedicionAntes -Antes $antes -Titulo 'Optimizacion guiada'
+    Guardar-SesionOG -SesionId $sesion -Antes $antes -Despues $despues -M $mObj -Verif $verif -Pr $pr
+    $nota = "Cada cambio quedo guardado: puedes deshacerlo uno por uno desde 'Cambios de la optimizacion guiada' (Perfiles de optimizacion). Reinicia el equipo para que se completen los servicios y programas de inicio; al volver a abrir The Dragon Tool medira el resultado real tras reiniciar y lo agregara al informe."
+    Show-ResultadoPerfil -Titulo 'Optimizacion guiada' -Antes $antes -Despues $despues -Pasos $pasosTxt -Nota $nota -OfrecerReinicio $true -Verif $verif
+    if (Show-Confirm "¿Quieres guardar el informe de lo que SI cambio y lo que NO en un PDF para el cliente?`n(Tambien podras hacerlo luego desde 'Cambios de la optimizacion guiada'; si reinicias antes, el informe incluira la medicion tras reiniciar.)" 'Informe para el cliente') {
+        Exportar-InformeOptimizacionPDF -SesionId $sesion
+    }
+}
+
+# ---- 6) DESHACER UNO POR UNO -----------------------------------------------------
+function Global:Deshacer-FilaOG {
+    param($Boton)
+    $info = $Boton.Tag
+    if (-not $info) { return }
+    $rec = $info.Rec
+    if (-not (Requiere-Admin)) { return }
+    $r = Revertir-CambioOG -Rec $rec
+    if ($r.Ok) {
+        $rec.Estado = 'Revertido'; $rec.FechaRev = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        Actualizar-CambioOG $rec
+        $info.Txt.Text = "↩ Revertido: $($r.Detalle)"; $info.Txt.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString('#66AEFF')
+        $Boton.IsEnabled = $false
+        Write-Log "Deshecho: $($rec.Titulo) - $($r.Detalle)" -Tipo OK
+    } else {
+        $info.Txt.Text = "⚠ No se pudo deshacer: $($r.Detalle)"; $info.Txt.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString('#FFC857')
+        Write-Log "No se pudo deshacer '$($rec.Titulo)': $($r.Detalle)" -Tipo AVISO
+    }
+}
+
+function Global:Show-CambiosOG {
+    [xml]$x = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Cambios de la optimizacion guiada" Height="700" Width="920" MinHeight="480" MinWidth="700"
+        WindowStartupLocation="CenterScreen" Background="#10141D">
+  <Window.Resources>$($Global:RecursosNeonXaml)</Window.Resources>
+  <DockPanel Margin="16">
+    <Button x:Name="BtnVolverVentana" DockPanel.Dock="Top" Content="⬅  Volver" Width="110" Height="34" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+    <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+      <TextBlock Text="↩️ Cambios aplicados: deshacer uno por uno" FontSize="20" FontWeight="Bold" Foreground="White"/>
+      <TextBlock x:Name="TxtCOGResumen" FontSize="12" Foreground="#66AEFF" TextWrapping="Wrap" Margin="0,4,0,0"/>
+    </StackPanel>
+    <WrapPanel DockPanel.Dock="Bottom" HorizontalAlignment="Right" Margin="0,10,0,0">
+      <Button x:Name="BtnCOGInforme" Content="📄 Informe PDF (ultima optimizacion)" Width="290" Height="40"/>
+      <Button x:Name="BtnCOGTodo" Content="↩ Deshacer TODO" Width="190" Height="40" BorderBrush="#A85050"/>
+      <Button x:Name="BtnCOGCerrar" Content="Cerrar" Width="110" Height="40"/>
+    </WrapPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="PanelCOG"/></ScrollViewer>
+  </DockPanel>
+</Window>
+"@
+    $w = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $x))
+    try { if ($window -and $window.IsVisible) { $w.Owner = $window } } catch {}
+    Iniciar-EfectosNeon -Ventana $w
+    $bc = New-Object System.Windows.Media.BrushConverter
+    $panel = $w.FindName('PanelCOG')
+    $recs = @((Leer-CambiosOG).ToArray() | Where-Object { "$($_.Estado)" -ne 'No aplicado' } | Sort-Object { "$($_.Fecha)" } -Descending)
+    $filas = New-Object System.Collections.Generic.List[object]
+    $nAct = 0
+    foreach ($rec in $recs) {
+        $b = New-Object System.Windows.Controls.Border
+        $b.Background = $bc.ConvertFromString('#CC0A0D14'); $b.BorderBrush = $bc.ConvertFromString('#2F7CF6'); $b.BorderThickness = '1'
+        $b.CornerRadius = '8'; $b.Padding = '10,8'; $b.Margin = '0,0,0,6'
+        $g = New-Object System.Windows.Controls.Grid
+        $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = New-Object System.Windows.GridLength(1, 'Star')
+        $c2 = New-Object System.Windows.Controls.ColumnDefinition; $c2.Width = New-Object System.Windows.GridLength(150)
+        [void]$g.ColumnDefinitions.Add($c1); [void]$g.ColumnDefinitions.Add($c2)
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $t1 = New-Object System.Windows.Controls.TextBlock
+        $t1.Text = "$($rec.Titulo)"; $t1.FontWeight = 'Bold'; $t1.FontSize = 13; $t1.Foreground = [System.Windows.Media.Brushes]::White; $t1.TextWrapping = 'Wrap'
+        $t2 = New-Object System.Windows.Controls.TextBlock
+        $activo = ("$($rec.Estado)" -eq 'Aplicado')
+        $t2.Text = if ($activo) { "Aplicado el $($rec.Fecha): $($rec.Detalle)" } else { "↩ Revertido el $($rec.FechaRev)" }
+        $t2.FontSize = 11; $t2.TextWrapping = 'Wrap'; $t2.Margin = '0,3,0,0'
+        $t2.Foreground = $bc.ConvertFromString($(if ($activo) { '#9FE8C8' } else { '#66AEFF' }))
+        [void]$sp.Children.Add($t1); [void]$sp.Children.Add($t2)
+        [System.Windows.Controls.Grid]::SetColumn($sp, 0)
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Content = '↩ Deshacer'; $btn.Width = 130; $btn.Height = 36; $btn.IsEnabled = $activo; $btn.HorizontalAlignment = 'Right'
+        $btn.Tag = @{ Rec = $rec; Txt = $t2 }
+        $btn.Add_Click({ Deshacer-FilaOG -Boton $args[0] })
+        [System.Windows.Controls.Grid]::SetColumn($btn, 1)
+        [void]$g.Children.Add($sp); [void]$g.Children.Add($btn)
+        $b.Child = $g
+        [void]$panel.Children.Add($b)
+        $filas.Add($btn)
+        if ($activo) { $nAct++ }
+    }
+    $w.FindName('TxtCOGResumen').Text = if ($recs.Count -eq 0) { 'Todavia no hay cambios guardados. Usa "Optimizacion guiada" para crear los primeros.' } else { "$nAct cambio(s) activos y $($recs.Count - $nAct) ya revertidos. Cada boton restaura el estado ORIGINAL de ese cambio y lo comprueba." }
+    $Global:OGFilasCambios = $filas
+    $w.FindName('BtnCOGTodo').IsEnabled = ($nAct -gt 0)
+    $w.FindName('BtnCOGTodo').Add_Click({
+        if (-not (Show-Confirm 'Se deshacen todos los cambios activos de la optimizacion guiada, uno por uno. ¿Continuar?')) { return }
+        foreach ($bt in @($Global:OGFilasCambios)) { if ($bt.IsEnabled) { Deshacer-FilaOG -Boton $bt } }
+    })
+    $w.FindName('BtnCOGInforme').Add_Click({ Exportar-InformeOptimizacionPDF })
+    $wRef = $w
+    $w.FindName('BtnCOGCerrar').Add_Click({ $wRef.Close() }.GetNewClosure())
+    [void]$w.ShowDialog()
+    $Global:OGFilasCambios = $null
+}
+
+# ---- 7) INFORME para el cliente (PDF) ----------------------------------------------
+function Global:Exportar-InformeOptimizacionPDF {
+    param([string]$SesionId = '')
+    $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
+    $s = Leer-SesionOG -SesionId $SesionId
+    if (-not $s) { Show-Aviso 'Todavia no hay ninguna optimizacion guiada con informe. Ejecuta primero "Optimizacion guiada".' 'Sin informe'; return }
+    $cli = Pedir-DatosCliente
+    if (-not $cli) { return }
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.SaveFileDialog
+    $dlg.Title = 'Guardar informe de optimizacion en PDF'
+    $dlg.Filter = 'Documento PDF (*.pdf)|*.pdf'
+    $limpio = (($cli.Nombre -replace '[^\p{L}\p{N}]+', '_').Trim('_')); if (-not $limpio) { $limpio = 'Cliente' }
+    $dlg.FileName = "Optimizacion_${limpio}_$($cli.Fecha.ToString('yyyyMMdd')).pdf"
+    if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $pdf = $dlg.FileName
+    try {
+        $ver = @($s.Verif)
+        $cambios = @($ver | Where-Object { $_.Tema -notmatch '^(Medicion:|Punto de restauracion)' })
+        $okL = @($cambios | Where-Object { $_.Estado -eq 'OK' })
+        $pendL = @($cambios | Where-Object { $_.Estado -eq 'PEND' })
+        $malL = @($cambios | Where-Object { $_.Estado -in 'FALLO', 'PARCIAL' })
+        $meds = @($ver | Where-Object { $_.Tema -like 'Medicion:*' })
+        $clase = if ($malL.Count -gt 0) { 'aviso' } else { 'ok' }
+        $estado = "$($okL.Count) cambio(s) comprobados, $($pendL.Count) se completan al reiniciar, $($malL.Count) no se pudieron aplicar"
+        $h = New-Object System.Text.StringBuilder
+        [void]$h.Append("<!DOCTYPE html><html lang='es'><head><meta charset='utf-8'><title>Informe de optimizacion - The Dragon Tool</title><style>$($Global:CssInforme)</style></head><body>")
+        [void]$h.Append("<div class='portada'><div><h1>THE DRAGON TOOL</h1><div class='sub'>Informe de optimizacion del equipo</div><div class='meta'>Cliente: $(& $enc $cli.Nombre) &nbsp;|&nbsp; Fecha de ingreso: $(& $enc $cli.FechaTexto) &nbsp;|&nbsp; Optimizacion realizada el $(& $enc $s.Fecha) &nbsp;|&nbsp; Equipo: $(& $enc $s.Marca) $(& $enc $s.Modelo) $(if ($s.Serie) { '(serie ' + (& $enc $s.Serie) + ')' })</div></div>$(Obtener-LogoHtml)</div>")
+        [void]$h.Append("<div class='estado $clase'>$(& $enc $estado)</div>")
+        [void]$h.Append("<h2>1. Que se midio en el equipo</h2><table class='info'><tr><td>Duracion de la medicion</td><td>$($s.Seg) segundos, antes de cambiar nada</td></tr><tr><td>CPU promedio</td><td>$($s.CpuProm)%</td></tr><tr><td>RAM en uso</td><td>$([math]::Round($s.RamProm)) MB de $([math]::Round($s.RamTotalMB)) MB</td></tr><tr><td>Disco activo</td><td>$($s.DiscoProm)%</td></tr><tr><td>Punto de restauracion</td><td>$(& $enc $s.PuntoRestauracion)</td></tr></table>")
+        [void]$h.Append("<h2>2. Lo que SI cambio</h2>")
+        if ($okL.Count + $pendL.Count -eq 0) { [void]$h.Append('<p>No se pudo aplicar ningun cambio.</p>') }
+        foreach ($c in $okL) { [void]$h.Append("<div class='entrada OTRO' style='border-left-color:#1fa75a'><div class='msg'>✔ $(& $enc $c.Tema)</div><div class='det' style='font-family:inherit;white-space:normal'>$(& $enc $c.Detalle)</div></div>") }
+        foreach ($c in $pendL) { [void]$h.Append("<div class='entrada AVISO'><div class='msg'>⏳ $(& $enc $c.Tema)</div><div class='det' style='font-family:inherit;white-space:normal'>$(& $enc $c.Detalle) (termina de verse al reiniciar)</div></div>") }
+        [void]$h.Append("<h2>3. Lo que NO cambio</h2>")
+        if ($malL.Count -eq 0) { [void]$h.Append('<p>Todos los cambios elegidos se aplicaron.</p>') }
+        foreach ($c in $malL) { [void]$h.Append("<div class='entrada ERROR'><div class='msg'>✖ $(& $enc $c.Tema)</div><div class='det' style='font-family:inherit;white-space:normal'>$(& $enc $c.Detalle)</div></div>") }
+        [void]$h.Append("<h2>4. Resultado medido (antes y despues)</h2><table class='info'><tr><td>RAM en uso</td><td>$($s.AntesRamMB) MB &rarr; $($s.DespuesRamMB) MB (justo despues de aplicar; los servicios se detienen del todo al reiniciar)</td></tr><tr><td>Procesos</td><td>$($s.AntesProcesos) &rarr; $($s.DespuesProcesos)</td></tr><tr><td>Servicios activos</td><td>$($s.AntesServicios) &rarr; $($s.DespuesServicios)</td></tr><tr><td>Programas de inicio</td><td>$($s.AntesInicio) &rarr; $($s.DespuesInicio)</td></tr></table>")
+        if ($meds.Count -gt 0) {
+            [void]$h.Append("<h3>Comparacion de la medicion</h3><table class='info'>")
+            foreach ($c in $meds) { [void]$h.Append("<tr><td>$(& $enc ($c.Tema -replace '^Medicion:\s*', ''))</td><td>$(& $enc $c.Detalle)</td></tr>") }
+            [void]$h.Append('</table>')
+        }
+        [void]$h.Append("<h2>5. Medicion tras reiniciar</h2>")
+        if ("$($s.PostReinicio)".Trim()) { [void]$h.Append("<div class='entrada OTRO'><div class='det'>$(& $enc $s.PostReinicio)</div></div>") }
+        else { [void]$h.Append('<p>Todavia no se reinicio el equipo despues de optimizar. Al reiniciar y abrir The Dragon Tool se mide el resultado real; genera este informe de nuevo para incluirlo.</p>') }
+        [void]$h.Append("<div class='pie'>The Dragon Tool - The Dragon Tech, Hardware and Software &nbsp;|&nbsp; Cada cambio se comprobo leyendo el estado real del sistema y se puede deshacer.</div></body></html>")
+        $html = Join-Path $env:TEMP "DragonTool_InformeOpt_$(Get-Date -Format 'yyyyMMddHHmmss').html"
+        [System.IO.File]::WriteAllText($html, $h.ToString(), (New-Object System.Text.UTF8Encoding($true)))
+        Convertir-HtmlAPdf -html $html -pdf $pdf
+    } catch { Write-Log "No se pudo generar el informe de optimizacion: $($_.Exception.Message)" -Tipo ERROR }
 }
 
 function Perfil-Gamer {
@@ -17391,6 +18696,18 @@ Marcar-Arranque 'funciones y recursos'
                                         <TextBlock Text="Mide como rinde el equipo ahora y te dice que perfil usar. Al aplicar un perfil vuelve a medir y compara para confirmar los cambios reales." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
                                     </StackPanel>
                                 </Button>
+                                <Button x:Name="BtnOptGuiada" Width="300" Height="90" BorderBrush="#29D398">
+                                    <StackPanel>
+                                        <TextBlock Text="🎯 Optimizacion guiada (mide y propone)" FontWeight="Bold" TextWrapping="Wrap"/>
+                                        <TextBlock Text="Mide 75 s que consume de verdad este equipo, te muestra cada cambio con su ahorro estimado y una casilla, crea un punto de restauracion y comprueba antes/despues." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
+                                    </StackPanel>
+                                </Button>
+                                <Button x:Name="BtnOptCambios" Width="300" Height="90" BorderBrush="#2F7CF6">
+                                    <StackPanel>
+                                        <TextBlock Text="↩️ Cambios de la optimizacion guiada" FontWeight="Bold" TextWrapping="Wrap"/>
+                                        <TextBlock Text="Lista cada cambio aplicado y lo deshace uno por uno. Tambien genera el informe PDF para el cliente." FontSize="11" TextWrapping="Wrap" Opacity="0.85"/>
+                                    </StackPanel>
+                                </Button>
                                 <Button x:Name="BtnPerfilBajo" Width="300" Height="90">
                                     <StackPanel>
                                         <TextBlock Text="🔋 Equipo de bajo consumo" FontWeight="Bold" TextWrapping="Wrap"/>
@@ -18339,6 +19656,13 @@ Marcar-Arranque 'funciones y recursos'
             <TabItem Header="🐞 Registro de errores">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel Margin="14">
+                    <Border Style="{StaticResource TarjetaSeccion}" Margin="0,0,0,10">
+                        <StackPanel>
+                            <TextBlock Text="🩺 Veredicto automatico (cruza lo registrado en este equipo)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,4"/>
+                            <TextBlock x:Name="TxtHistorialEquipo" Foreground="#7C93BD" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8" Text="Historial del equipo: cargando..."/>
+                            <StackPanel x:Name="PanelVeredicto"/>
+                        </StackPanel>
+                    </Border>
                     <Border Style="{StaticResource TarjetaSeccion}">
                         <StackPanel>
                             <TextBlock Text="🐞 Monitoreo de errores (programa y hardware)" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,8"/>
@@ -18352,7 +19676,7 @@ Marcar-Arranque 'funciones y recursos'
                                     <StackPanel><TextBlock x:Name="TxtStatAvisos" Text="0" FontSize="24" FontWeight="Bold" Foreground="#FFC857"/><TextBlock Text="Avisos" Foreground="White" FontSize="12"/></StackPanel>
                                 </Border>
                                 <Border Background="#332F7CF6" BorderBrush="#2F7CF6" BorderThickness="1" CornerRadius="8" Padding="10,6" Margin="0,0,8,0">
-                                    <StackPanel><TextBlock x:Name="TxtStatHardware" Text="0" FontSize="24" FontWeight="Bold" Foreground="#66AEFF"/><TextBlock Text="De hardware" Foreground="White" FontSize="12"/></StackPanel>
+                                    <StackPanel><TextBlock x:Name="TxtStatHardware" Text="0" FontSize="24" FontWeight="Bold" Foreground="#66AEFF"/><TextBlock Text="Del equipo del cliente" Foreground="White" FontSize="12"/></StackPanel>
                                 </Border>
                                 <Border Background="#3329D398" BorderBrush="#29D398" BorderThickness="1" CornerRadius="8" Padding="10,6">
                                     <StackPanel><TextBlock x:Name="TxtStatPrograma" Text="0" FontSize="24" FontWeight="Bold" Foreground="#29D398"/><TextBlock Text="Del programa" Foreground="White" FontSize="12"/></StackPanel>
@@ -18363,6 +19687,22 @@ Marcar-Arranque 'funciones y recursos'
                                 <TextBox x:Name="TxtBuscarError" Padding="8,6"/>
                             </DockPanel>
                             <WrapPanel Margin="0,0,0,10">
+                                <TextBlock Text="Mostrar:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <ComboBox x:Name="CmbAmbitoError" Width="230" Margin="0,0,16,0">
+                                    <ComboBoxItem Content="Del equipo del cliente" IsSelected="True"/>
+                                    <ComboBoxItem Content="Del programa (avisos internos)"/>
+                                    <ComboBoxItem Content="Todo"/>
+                                </ComboBox>
+                                <TextBlock Text="Periodo:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <ComboBox x:Name="CmbPeriodoError" Width="230" Margin="0,0,16,0">
+                                    <ComboBoxItem Content="Todo el historial del equipo" IsSelected="True"/>
+                                    <ComboBoxItem Content="Solo esta sesion"/>
+                                </ComboBox>
+                                <TextBlock Text="Orden:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <ComboBox x:Name="CmbOrdenError" Width="230" Margin="0,0,16,0">
+                                    <ComboBoxItem Content="Gravedad y causa probable" IsSelected="True"/>
+                                    <ComboBoxItem Content="Mas recientes primero"/>
+                                </ComboBox>
                                 <TextBlock Text="Categoria:" Foreground="White" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <ComboBox x:Name="CmbFiltroCategoriaError" Width="250" Margin="0,0,16,0">
                                     <ComboBoxItem Content="Todas" IsSelected="True"/>
@@ -18400,6 +19740,8 @@ Marcar-Arranque 'funciones y recursos'
                             <WrapPanel>
                                 <Button x:Name="BtnActualizarErrores" Content="🔄 Actualizar" Width="140" Height="42" FontSize="12"/>
                                 <Button x:Name="BtnDetalleError" Content="🔎 Mas informacion y solucion" Width="240" Height="42" FontSize="12" BorderBrush="#4FA8FF" IsEnabled="False"/>
+                                <Button x:Name="BtnIrPruebaError" Content="🧪 Ir a la prueba sugerida" Width="220" Height="42" FontSize="12" BorderBrush="#29D398" IsEnabled="False"/>
+                                <Button x:Name="BtnLineaTiempo" Content="🕒 Linea de tiempo" Width="180" Height="42" FontSize="12" BorderBrush="#4FA8FF"/>
                                 <Button x:Name="BtnAutoverificar" Content="✅ Verificar pestañas y opciones ahora" Width="290" Height="42" FontSize="12" BorderBrush="#4CD964"/>
                                 <Button x:Name="BtnEscanearHardware" Content="🔬 Escanear hardware ahora" Width="210" Height="42" FontSize="12" BorderBrush="#2F7CF6"/>
                                 <Button x:Name="BtnInformeLentitud" Content="🐢 Informe de lentitud ahora" Width="210" Height="42" FontSize="12" BorderBrush="#FFC857"/>
@@ -18418,6 +19760,18 @@ Marcar-Arranque 'funciones y recursos'
                     <DataGrid x:Name="GridRegistroErrores" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" Height="380" Margin="0,10,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Hora" Binding="{Binding Hora}" Width="0.8*"/>
+                            <DataGridTextColumn Header="Gravedad" Binding="{Binding Gravedad}" Width="0.7*">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Gravedad}" Value="Critica"><Setter Property="Foreground" Value="#FF6B6B"/><Setter Property="FontWeight" Value="Bold"/></DataTrigger>
+                                            <DataTrigger Binding="{Binding Gravedad}" Value="Alta"><Setter Property="Foreground" Value="#FF9E57"/><Setter Property="FontWeight" Value="Bold"/></DataTrigger>
+                                            <DataTrigger Binding="{Binding Gravedad}" Value="Media"><Setter Property="Foreground" Value="#FFC857"/></DataTrigger>
+                                            <DataTrigger Binding="{Binding Gravedad}" Value="Baja"><Setter Property="Foreground" Value="#7C93BD"/></DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Header="Tipo" Binding="{Binding Tipo}" Width="0.55*">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
@@ -18428,8 +19782,9 @@ Marcar-Arranque 'funciones y recursos'
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="Categoria" Binding="{Binding Categoria}" Width="1.3*"/>
-                            <DataGridTextColumn Header="Origen" Binding="{Binding Origen}" Width="1.5*"/>
+                            <DataGridTextColumn Header="Categoria" Binding="{Binding Categoria}" Width="1.1*"/>
+                            <DataGridTextColumn Header="Causa probable" Binding="{Binding Causa}" Width="1.6*"/>
+                            <DataGridTextColumn Header="Origen" Binding="{Binding Origen}" Width="1.3*"/>
                             <DataGridTextColumn Header="x" Binding="{Binding Veces}" Width="0.3*"/>
                             <DataGridTextColumn Header="Mensaje" Binding="{Binding Mensaje}" Width="3*"/>
                         </DataGrid.Columns>
@@ -18793,6 +20148,8 @@ $window.FindName("BtnMinLog").Add_Click({
 })
 
 $window.FindName("BtnPerfilVerificar").Add_Click({ try { Accion-VerificarRendimiento } catch { Registrar-FalloInterno 'verificar rendimiento' $_ } })
+$window.FindName("BtnOptGuiada").Add_Click({ try { Optimizacion-Guiada } catch { Registrar-FalloInterno 'optimizacion guiada' $_ } })
+$window.FindName("BtnOptCambios").Add_Click({ try { Show-CambiosOG } catch { Registrar-FalloInterno 'cambios de la optimizacion guiada' $_ } })
 $window.FindName("BtnPerfilBajo").Add_Click({ Perfil-BajoConsumo })
 $window.FindName("BtnPerfilModerno").Add_Click({ Perfil-EquipoModerno })
 $window.FindName("BtnPerfilGamer").Add_Click({ Perfil-Gamer })
@@ -20058,13 +21415,23 @@ $window.FindName("BtnDiagLimpiar").Add_Click({
 
 # --- Pestaña Registro de errores ---
 function Global:Cargar-RegistroErrores {
+    param([switch]$ConVeredicto)
     $gridErr = $window.FindName("GridRegistroErrores")
     if (-not $gridErr) { return }
     $filtroCategoria = $window.FindName("CmbFiltroCategoriaError").SelectedItem
     $filtroTipo = $window.FindName("CmbFiltroTipoError").SelectedItem
     $textoBusqueda = $window.FindName("TxtBuscarError").Text
+    $cmbAmb = $window.FindName("CmbAmbitoError"); $cmbPer = $window.FindName("CmbPeriodoError"); $cmbOrd = $window.FindName("CmbOrdenError")
+    $iAmb = if ($cmbAmb) { [int]$cmbAmb.SelectedIndex } else { 2 }
+    $iPer = if ($cmbPer) { [int]$cmbPer.SelectedIndex } else { 0 }
+    $iOrd = if ($cmbOrd) { [int]$cmbOrd.SelectedIndex } else { 1 }
 
-    $items = @($Script:RegistroErrores.ToArray())
+    $todos = @($Script:RegistroErrores.ToArray())
+    foreach ($e in $todos) { Enriquecer-Error $e }
+    $items = $todos
+    if ($iAmb -eq 0) { $items = @($items | Where-Object { "$($_.Ambito)" -eq 'Equipo' }) }
+    elseif ($iAmb -eq 1) { $items = @($items | Where-Object { "$($_.Ambito)" -eq 'Programa' }) }
+    if ($iPer -eq 1) { $items = @($items | Where-Object { -not $_.Persistente }) }
     if ($filtroCategoria -and $filtroCategoria.Content -ne 'Todas') {
         $items = @($items | Where-Object { $_.Categoria -eq $filtroCategoria.Content })
     }
@@ -20073,21 +21440,23 @@ function Global:Cargar-RegistroErrores {
     }
     if (-not [string]::IsNullOrWhiteSpace($textoBusqueda)) {
         $items = @($items | Where-Object {
-            $_.Mensaje -match [regex]::Escape($textoBusqueda) -or $_.Origen -match [regex]::Escape($textoBusqueda) -or $_.Categoria -match [regex]::Escape($textoBusqueda)
+            $_.Mensaje -match [regex]::Escape($textoBusqueda) -or $_.Origen -match [regex]::Escape($textoBusqueda) -or $_.Categoria -match [regex]::Escape($textoBusqueda) -or $_.Causa -match [regex]::Escape($textoBusqueda)
         })
     }
-    $listaOrdenada = @($items | Sort-Object Momento -Descending)
+    $listaOrdenada = if ($iOrd -eq 0) {
+        @($items | Sort-Object -Property @{ Expression = { $_.GravedadN }; Descending = $true }, @{ Expression = { $_.Causa }; Descending = $false }, @{ Expression = { $_.Momento }; Descending = $true })
+    } else { @($items | Sort-Object Momento -Descending) }
     $gridErr.ItemsSource = $listaOrdenada
 
-    $todos = @($Script:RegistroErrores.ToArray())
     $totalErrores = @($todos | Where-Object { $_.Tipo -eq 'ERROR' }).Count
     $totalAvisos = @($todos | Where-Object { $_.Tipo -eq 'AVISO' }).Count
-    $totalHw = @($todos | Where-Object { $_.Categoria -eq 'Hardware' }).Count
+    $totalEq = @($todos | Where-Object { "$($_.Ambito)" -eq 'Equipo' }).Count
     $window.FindName("TxtStatErrores").Text = "$totalErrores"
     $window.FindName("TxtStatAvisos").Text = "$totalAvisos"
-    $window.FindName("TxtStatHardware").Text = "$totalHw"
-    $window.FindName("TxtStatPrograma").Text = "$($todos.Count - $totalHw)"
+    $window.FindName("TxtStatHardware").Text = "$totalEq"
+    $window.FindName("TxtStatPrograma").Text = "$($todos.Count - $totalEq)"
     $window.FindName("TxtResumenErrores").Text = "Mostrando $($listaOrdenada.Count) de $($todos.Count) registro(s) ($totalErrores error(es), $totalAvisos aviso(s))."
+    if ($ConVeredicto) { Actualizar-VeredictoError }
 }
 
 # ---------------------------------------------------------------------------
@@ -20927,8 +22296,11 @@ function Global:Convertir-HtmlAPdf {
 
 function Global:Exportar-InformeErroresPDF {
     $enc = { param($t) [System.Net.WebUtility]::HtmlEncode([string]$t) }
-    $entradas = @(@($Script:RegistroErrores.ToArray()) | Sort-Object Momento -Descending)
-    if ($entradas.Count -eq 0) { Show-Aviso "No hay errores registrados para exportar." "Registro vacio"; return }
+    foreach ($e0 in @($Script:RegistroErrores.ToArray())) { Enriquecer-Error $e0 }
+    $todasEnt = @($Script:RegistroErrores.ToArray())
+    $entradas = @($todasEnt | Where-Object { "$($_.Ambito)" -eq 'Equipo' } | Sort-Object Momento -Descending)
+    $omitidas = $todasEnt.Count - $entradas.Count
+    if ($entradas.Count -eq 0) { Show-Aviso "No hay hallazgos del equipo del cliente en el registro para exportar. (Los avisos internos del programa no se incluyen en el informe.)" "Registro vacio"; return }
     Add-Type -AssemblyName System.Windows.Forms
     $dlg = New-Object System.Windows.Forms.SaveFileDialog
     $dlg.Title = "Guardar informe de errores en PDF"
@@ -20954,6 +22326,16 @@ function Global:Exportar-InformeErroresPDF {
         [void]$h.Append("<div class='portada'><div><h1>THE DRAGON TOOL</h1><div class='sub'>Informe detallado de errores y diagnostico del equipo</div><div class='meta'>Generado el $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss') &nbsp;|&nbsp; Equipo: $(& $enc $env:COMPUTERNAME) &nbsp;|&nbsp; Autor: $(& $enc $Script:Autor) - The Dragon Tech</div></div>$logoHtml</div>")
         [void]$h.Append("<div class='estado $claseEstado'>Estado general: $(& $enc $estado)</div>")
         [void]$h.Append("<div class='tarjetas'><div class='tarjeta'><div class='n'>$($entradas.Count)</div><div class='t'>Entradas</div></div><div class='tarjeta e'><div class='n'>$nErr</div><div class='t'>Errores</div></div><div class='tarjeta a'><div class='n'>$nAv</div><div class='t'>Avisos</div></div><div class='tarjeta'><div class='n'>$($cats.Count)</div><div class='t'>Categorias</div></div></div>")
+        $verd = @(); try { $verd = @(Get-VeredictoEquipo) } catch {}
+        [void]$h.Append("<h2>0. Veredicto automatico</h2>")
+        if ($verd.Count -eq 0) { [void]$h.Append("<p>Sin indicios graves cruzados en lo registrado. Esto no descarta fallos que aun no dejaron rastro.</p>") }
+        foreach ($vd in $verd) {
+            $cv = if ($vd.Confianza -eq 'Alta') { 'ERROR' } else { 'AVISO' }
+            [void]$h.Append("<div class='entrada $cv'><div class='cab'><span class='etq $cv'>Confianza $(& $enc $vd.Confianza)</span>$($vd.N) indicio(s)</div><div class='msg'>$(& $enc $vd.Titulo)</div>")
+            if ($vd.Reincidencia) { [void]$h.Append("<div class='sol' style='background:#fde8e8;color:#9b1c1c'>$(& $enc $vd.Reincidencia)</div>") }
+            [void]$h.Append("<div class='det'>$(& $enc ((@($vd.Evidencias | ForEach-Object { '- ' + $_ })) -join "`n"))</div><div class='sol'><b>Que hacer:</b> $(& $enc $vd.Accion)</div></div>")
+        }
+        try { [void]$h.Append("<p style='color:#5b6b8c'>$(& $enc (Get-ResumenHistorialEquipo))$(if ($omitidas -gt 0) { ' Se omitieron ' + $omitidas + ' aviso(s) internos del programa que no son del equipo.' })</p>") } catch {}
         [void]$h.Append("<h2>1. Datos del equipo</h2><table class='info'>")
         foreach ($k in $info.Keys) {
             $v = if ($k -eq 'Discos') { $info[$k] } else { & $enc $info[$k] }
@@ -21246,7 +22628,7 @@ table.pru td { padding: 5px 8px; border-bottom: 1px solid #e3e9f5; }
 
 function Global:Texto-RegistroError {
     param($e)
-    "$($e.Fecha) [$($e.Tipo)] $($e.Categoria) - $($e.Origen): $($e.Mensaje) (x$($e.Veces))`r`n    Solucion sugerida: $($e.Solucion)"
+    "$($e.Fecha) [$($e.Tipo)] $($e.Categoria) - $($e.Origen): $($e.Mensaje) (x$($e.Veces))`r`n    Gravedad: $($e.Gravedad)   Causa probable: $($e.Causa)`r`n    Solucion sugerida: $($e.Solucion)"
 }
 
 # ---------------------------------------------------------------------------
@@ -21311,6 +22693,13 @@ function Global:Texto-DetalleCompletoError {
     $L.Add('')
     $L.Add('CAUSA PROBABLE')
     $L.Add((Get-CausaProbableError -E $E))
+    try {
+        Enriquecer-Error $E
+        $L.Add("Gravedad: $($E.Gravedad)   |   Causa probable: $($E.Causa)")
+        if ($E.Prueba) { $L.Add("Prueba sugerida en el programa: $($E.Prueba)") }
+        $rn = Get-ReincidenciaError -E $E
+        if ($rn) { $L.Add($rn) }
+    } catch {}
     $L.Add('')
     $L.Add('SOLUCION RECOMENDADA')
     if ($E.Solucion) { $L.Add("$($E.Solucion)") }
@@ -21625,11 +23014,16 @@ function Global:Iniciar-Autoverificacion {
     $A.Timer.Start()
 }
 
-$window.FindName("BtnActualizarErrores").Add_Click({ Cargar-RegistroErrores })
+$window.FindName("BtnActualizarErrores").Add_Click({ Cargar-RegistroErrores -ConVeredicto })
 $window.FindName("BtnDetalleError").Add_Click({ try { Mostrar-DetalleError -Entrada $window.FindName("GridRegistroErrores").SelectedItem } catch { Registrar-FalloInterno 'ventana de detalle' $_ } })
 $window.FindName("BtnAutoverificar").Add_Click({ try { Iniciar-Autoverificacion } catch { Registrar-FalloInterno 'autoverificacion' $_ } })
 $window.FindName("GridRegistroErrores").Add_MouseDoubleClick({ try { $it = $window.FindName("GridRegistroErrores").SelectedItem; if ($it) { Mostrar-DetalleError -Entrada $it } } catch { Registrar-FalloInterno 'doble clic en el registro' $_ } })
 $window.FindName("CmbFiltroCategoriaError").Add_SelectionChanged({ Cargar-RegistroErrores })
+$window.FindName("CmbAmbitoError").Add_SelectionChanged({ Cargar-RegistroErrores })
+$window.FindName("CmbPeriodoError").Add_SelectionChanged({ Cargar-RegistroErrores })
+$window.FindName("CmbOrdenError").Add_SelectionChanged({ Cargar-RegistroErrores })
+$window.FindName("BtnLineaTiempo").Add_Click({ try { Show-LineaTiempoError } catch { Registrar-FalloInterno 'linea de tiempo' $_ } })
+$window.FindName("BtnIrPruebaError").Add_Click({ try { $it = $window.FindName("GridRegistroErrores").SelectedItem; if ($it) { Ir-PruebaSugerida -Control "$($it.Control)" -Prueba "$($it.Prueba)" } } catch { Registrar-FalloInterno 'ir a la prueba sugerida' $_ } })
 $window.FindName("CmbFiltroTipoError").Add_SelectionChanged({ Cargar-RegistroErrores })
 $window.FindName("TxtBuscarError").Add_TextChanged({ Cargar-RegistroErrores })
 $window.FindName("BtnEscanearHardware").Add_Click({ Iniciar-EscaneoHardware -Horas 72 -Manual $true -IncluirEstado $true })
@@ -21642,9 +23036,10 @@ $window.FindName("ChkMonitorLentitud").Add_Unchecked({ $Global:MonActivo = $fals
 $window.FindName("GridRegistroErrores").Add_SelectionChanged({
     $it = $window.FindName("GridRegistroErrores").SelectedItem
     try { $window.FindName("BtnDetalleError").IsEnabled = [bool]$it } catch {}
+    try { $window.FindName("BtnIrPruebaError").IsEnabled = [bool]($it -and "$($it.Control)") } catch {}
     $caja = $window.FindName("TxtDetalleError")
     if (-not $it) { $caja.Text = "Selecciona un registro de la lista para ver que paso y como solucionarlo."; return }
-    $t = "[$($it.Tipo)]  $($it.Categoria)  -  $($it.Origen)`r`nCuando: $($it.Fecha)   |   Repeticiones: $($it.Veces)`r`n`r`nQUE PASO:`r`n$($it.Mensaje)`r`n`r`nQUE HACER:`r`n$($it.Solucion)"
+    $t = "[$($it.Tipo)]  $($it.Categoria)  -  $($it.Origen)`r`nCuando: $($it.Fecha)   |   Repeticiones: $($it.Veces)   |   Gravedad: $($it.Gravedad)`r`n`r`nQUE PASO:`r`n$($it.Mensaje)`r`n`r`nCAUSA PROBABLE:`r`n$($it.Causa)$(if ($it.Prueba) { "`r`nPrueba sugerida: $($it.Prueba) (boton 'Ir a la prueba sugerida')" })$(try { $rn = Get-ReincidenciaError -E $it; if ($rn) { "`r`n$rn" } } catch { '' })`r`n`r`nQUE HACER:`r`n$($it.Solucion)"
     if ($it.Detalle) { $t += "`r`n`r`nDETALLE TECNICO:`r`n$($it.Detalle)" }
     $caja.Text = $t
 })
@@ -21652,7 +23047,7 @@ $window.FindName("GridRegistroErrores").Add_SelectionChanged({
 $window.FindName("TabControlPrincipal").Add_SelectionChanged({
     $tabActual = $window.FindName("TabControlPrincipal").SelectedItem
     if ($tabActual -and "$($tabActual.Header)" -like "*Registro de errores*") {
-        Cargar-RegistroErrores
+        Cargar-RegistroErrores -ConVeredicto
         Actualizar-EstadoMonitoreo
     }
 })
@@ -21691,12 +23086,14 @@ $window.FindName("BtnExportarErrores").Add_Click({
 
 $window.FindName("BtnLimpiarErrores").Add_Click({
     if ($Script:RegistroErrores.Count -eq 0) { return }
-    if (-not (Show-Confirm "¿Vaciar por completo el registro de errores? Esta accion no se puede deshacer.")) { return }
+    if (-not (Show-Confirm "¿Vaciar por completo el registro de errores?`n`nIncluye BORRAR el historial de este equipo guardado en disco (lo de visitas anteriores que sirve para ver si vuelve con el mismo problema). Esta accion no se puede deshacer.")) { return }
     $Script:RegistroErrores.Clear()
     $Script:HwVistos = @{}
-    Cargar-RegistroErrores
+    try { Vaciar-HistorialErrores } catch {}
+    Cargar-RegistroErrores -ConVeredicto
 })
 Cargar-RegistroErrores
+Iniciar-HistorialErrores
 
 # --- Panel de Inicio: acciones rapidas y actualizacion periodica ---
 $window.FindName("BtnInicioLimpiarTemp").Add_Click({ Accion-LimpiarTemporales; Actualizar-PanelInicio })
@@ -21773,6 +23170,7 @@ $window.Dispatcher.add_UnhandledException({
 # Modificacion (si estaba encendida) al cerrar la ventana principal, para
 # no dejar recursos abiertos de fondo.
 $window.Add_Closed({
+    try { Guardar-HistorialErrores } catch {}
     try { if ($Script:TimerInicio) { $Script:TimerInicio.Stop() } } catch {}
     try { Detener-CamaraModificacion } catch {}
     try { if ($Script:HwTimerVivo) { $Script:HwTimerVivo.Stop() } } catch {}
@@ -22517,6 +23915,8 @@ $Global:AyudaControles = @{
     'CmbCategoriaOptimizar' = 'Cambia entre perfiles de optimizacion, acelerar procesador y liberar RAM.'
     'BtnPerfilVerificar' = 'Mide unos segundos el consumo de CPU, RAM y disco con el equipo en reposo, da una puntuacion de 0 a 100, explica que lo frena y recomienda un perfil. Al aplicar un perfil vuelve a medir y compara con esta medicion para confirmar si hubo cambios reales.'
     'BtnPerfilBajo' = 'MODO AGRESIVO para PCs con poca RAM, CPU lenta o disco lleno: apaga servicios extra, tareas y apps en segundo plano, quita apps preinstaladas, Microsoft Store y Windows Defender, y limpia el disco a fondo. Guarda el estado original: se revierte con Restaurar. Verifica cada cambio y mide el resultado real.'
+    'BtnOptGuiada' = 'Mide durante 75 s que procesos, servicios y programas de inicio consumen CPU, RAM y disco en ESTE equipo. Muestra una vista previa con el ahorro estimado de cada cambio y una casilla por cambio (impresion, Bluetooth, huella se dejan sin marcar si el equipo los tiene). Crea un punto de restauracion, aplica solo lo marcado, comprueba cada cambio y compara antes/despues, tambien tras reiniciar.'
+    'BtnOptCambios' = 'Muestra cada cambio de la optimizacion guiada guardado en disco y permite deshacerlo uno por uno (restaura el estado original y lo comprueba), o todo junto. Aqui tambien se genera el informe PDF para el cliente.'
     'BtnPerfilModerno' = 'Para equipos con buen hardware: quita bloatware y telemetria manteniendo las funciones utiles. Muestra un ANTES y DESPUES.'
     'BtnPerfilGamer' = 'Mejora el rendimiento en juegos: energia al maximo, modo juego, GPU y red optimizadas.'
     'BtnPerfilAuto' = 'Detecta tu hardware (CPU, RAM, HDD/SSD) y MIDE el consumo actual de CPU, RAM y disco para ajustar el perfil de ahorro; antes de aplicar te avisa que funciones dejaran de estar disponibles. Si el equipo es potente y no esta saturado te recomienda Equipo moderno. Reversible con Restaurar.'
@@ -22761,6 +24161,11 @@ $Global:AyudaControles = @{
     'BtnExportarErrores' = 'Guarda el registro de errores en un archivo de texto.'
     'BtnExportarPdfErrores' = 'Genera un informe PDF con los errores y sus soluciones.'
     'BtnLimpiarErrores' = 'Vacia por completo el registro de errores (no se puede deshacer).'
+    'BtnIrPruebaError' = 'Lleva a la prueba del programa que confirma la causa probable del registro seleccionado (escribe su nombre en la barra de busqueda y abre la funcion).'
+    'BtnLineaTiempo' = 'Muestra en orden cronologico lo que paso en el equipo del cliente (apagado, error de disco, pantalla azul...) y marca las secuencias donde algo ocurrio poco antes de una falla.'
+    'CmbAmbitoError' = 'Del equipo del cliente: hardware, controladores, apagados, pantallas azules... Del programa: avisos internos de The Dragon Tool. El informe PDF solo incluye lo del equipo.'
+    'CmbPeriodoError' = 'Todo el historial del equipo incluye lo guardado en visitas anteriores (se identifica por el numero de serie). Solo esta sesion muestra lo detectado desde que se abrio el programa.'
+    'CmbOrdenError' = 'Gravedad y causa probable: lo mas grave primero y agrupado por causa. Mas recientes primero: orden por hora.'
     'BtnDetalleError' = 'Abre una ventana con la explicacion completa del registro seleccionado: que paso, causa probable, solucion paso a paso y detalle tecnico. Tambien con doble clic sobre la fila.'
     'BtnAutoverificar' = 'Revisa ahora todas las pestanas y opciones del programa (botones con accion, herramientas de Windows, servicios y conexion) y anota en el registro lo que no funcione.'
     'TxtAutoverificacion' = 'Resultado de la ultima autoverificacion de pestanas y opciones.'
