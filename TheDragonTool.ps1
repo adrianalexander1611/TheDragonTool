@@ -15641,6 +15641,230 @@ function Accion-InstalarCatalogoSeleccionado {
     }
 }
 
+# ===== Complementos de Windows (DirectX, .NET, Java, Visual C++...) =====
+# Los IDs de winget estan comprobados contra el repositorio publico de winget. Cada complemento se DETECTA de verdad
+# (archivos, registro, carpetas de .NET o lista de programas) antes y despues de instalar; el resultado mostrado es
+# lo que se encontro, no lo que "deberia" haber pasado.
+$Script:CatalogoComplementos = @(
+    @{ Categoria='DirectX'; Nombre='DirectX End-User Runtime (d3dx9/10/11, XInput, XAudio: juegos y programas)'; WingetId='Microsoft.DirectX'; DetTipo='dx'; Recomendado=$true; Nota='Las DLL antiguas de DirectX que piden muchos juegos y programas ("falta d3dx9_43.dll", "xinput1_3.dll"...). DirectX 12 ya viene dentro de Windows 10/11.' },
+
+    @{ Categoria='.NET Framework'; Nombre='.NET Framework 3.5 (incluye 2.0 y 3.0)'; Metodo='netfx35'; DetTipo='netfx35'; Recomendado=$true; Nota='Se activa como caracteristica de Windows (necesita Internet o Windows Update). Lo piden programas antiguos.' },
+
+    @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 6 (fin de soporte, para programas viejos)'; WingetId='Microsoft.DotNet.DesktopRuntime.6'; DetTipo='desktop'; DetValor='6'; Nota='Para programas de escritorio hechos en .NET 6.' },
+    @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 8 (LTS)'; WingetId='Microsoft.DotNet.DesktopRuntime.8'; DetTipo='desktop'; DetValor='8'; Recomendado=$true; Nota='Para programas de escritorio hechos en .NET 8 (version con soporte a largo plazo).' },
+    @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 9'; WingetId='Microsoft.DotNet.DesktopRuntime.9'; DetTipo='desktop'; DetValor='9'; Nota='Para programas de escritorio hechos en .NET 9.' },
+    @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 10 (LTS)'; WingetId='Microsoft.DotNet.DesktopRuntime.10'; DetTipo='desktop'; DetValor='10'; Recomendado=$true; Nota='Para programas de escritorio hechos en .NET 10 (version con soporte a largo plazo).' },
+    @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Runtime 8 (consola y servicios)'; WingetId='Microsoft.DotNet.Runtime.8'; DetTipo='core'; DetValor='8'; Nota='Runtime base de .NET 8 (sin interfaz de ventanas).' },
+    @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Runtime 9 (consola y servicios)'; WingetId='Microsoft.DotNet.Runtime.9'; DetTipo='core'; DetValor='9'; Nota='Runtime base de .NET 9 (sin interfaz de ventanas).' },
+    @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Runtime 10 (consola y servicios)'; WingetId='Microsoft.DotNet.Runtime.10'; DetTipo='core'; DetValor='10'; Nota='Runtime base de .NET 10 (sin interfaz de ventanas).' },
+
+    @{ Categoria='Java'; Nombre='Java 8 (Oracle JRE)'; WingetId='Oracle.JavaRuntimeEnvironment'; DetTipo='prog'; DetValor='^Java( \d+)? Update \d+'; Nota='Java 8 oficial de Oracle. Lo piden programas y juegos antiguos.' },
+    @{ Categoria='Java'; Nombre='Java 8 (Eclipse Temurin JRE)'; WingetId='EclipseAdoptium.Temurin.8.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 8u'; Nota='Java 8 libre (OpenJDK) de Eclipse Adoptium.' },
+    @{ Categoria='Java'; Nombre='Java 11 (Eclipse Temurin JRE)'; WingetId='EclipseAdoptium.Temurin.11.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 11[\.\+u-]'; Nota='Java 11 libre (OpenJDK) de Eclipse Adoptium.' },
+    @{ Categoria='Java'; Nombre='Java 17 (Eclipse Temurin JRE)'; WingetId='EclipseAdoptium.Temurin.17.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 17[\.\+u-]'; Nota='Java 17 libre (OpenJDK) de Eclipse Adoptium.' },
+    @{ Categoria='Java'; Nombre='Java 21 (Eclipse Temurin JRE, LTS)'; WingetId='EclipseAdoptium.Temurin.21.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 21[\.\+u-]'; Recomendado=$true; Nota='Java 21 libre (OpenJDK) con soporte a largo plazo. Es el recomendado para programas modernos (por ejemplo Minecraft reciente).' },
+    @{ Categoria='Java'; Nombre='Java 25 (Eclipse Temurin JRE, LTS)'; WingetId='EclipseAdoptium.Temurin.25.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 25[\.\+u-]'; Nota='Java 25 libre (OpenJDK) con soporte a largo plazo.' },
+
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2015-2022 (x64)'; WingetId='Microsoft.VCRedist.2015+.x64'; DetTipo='prog'; DetValor='Visual C\+\+\s+(2015|2017|2019|2022|v14)\S*\s+Redistributable'; DetSi='x64'; Recomendado=$true; Nota='El mas usado: cubre casi todos los programas y juegos actuales de 64 bits.' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2015-2022 (x86)'; WingetId='Microsoft.VCRedist.2015+.x86'; DetTipo='prog'; DetValor='Visual C\+\+\s+(2015|2017|2019|2022|v14)\S*\s+Redistributable'; DetNo='x64|arm64'; Recomendado=$true; Nota='Para programas de 32 bits (tambien se necesita en Windows de 64 bits).' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2013 (x64)'; WingetId='Microsoft.VCRedist.2013.x64'; DetTipo='prog'; DetValor='Visual C\+\+\s+2013\s+Redistributable'; DetSi='x64'; Recomendado=$true; Nota='Piden msvcr120.dll.' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2013 (x86)'; WingetId='Microsoft.VCRedist.2013.x86'; DetTipo='prog'; DetValor='Visual C\+\+\s+2013\s+Redistributable'; DetNo='x64|arm64'; Recomendado=$true; Nota='Piden msvcr120.dll (32 bits).' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2012 (x64)'; WingetId='Microsoft.VCRedist.2012.x64'; DetTipo='prog'; DetValor='Visual C\+\+\s+2012\s+Redistributable'; DetSi='x64'; Recomendado=$true; Nota='Piden msvcr110.dll.' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2012 (x86)'; WingetId='Microsoft.VCRedist.2012.x86'; DetTipo='prog'; DetValor='Visual C\+\+\s+2012\s+Redistributable'; DetNo='x64|arm64'; Recomendado=$true; Nota='Piden msvcr110.dll (32 bits).' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2010 (x64)'; WingetId='Microsoft.VCRedist.2010.x64'; DetTipo='prog'; DetValor='Visual C\+\+\s+2010\s+\S+\s+Redistributable'; DetSi='x64'; Recomendado=$true; Nota='Piden msvcr100.dll.' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2010 (x86)'; WingetId='Microsoft.VCRedist.2010.x86'; DetTipo='prog'; DetValor='Visual C\+\+\s+2010\s+\S+\s+Redistributable'; DetNo='x64|arm64'; Recomendado=$true; Nota='Piden msvcr100.dll (32 bits).' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2008 (x64)'; WingetId='Microsoft.VCRedist.2008.x64'; DetTipo='prog'; DetValor='Visual C\+\+\s+2008\s+Redistributable'; DetSi='x64'; Recomendado=$true; Nota='Piden msvcr90.dll.' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2008 (x86)'; WingetId='Microsoft.VCRedist.2008.x86'; DetTipo='prog'; DetValor='Visual C\+\+\s+2008\s+Redistributable'; DetNo='x64|arm64'; Recomendado=$true; Nota='Piden msvcr90.dll (32 bits).' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2005 (x64)'; WingetId='Microsoft.VCRedist.2005.x64'; DetTipo='prog'; DetValor='Visual C\+\+\s+2005\s+Redistributable'; DetSi='x64'; Nota='Programas muy antiguos (msvcr80.dll).' },
+    @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2005 (x86)'; WingetId='Microsoft.VCRedist.2005.x86'; DetTipo='prog'; DetValor='Visual C\+\+\s+2005\s+Redistributable'; DetNo='x64|arm64'; Nota='Programas muy antiguos (msvcr80.dll, 32 bits).' },
+
+    @{ Categoria='Otros componentes'; Nombre='Microsoft Edge WebView2 Runtime'; WingetId='Microsoft.EdgeWebView2Runtime'; DetTipo='webview2'; Recomendado=$true; Nota='Lo usan muchos programas modernos para mostrar paginas web dentro de su ventana.' },
+    @{ Categoria='Otros componentes'; Nombre='Microsoft XNA Framework Redistributable'; WingetId='Microsoft.XNARedist'; DetTipo='prog'; DetValor='^Microsoft XNA Framework Redistributable'; Nota='Lo piden juegos antiguos hechos con XNA.' }
+)
+
+# Lee, en otro hilo, los datos reales del equipo para saber que complementos hay instalados.
+$Script:BloqueHechosComplementos = {
+    $nombres = New-Object System.Collections.Generic.List[string]
+    foreach ($ruta in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*') {
+        foreach ($k in (Get-ItemProperty -Path $ruta -ErrorAction SilentlyContinue)) {
+            if ($k.DisplayName) { $nombres.Add([string]$k.DisplayName) }
+        }
+    }
+    $win = $env:windir
+    $sys = if (-not [Environment]::Is64BitProcess -and [Environment]::Is64BitOperatingSystem) { "$win\Sysnative" } else { "$win\System32" }
+    $wow = if ([Environment]::Is64BitOperatingSystem) { "$win\SysWOW64" } else { $null }
+    $faltan = New-Object System.Collections.Generic.List[string]
+    foreach ($dll in 'd3dx9_43.dll', 'd3dx10_43.dll', 'd3dx11_43.dll', 'd3dcompiler_43.dll', 'xinput1_3.dll', 'xaudio2_7.dll', 'x3daudio1_7.dll') {
+        if (-not [IO.File]::Exists("$sys\$dll")) { $faltan.Add("$dll (64 bits)") }
+        if ($wow -and -not [IO.File]::Exists("$wow\$dll")) { $faltan.Add("$dll (32 bits)") }
+    }
+    $desktop = New-Object System.Collections.Generic.List[string]
+    $core = New-Object System.Collections.Generic.List[string]
+    $raiz = Join-Path $env:ProgramFiles 'dotnet\shared'
+    foreach ($par in @(@('Microsoft.WindowsDesktop.App', $desktop), @('Microsoft.NETCore.App', $core))) {
+        $d = Join-Path $raiz $par[0]
+        if (Test-Path -LiteralPath $d) {
+            foreach ($sub in (Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue)) {
+                if ($sub.Name -match '^(\d+)\.') { $par[1].Add($Matches[1]) }
+            }
+        }
+    }
+    $nf35 = $false
+    try { $nf35 = ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5' -ErrorAction SilentlyContinue).Install -eq 1) } catch {}
+    $rel = 0
+    try { $rel = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -ErrorAction SilentlyContinue).Release } catch {}
+    $wv = ''
+    foreach ($rw in 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}') {
+        try { $v = (Get-ItemProperty $rw -ErrorAction SilentlyContinue).pv; if ($v -and $v -ne '0.0.0.0') { $wv = [string]$v; break } } catch {}
+    }
+    [PSCustomObject]@{
+        Programas = $nombres.ToArray(); DxFaltan = $faltan.ToArray(); Desktop = $desktop.ToArray(); Core = $core.ToArray()
+        NetFx35 = $nf35; NetFxRelease = $rel; WebView2 = $wv
+    }
+}
+
+function Global:Test-ComplementoInstalado {
+    param($Item, $H)
+    if (-not $H) { return $null }
+    switch ($Item.DetTipo) {
+        'dx'       { return (@($H.DxFaltan).Count -eq 0) }
+        'netfx35'  { return [bool]$H.NetFx35 }
+        'desktop'  { return (@($H.Desktop) -contains [string]$Item.DetValor) }
+        'core'     { return (@($H.Core) -contains [string]$Item.DetValor) }
+        'webview2' { return [bool]$H.WebView2 }
+        'prog' {
+            foreach ($n in @($H.Programas)) {
+                if ($n -notmatch $Item.DetValor) { continue }
+                if ($Item.DetSi -and $n -notmatch $Item.DetSi) { continue }
+                if ($Item.DetNo -and $n -match $Item.DetNo) { continue }
+                return $true
+            }
+            return $false
+        }
+    }
+    return $null
+}
+
+function Global:Get-TextoNetFx4 {
+    param([int]$Release)
+    if ($Release -le 0) { return '.NET Framework 4.x: no detectado.' }
+    $v = if ($Release -ge 533320) { '4.8.1' } elseif ($Release -ge 528040) { '4.8' } elseif ($Release -ge 461808) { '4.7.2' } elseif ($Release -ge 461308) { '4.7.1' } elseif ($Release -ge 460798) { '4.7' } elseif ($Release -ge 394802) { '4.6.2' } elseif ($Release -ge 394254) { '4.6.1' } elseif ($Release -ge 393295) { '4.6' } elseif ($Release -ge 379893) { '4.5.2' } else { '4.5 o anterior' }
+    if ($Release -ge 528040) { return ".NET Framework $v detectado (viene incluido en Windows; no hace falta instalarlo)." }
+    return ".NET Framework $v detectado. Las versiones 4.8 o superiores se instalan con Windows Update."
+}
+
+function Global:Actualizar-ChecklistComplementos {
+    $txt = $window.FindName("TxtComplementosEstado")
+    if ($txt) { $txt.Text = "Detectando lo que ya esta instalado..." }
+    $h = $null
+    foreach ($x in (Invoke-EnSegundoPlano -Bloque $Script:BloqueHechosComplementos -TimeoutSeg 90)) { $h = $x }
+    $Script:HechosComplementos = $h
+    if (-not $h) { if ($txt) { $txt.Text = "No se pudo detectar lo instalado. Pulsa 'Detectar' para reintentar." }; return }
+    $ok = 0; $total = 0
+    foreach ($cb in $Script:_checkboxesComplementos.ToArray()) {
+        $it = $cb.Tag
+        $inst = Test-ComplementoInstalado -Item $it -H $h
+        $total++
+        if ($inst) { $ok++; $cb.Content = "$($it.Nombre)   ✅ instalado"; $cb.IsChecked = $false }
+        else { $cb.Content = "$($it.Nombre)   ⬜ no detectado" }
+    }
+    if ($txt) { $txt.Text = "Detectado: $ok de $total complementos ya instalados. $(Get-TextoNetFx4 -Release $h.NetFxRelease)" }
+}
+
+function Accion-InstalarComplementos {
+    param($Items)
+    if (-not $Items -or $Items.Count -eq 0) { Show-Aviso "No has marcado ningun complemento." "Nada seleccionado"; return }
+    $usaWinget = $false
+    foreach ($it in $Items) { if ($it.WingetId) { $usaWinget = $true } }
+    if ($usaWinget -and -not (Test-WingetDisponible)) {
+        Show-Aviso "No se encontro 'winget' (Instalador de aplicaciones de Windows) en este equipo.`n`nInstalalo desde la Microsoft Store buscando 'App Installer' e intenta de nuevo." "Winget no disponible"
+        return
+    }
+    if (-not (Requiere-Admin)) { return }
+    if (-not (Show-Confirm "Se instalaran $($Items.Count) complemento(s). Cada uno se descarga de su fuente oficial y, al terminar, se COMPRUEBA que de verdad quedo instalado.`n`nPuede tardar varios minutos. ¿Continuar?")) { return }
+
+    $bloqueWinget = {
+        param($id)
+        $so = [IO.Path]::GetTempFileName(); $se = [IO.Path]::GetTempFileName(); $so2 = [IO.Path]::GetTempFileName()
+        try {
+            $a1 = @('install', '--id', $id, '-e', '--source', 'winget', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+            $p = Start-Process -FilePath 'winget.exe' -ArgumentList $a1 -Wait -PassThru -NoNewWindow -RedirectStandardOutput $so -RedirectStandardError $se -ErrorAction Stop
+            $cod = [int]$p.ExitCode
+            $txt = ''
+            foreach ($f in @($so, $se)) { try { $txt += "$(Get-Content -LiteralPath $f -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)`n" } catch {} }
+            $lin = @(($txt -split "[\r\n]+") | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^[\s\-\\|/█▒░]+$' -and $_ -notmatch '^[\d\.]+\s*(KB|MB|GB)\s*/' -and $_ -notmatch '^\d+%$' })
+            $lista = -1
+            if ($cod -eq 0 -or $cod -eq 3010 -or $cod -eq -1978335189) {
+                $p2 = Start-Process -FilePath 'winget.exe' -ArgumentList @('list', '--id', $id, '-e', '--accept-source-agreements', '--disable-interactivity') -Wait -PassThru -NoNewWindow -RedirectStandardOutput $so2 -ErrorAction Stop
+                $lista = [int]$p2.ExitCode
+            }
+            [PSCustomObject]@{ Codigo = $cod; Salida = (($lin | Select-Object -Last 4) -join ' | '); Lista = $lista }
+        } catch {
+            [PSCustomObject]@{ Codigo = -1; Salida = $_.Exception.Message; Lista = -1 }
+        } finally { Remove-Item -LiteralPath $so, $se, $so2 -Force -ErrorAction SilentlyContinue }
+    }
+    $bloqueNetFx = {
+        $out = & "$env:windir\System32\dism.exe" /Online /Enable-Feature /FeatureName:NetFx3 /All /NoRestart 2>&1 | Out-String
+        $cod = $LASTEXITCODE
+        $lin = @(($out -split "[\r\n]+") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        [PSCustomObject]@{ Codigo = [int]$cod; Salida = (($lin | Select-Object -Last 3) -join ' | '); Lista = -1 }
+    }
+
+    $prog = New-VentanaProgreso -Titulo "Instalando complementos" -PermitirDetener
+    $i = 0
+    $listos = New-Object System.Collections.Generic.List[string]
+    $reinicio = New-Object System.Collections.Generic.List[string]
+    $fallos = New-Object System.Collections.Generic.List[string]
+    foreach ($item in $Items) {
+        $i++
+        if ($prog.Tag -eq $true) { Write-Log "Instalacion de complementos cancelada por el usuario." -Tipo AVISO; break }
+        $pct = [math]::Max(1, [math]::Round((($i - 1) / $Items.Count) * 100))
+        Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -Estado "Instalando $($item.Nombre) ($i de $($Items.Count))..." -LogLinea "Instalando $($item.Nombre)..."
+        $r = $null
+        try {
+            if ($item.Metodo -eq 'netfx35') {
+                foreach ($x in (Invoke-EnSegundoPlano -Bloque $bloqueNetFx -TimeoutSeg 1800)) { $r = $x }
+            } else {
+                foreach ($x in (Invoke-EnSegundoPlano -Bloque $bloqueWinget -Argumentos @($item.WingetId) -TimeoutSeg 1800)) { $r = $x }
+            }
+        } catch { $r = $null }
+        if (-not $r) {
+            $fallos.Add("$($item.Nombre): no respondio (tiempo agotado o error interno)") | Out-Null
+            Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "No se pudo completar $($item.Nombre): sin respuesta del instalador."
+            continue
+        }
+        # Comprobacion REAL tras instalar
+        $h = $null
+        foreach ($x in (Invoke-EnSegundoPlano -Bloque $Script:BloqueHechosComplementos -TimeoutSeg 90)) { $h = $x }
+        $Script:HechosComplementos = $h
+        $detectado = Test-ComplementoInstalado -Item $item -H $h
+        $codigoBueno = ($r.Codigo -eq 0 -or $r.Codigo -eq 3010 -or $r.Codigo -eq -1978335189)
+        $winLista = ($r.Lista -eq 0)
+        $hex = '0x{0:X8}' -f $r.Codigo
+        if ($detectado -or ($codigoBueno -and $winLista)) {
+            $listos.Add($item.Nombre) | Out-Null
+            Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "$($item.Nombre): instalado y comprobado."
+        } elseif ($codigoBueno) {
+            $reinicio.Add($item.Nombre) | Out-Null
+            Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "$($item.Nombre): el instalador termino bien pero aun no se detecta (probablemente falta reiniciar)."
+            Write-Log "$($item.Nombre): instalador sin error pero no detectado todavia (reinicio pendiente?)." -Tipo AVISO
+        } else {
+            $motivo = if ($r.Salida) { $r.Salida } else { 'sin mas detalles' }
+            if ($motivo.Length -gt 220) { $motivo = $motivo.Substring(0, 220) + '...' }
+            $fallos.Add("$($item.Nombre): codigo $hex - $motivo") | Out-Null
+            Update-VentanaProgreso -Ventana $prog -Porcentaje $pct -LogLinea "No se pudo instalar $($item.Nombre) (codigo $hex): $motivo"
+            Write-Log "No se pudo instalar el complemento $($item.Nombre) (codigo $hex). Detalle: $motivo" -Tipo AVISO
+        }
+    }
+    Close-VentanaProgreso -Ventana $prog -MensajeFinal "$($listos.Count) de $($Items.Count) listo(s) y comprobado(s)."
+    Write-Log "Complementos: $($listos.Count) comprobado(s), $($reinicio.Count) pendiente(s) de reinicio, $($fallos.Count) fallido(s)." -Tipo OK
+    try { Actualizar-ChecklistComplementos } catch {}
+    $msg = "$($listos.Count) complemento(s) instalado(s) y COMPROBADO(S) en el equipo."
+    if ($reinicio.Count -gt 0) { $msg += "`n`nInstalados pero aun sin detectar (reinicia el equipo y pulsa 'Detectar'): $($reinicio -join ', ')" }
+    if ($fallos.Count -gt 0) { $msg += "`n`nNo se pudieron instalar:`n$($fallos -join "`n")`n`nEl detalle quedo en la pestaña Registro de errores." }
+    Show-Aviso $msg "Complementos finalizado"
+}
+
 # --- Desinstalar programas con limpieza profunda de rastros ---
 
 function Get-ProgramasInstalados {
@@ -17358,6 +17582,7 @@ Marcar-Arranque 'funciones y recursos'
                     <TextBlock DockPanel.Dock="Top" Text="Selecciona una opcion:" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
                     <ComboBox x:Name="CmbSeccionProgramas" DockPanel.Dock="Top" Margin="0,0,0,14" Width="360" HorizontalAlignment="Left">
                         <ComboBoxItem Content="Instalar programas" IsSelected="True"/>
+                        <ComboBoxItem Content="Complementos (DirectX, .NET, Java, VC++)"/>
                         <ComboBoxItem Content="Desinstalar programas"/>
                         <ComboBoxItem Content="Archivos ISO"/>
                         <ComboBoxItem Content="Microsoft Store"/>
@@ -17374,6 +17599,24 @@ Marcar-Arranque 'funciones y recursos'
                                                    Text="Marca los programas que quieras instalar y pulsa 'Instalar seleccionados'. Se descargan e instalan automaticamente usando el Instalador de aplicaciones de Windows (winget), con una barra de progreso en tiempo real."/>
                                         <StackPanel x:Name="PanelChecklistProgramas"/>
                                         <Button x:Name="BtnInstalarSeleccionados" Content="⬇️ Instalar seleccionados" Height="42" Margin="0,14,0,0" BorderBrush="{StaticResource Acento}"/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <!-- Panel: Complementos -->
+                            <StackPanel x:Name="PanelComplementos" MaxWidth="640" HorizontalAlignment="Left" Visibility="Collapsed">
+                                <Border Style="{StaticResource TarjetaSeccion}">
+                                    <StackPanel>
+                                        <TextBlock Text="🧩 Complementos de Windows" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,10"/>
+                                        <TextBlock Foreground="White" TextWrapping="Wrap" Margin="0,0,0,10"
+                                                   Text="DirectX, .NET, Java, Visual C++ y otros componentes que piden muchos programas y juegos. El programa detecta lo que YA esta instalado, instala solo lo que marques y, al terminar, comprueba que de verdad quedo instalado."/>
+                                        <TextBlock x:Name="TxtComplementosEstado" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10" Text="Abre esta seccion para detectar lo instalado."/>
+                                        <WrapPanel Margin="0,0,0,10">
+                                            <Button x:Name="BtnComplementosDetectar" Content="🔎 Detectar" Width="130" Height="36" Margin="0,0,8,0"/>
+                                            <Button x:Name="BtnComplementosRecomendados" Content="✅ Marcar los que faltan (recomendados)" Height="36"/>
+                                        </WrapPanel>
+                                        <StackPanel x:Name="PanelChecklistComplementos"/>
+                                        <Button x:Name="BtnComplementosInstalar" Content="⬇️ Instalar seleccionados" Height="42" Margin="0,14,0,0" BorderBrush="{StaticResource Acento}"/>
                                     </StackPanel>
                                 </Border>
                             </StackPanel>
@@ -18652,6 +18895,7 @@ $window.FindName("BtnCorregirRegistro").Add_Click({
 function Mostrar-SeccionProgramas {
     param([string]$Seccion)
     $window.FindName("PanelInstalarProgramas").Visibility = if ($Seccion -eq 'Instalar') { 'Visible' } else { 'Collapsed' }
+    $window.FindName("PanelComplementos").Visibility = if ($Seccion -eq 'Complementos') { 'Visible' } else { 'Collapsed' }
     $window.FindName("PanelDesinstalarProgramas").Visibility = if ($Seccion -eq 'Desinstalar') { 'Visible' } else { 'Collapsed' }
     $window.FindName("PanelArchivosISO").Visibility = if ($Seccion -eq 'ISO') { 'Visible' } else { 'Collapsed' }
     $window.FindName("PanelMicrosoftStore").Visibility = if ($Seccion -eq 'Store') { 'Visible' } else { 'Collapsed' }
@@ -18661,6 +18905,13 @@ $window.FindName("CmbSeccionProgramas").Add_SelectionChanged({
     if (-not $sel) { return }
     switch ($sel.Content) {
         'Instalar programas' { Mostrar-SeccionProgramas -Seccion 'Instalar' }
+        'Complementos (DirectX, .NET, Java, VC++)' {
+            Mostrar-SeccionProgramas -Seccion 'Complementos'
+            if (-not $Script:ComplementosDetectados) {
+                $Script:ComplementosDetectados = $true
+                try { Actualizar-ChecklistComplementos } catch { Registrar-FalloInterno 'detectar complementos' $_ }
+            }
+        }
         'Desinstalar programas' { Mostrar-SeccionProgramas -Seccion 'Desinstalar' }
         'Archivos ISO' { Mostrar-SeccionProgramas -Seccion 'ISO' }
         'Microsoft Store' { Mostrar-SeccionProgramas -Seccion 'Store' }
@@ -18895,6 +19146,52 @@ foreach ($cat in $categoriasProg) {
 $window.FindName("BtnInstalarSeleccionados").Add_Click({
     $seleccionados = @($Script:_checkboxesProgramas | Where-Object { $_.IsChecked -eq $true } | ForEach-Object { $_.Tag })
     Accion-InstalarCatalogoSeleccionado -Items $seleccionados
+})
+
+# Complementos: checklist con deteccion real
+$panelChecklistComp = $window.FindName("PanelChecklistComplementos")
+$Script:_checkboxesComplementos = New-Object System.Collections.Generic.List[object]
+$Script:HechosComplementos = $null
+$Script:ComplementosDetectados = $false
+$catsComp = $Script:CatalogoComplementos | ForEach-Object { $_.Categoria } | Select-Object -Unique
+foreach ($cat in $catsComp) {
+    $gb = New-Object System.Windows.Controls.GroupBox
+    $gb.Header = $cat
+    $gb.Foreground = [System.Windows.Media.Brushes]::White
+    $gb.Margin = "0,0,0,10"
+    $sp = New-Object System.Windows.Controls.StackPanel
+    foreach ($item in ($Script:CatalogoComplementos | Where-Object { $_.Categoria -eq $cat })) {
+        $cb = New-Object System.Windows.Controls.CheckBox
+        $cb.Content = $item.Nombre
+        $cb.Foreground = [System.Windows.Media.Brushes]::White
+        $cb.Margin = "4"
+        $cb.Tag = $item
+        $cb.ToolTip = "$($item.Nota)"
+        $sp.Children.Add($cb) | Out-Null
+        $Script:_checkboxesComplementos.Add($cb) | Out-Null
+    }
+    $gb.Content = $sp
+    $panelChecklistComp.Children.Add($gb) | Out-Null
+}
+$window.FindName("BtnComplementosDetectar").Add_Click({
+    try { Actualizar-ChecklistComplementos } catch { Registrar-FalloInterno 'detectar complementos' $_ }
+})
+$window.FindName("BtnComplementosRecomendados").Add_Click({
+    try {
+        if (-not $Script:HechosComplementos) { Actualizar-ChecklistComplementos }
+        if (-not $Script:HechosComplementos) { return }
+        foreach ($cb in $Script:_checkboxesComplementos.ToArray()) {
+            $inst = Test-ComplementoInstalado -Item $cb.Tag -H $Script:HechosComplementos
+            $cb.IsChecked = ([bool]$cb.Tag.Recomendado -and ($inst -eq $false))
+        }
+    } catch { Registrar-FalloInterno 'marcar complementos recomendados' $_ }
+})
+$window.FindName("BtnComplementosInstalar").Add_Click({
+    try {
+        $sel = New-Object System.Collections.Generic.List[object]
+        foreach ($cb in $Script:_checkboxesComplementos.ToArray()) { if ($cb.IsChecked -eq $true) { $sel.Add($cb.Tag) } }
+        Accion-InstalarComplementos -Items $sel.ToArray()
+    } catch { Registrar-FalloInterno 'instalar complementos' $_ }
 })
 
 # Desinstalar programas: un unico boton que abre la ventana con la lista
@@ -21697,7 +21994,10 @@ $Global:AyudaControles = @{
     'BtnNavCtrlGoogle' = 'Busca en Google el controlador de tu equipo.'
     'BtnNavCtrlExterno' = 'Abre esta pagina en tu navegador externo (Chrome, Edge...).'
     # --- Programas ---
-    'CmbSeccionProgramas' = 'Cambia entre instalar programas, desinstalar, archivos ISO y Microsoft Store.'
+    'CmbSeccionProgramas' = 'Cambia entre instalar programas, complementos (DirectX, .NET, Java, Visual C++), desinstalar, archivos ISO y Microsoft Store.'
+    'BtnComplementosDetectar' = 'Revisa en el equipo (archivos, registro y carpetas de .NET) que complementos ya estan instalados. No instala nada.'
+    'BtnComplementosRecomendados' = 'Marca solo los complementos recomendados que NO estan instalados: DirectX, Visual C++ 2005-2022, .NET Framework 3.5, .NET Desktop 8 y 10, Java 21 y WebView2.'
+    'BtnComplementosInstalar' = 'Instala los complementos marcados desde su fuente oficial (winget o caracteristica de Windows) y al terminar comprueba que de verdad quedaron instalados.'
     'BtnInstalarSeleccionados' = 'Instala con winget todos los programas que marcaste en la lista.'
     'BtnVerProgramasInstalados' = 'Abre la lista de programas instalados con buscador, desinstalacion limpia (sin dejar rastros) y forzada.'
     'CmbTipoISO' = 'Elige que tipo de ISO descargar: Windows, Office o Linux.'
