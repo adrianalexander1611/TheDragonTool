@@ -14886,9 +14886,221 @@ function Accion-CacheIconosRestaurar {
     } catch { Write-Log "No se pudo restaurar la cache de iconos." -Tipo AVISO }
 }
 
+# --- SSD y descargas de juegos (Steam) ---
+# Cada ajuste se VERIFICA leyendo el estado real despues de aplicarlo: si no cambio, se avisa en vez de decir "OK".
+$Script:DirSsd = Join-Path $env:ProgramData 'TheDragonTool\ssd'
+
+function Get-InfoDiscoSistemaSsd {
+    $r = [PSCustomObject]@{ Letra = ''; Tipo = 'Desconocido'; Bus = ''; Modelo = ''; EsSsd = $false }
+    try {
+        $r.Letra = "$($env:SystemDrive)".Substring(0, 1)
+        $part = Get-Partition -DriveLetter $r.Letra -ErrorAction Stop
+        $pd = Get-PhysicalDisk -ErrorAction Stop | Where-Object { [int]$_.DeviceId -eq [int]$part.DiskNumber } | Select-Object -First 1
+        if ($pd) {
+            $r.Tipo = "$($pd.MediaType)"; $r.Bus = "$($pd.BusType)"; $r.Modelo = "$($pd.FriendlyName)"
+            $r.EsSsd = ($r.Tipo -eq 'SSD' -or $r.Bus -eq 'NVMe')
+        }
+    } catch {}
+    return $r
+}
+
+function Get-EstadoTrimSsd {
+    # 0 = TRIM activo, 1 = desactivado, $null = no se pudo leer. fsutil sale en el idioma de Windows: se lee solo el numero.
+    try {
+        $t = (& fsutil.exe behavior query DisableDeleteNotify 2>&1) -join "`n"
+        if ($t -match 'NTFS[^\r\n]*?DisableDeleteNotify\s*=\s*(\d)') { return [int]$Matches[1] }
+        if ($t -match 'DisableDeleteNotify\s*=\s*(\d)') { return [int]$Matches[1] }
+    } catch {}
+    return $null
+}
+
+function Accion-SsdRevisarEstado {
+    $l = New-Object System.Collections.Generic.List[string]
+    $d = Get-InfoDiscoSistemaSsd
+    $l.Add("Disco del sistema ($($d.Letra):): $($d.Modelo) - tipo $($d.Tipo), bus $($d.Bus).")
+    if (-not $d.EsSsd -and $d.Tipo -eq 'HDD') { $l.Add("OJO: es un disco duro mecanico (HDD); los ajustes de TRIM no aplican.") }
+    try {
+        foreach ($pd in @(Get-PhysicalDisk -ErrorAction Stop)) {
+            $s = "- $($pd.FriendlyName) [$($pd.MediaType)/$($pd.BusType)]: salud $($pd.HealthStatus)"
+            try {
+                $rc = Get-StorageReliabilityCounter -PhysicalDisk $pd -ErrorAction Stop
+                if ($null -ne $rc.Wear) { $s += ", desgaste $($rc.Wear)%" } else { $s += ", desgaste: el disco no lo informa" }
+                if ($rc.PowerOnHours) { $s += ", $($rc.PowerOnHours) h encendido" }
+                if ($rc.Temperature) { $s += ", $($rc.Temperature) C" }
+            } catch { $s += ", contadores de desgaste no disponibles" }
+            $l.Add($s)
+        }
+    } catch { $l.Add("No se pudo leer la lista de discos fisicos.") }
+    $trim = Get-EstadoTrimSsd
+    $l.Add("TRIM: " + $(if ($trim -eq 0) { 'ACTIVO' } elseif ($trim -eq 1) { 'DESACTIVADO (el SSD pierde rendimiento con las escrituras grandes)' } else { 'no se pudo leer' }))
+    try {
+        $v = Get-Volume -DriveLetter $d.Letra -ErrorAction Stop
+        $pct = [math]::Round(100.0 * $v.SizeRemaining / [math]::Max(1, $v.Size), 0)
+        $l.Add("Espacio libre en $($d.Letra): $([math]::Round($v.SizeRemaining / 1GB, 1)) GB ($pct%)." + $(if ($pct -lt 15) { ' Menos del 15% libre: el SSD escribe mas lento y se desgasta mas; libera espacio antes de instalar juegos grandes.' } else { '' }))
+    } catch {}
+    $l.Add("Hibernacion: " + $(if (Test-Path (Join-Path $env:SystemDrive 'hiberfil.sys') -ErrorAction SilentlyContinue) { 'activa (hiberfil.sys presente)' } else { 'desactivada' }))
+    try { $w = Get-Service WSearch -ErrorAction Stop; $l.Add("Indexado de Windows Search: $($w.Status) / inicio $($w.StartType)") } catch {}
+    try { $v83 = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name NtfsDisable8dot3NameCreation -ErrorAction Stop).NtfsDisable8dot3NameCreation; $l.Add("Nombres cortos 8.3 (NtfsDisable8dot3NameCreation): $v83 (1 = desactivados)") } catch {}
+    foreach ($x in $l) { Write-Log $x -Tipo INFO }
+    Show-Aviso ($l -join "`n") 'Estado del SSD (solo lectura)'
+}
+
+function Accion-SsdTrimActivar {
+    if (-not (Requiere-Admin)) { return }
+    try {
+        & fsutil.exe behavior set DisableDeleteNotify 0 | Out-Null
+        $t = Get-EstadoTrimSsd
+        if ($t -eq 0) { Write-Log "TRIM verificado ACTIVO: el SSD libera los bloques borrados y mantiene su velocidad de escritura." -Tipo OK }
+        else { Write-Log "No se pudo confirmar que TRIM quedara activo (lectura: $t)." -Tipo AVISO }
+    } catch { Write-Log "No se pudo activar TRIM." -Tipo AVISO }
+}
+
+function Accion-SsdTrimAhora {
+    if (-not (Requiere-Admin)) { return }
+    $d = Get-InfoDiscoSistemaSsd
+    if (-not $d.EsSsd) { Write-Log "El disco del sistema no se identifico como SSD (tipo '$($d.Tipo)'): no se ejecuta TRIM." -Tipo AVISO; return }
+    try {
+        Optimize-Volume -DriveLetter $d.Letra -ReTrim -ErrorAction Stop | Out-Null
+        Write-Log "TRIM ejecutado en $($d.Letra): sin errores (Windows no informa cuantos bloques libero)." -Tipo OK
+    } catch { Write-Log "No se pudo ejecutar TRIM: $($_.Exception.Message)" -Tipo AVISO }
+}
+
+function Accion-SsdNombresCortosOff {
+    if (-not (Requiere-Admin)) { return }
+    try {
+        $rk = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+        if (-not (Test-Path $Script:DirSsd)) { New-Item -Path $Script:DirSsd -ItemType Directory -Force | Out-Null }
+        $prev = $null; try { $prev = (Get-ItemProperty $rk -Name NtfsDisable8dot3NameCreation -ErrorAction Stop).NtfsDisable8dot3NameCreation } catch {}
+        $f = Join-Path $Script:DirSsd 'nombres8dot3_original.txt'
+        if ($null -ne $prev -and -not (Test-Path $f)) { Set-Content -Path $f -Value "$prev" -Encoding ASCII }
+        Set-ItemProperty -Path $rk -Name NtfsDisable8dot3NameCreation -Value 1 -Type DWord
+        $now = (Get-ItemProperty $rk -Name NtfsDisable8dot3NameCreation).NtfsDisable8dot3NameCreation
+        if ($now -eq 1) { Write-Log "Nombres cortos 8.3 desactivados para archivos NUEVOS (menos escrituras de metadatos al instalar juegos con miles de archivos). Los ya creados no se tocan." -Tipo OK }
+        else { Write-Log "No se confirmo el cambio de nombres cortos 8.3." -Tipo AVISO }
+    } catch { Write-Log "No se pudo desactivar los nombres cortos 8.3." -Tipo AVISO }
+}
+function Accion-SsdNombresCortosOn {
+    if (-not (Requiere-Admin)) { return }
+    try {
+        $rk = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+        $orig = 2
+        $f = Join-Path $Script:DirSsd 'nombres8dot3_original.txt'
+        if (Test-Path $f) { $o = 0; if ([int]::TryParse((Get-Content $f -Raw).Trim(), [ref]$o)) { $orig = $o } }
+        Set-ItemProperty -Path $rk -Name NtfsDisable8dot3NameCreation -Value $orig -Type DWord
+        $now = (Get-ItemProperty $rk -Name NtfsDisable8dot3NameCreation).NtfsDisable8dot3NameCreation
+        if ($now -eq $orig) { Write-Log "Nombres cortos 8.3 devueltos a su valor original ($orig)." -Tipo OK } else { Write-Log "No se confirmo la restauracion de nombres 8.3." -Tipo AVISO }
+    } catch { Write-Log "No se pudo restaurar los nombres cortos 8.3." -Tipo AVISO }
+}
+
+function Accion-SsdIndexadoPausar {
+    if (-not (Requiere-Admin)) { return }
+    $s = Get-Service -Name WSearch -ErrorAction SilentlyContinue
+    if (-not $s) { Write-Log "El indexado de Windows Search no esta presente en este equipo." -Tipo AVISO; return }
+    try {
+        if (-not (Test-Path $Script:DirSsd)) { New-Item -Path $Script:DirSsd -ItemType Directory -Force | Out-Null }
+        $f = Join-Path $Script:DirSsd 'wsearch_original.json'
+        if (-not (Test-Path $f)) {
+            $del = 0; try { $del = [int](Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\WSearch' -Name DelayedAutostart -ErrorAction Stop).DelayedAutostart } catch {}
+            @{ Inicio = "$($s.StartType)"; Retardado = $del } | ConvertTo-Json | Set-Content -Path $f -Encoding ASCII
+        }
+        Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+        Set-Service -Name WSearch -StartupType Disabled -ErrorAction Stop
+        $n = Get-Service -Name WSearch
+        if ($n.StartType -eq 'Disabled' -and $n.Status -eq 'Stopped') { Write-Log "Indexado de Windows Search desactivado: ya no indexa los miles de archivos nuevos que crea Steam al instalar (las busquedas de Windows seran mas lentas)." -Tipo OK }
+        else { Write-Log "El indexado no quedo detenido (estado $($n.Status)/$($n.StartType))." -Tipo AVISO }
+    } catch { Write-Log "No se pudo pausar el indexado." -Tipo AVISO }
+}
+function Accion-SsdIndexadoRestaurar {
+    if (-not (Requiere-Admin)) { return }
+    $s = Get-Service -Name WSearch -ErrorAction SilentlyContinue
+    if (-not $s) { return }
+    try {
+        $modo = 'Automatic'; $ret = 1
+        $f = Join-Path $Script:DirSsd 'wsearch_original.json'
+        if (Test-Path $f) { $j = Get-Content $f -Raw | ConvertFrom-Json; if ($j.Inicio) { $modo = "$($j.Inicio)" }; $ret = [int]$j.Retardado }
+        if ($modo -eq 'Automatic' -and $ret -eq 1) { & sc.exe config WSearch start= delayed-auto | Out-Null }
+        else { Set-Service -Name WSearch -StartupType $modo -ErrorAction Stop }
+        if ($modo -ne 'Disabled') { Start-Service -Name WSearch -ErrorAction SilentlyContinue }
+        $n = Get-Service -Name WSearch
+        if ($n.StartType -ne 'Disabled') { Write-Log "Indexado de Windows Search restaurado (inicio: $($n.StartType), estado: $($n.Status))." -Tipo OK } else { Write-Log "El indexado sigue desactivado." -Tipo AVISO }
+    } catch { Write-Log "No se pudo restaurar el indexado." -Tipo AVISO }
+}
+
+function Get-BibliotecasSteam {
+    $rutas = New-Object System.Collections.Generic.List[string]
+    $raiz = $null
+    foreach ($k in @('HKCU:\Software\Valve\Steam', 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'HKLM:\SOFTWARE\Valve\Steam')) {
+        try { $v = (Get-ItemProperty $k -ErrorAction Stop); $c = if ($v.SteamPath) { "$($v.SteamPath)" } elseif ($v.InstallPath) { "$($v.InstallPath)" } else { '' }
+              if ($c) { $raiz = $c.Replace('/', '\'); break } } catch {}
+    }
+    if (-not $raiz -or -not (Test-Path $raiz)) { return ,@() }
+    $rutas.Add($raiz)
+    $vdf = Join-Path $raiz 'steamapps\libraryfolders.vdf'
+    if (Test-Path $vdf) {
+        foreach ($m in [regex]::Matches((Get-Content $vdf -Raw -ErrorAction SilentlyContinue), '"path"\s+"([^"]+)"')) {
+            $p = $m.Groups[1].Value.Replace('\\', '\')
+            if ($p -and (Test-Path $p) -and -not ($rutas -contains $p)) { $rutas.Add($p) }
+        }
+    }
+    return ,$rutas.ToArray()
+}
+
+function Accion-SsdSteamExcluirDefender {
+    if (-not (Requiere-Admin)) { return }
+    $bib = Get-BibliotecasSteam
+    if ($null -eq $bib) { $bib = @() }
+    if ($bib.Count -eq 0) { Write-Log "No se encontro Steam instalado en este equipo: no se agrego ninguna exclusion." -Tipo AVISO; return }
+    try { [void](Get-MpPreference -ErrorAction Stop) } catch { Write-Log "Microsoft Defender no esta activo/gestionable (puede haber otro antivirus): no se cambio nada." -Tipo AVISO; return }
+    try {
+        if (-not (Test-Path $Script:DirSsd)) { New-Item -Path $Script:DirSsd -ItemType Directory -Force | Out-Null }
+        $f = Join-Path $Script:DirSsd 'steam_exclusiones.json'
+        $hechas = New-Object System.Collections.Generic.List[string]
+        if (Test-Path $f) { foreach ($x in @((Get-Content $f -Raw | ConvertFrom-Json))) { if ($x) { $hechas.Add("$x") } } }
+        $ok = 0
+        foreach ($b in $bib) {
+            $sa = Join-Path $b 'steamapps'
+            if (-not (Test-Path $sa)) { continue }
+            $ya = @((Get-MpPreference).ExclusionPath) -contains $sa
+            if (-not $ya) { Add-MpPreference -ExclusionPath $sa -ErrorAction Stop; if (-not ($hechas -contains $sa)) { $hechas.Add($sa) } }
+            if (@((Get-MpPreference).ExclusionPath) -contains $sa) { $ok++; Write-Log "Exclusion de Defender verificada: $sa" -Tipo OK }
+        }
+        ConvertTo-Json -InputObject @($hechas.ToArray()) | Set-Content -Path $f -Encoding ASCII
+        if ($ok -eq 0) { Write-Log "No se pudo confirmar ninguna exclusion." -Tipo AVISO }
+        else { Write-Log "Defender ya no analiza cada archivo que Steam escribe/lee en $ok biblioteca(s): menos lecturas extra y menos CPU al instalar. COMPROMISO: un juego pirata/modificado en esa carpeta no se analizaria; quitalo con 'Quitar exclusion'." -Tipo INFO }
+    } catch { Write-Log "No se pudo agregar la exclusion de Defender: $($_.Exception.Message)" -Tipo AVISO }
+}
+function Accion-SsdSteamQuitarExclusion {
+    if (-not (Requiere-Admin)) { return }
+    $f = Join-Path $Script:DirSsd 'steam_exclusiones.json'
+    if (-not (Test-Path $f)) { Write-Log "Esta herramienta no habia agregado exclusiones de Steam: no se quita nada (no se tocan las exclusiones propias del cliente)." -Tipo INFO; return }
+    try {
+        $quedan = New-Object System.Collections.Generic.List[string]
+        foreach ($x in @((Get-Content $f -Raw | ConvertFrom-Json))) {
+            if (-not $x) { continue }
+            Remove-MpPreference -ExclusionPath "$x" -ErrorAction SilentlyContinue
+            if (@((Get-MpPreference).ExclusionPath) -contains "$x") { $quedan.Add("$x"); Write-Log "No se pudo quitar: $x" -Tipo AVISO } else { Write-Log "Exclusion quitada: $x" -Tipo OK }
+        }
+        if ($quedan.Count -eq 0) { Remove-Item $f -Force -ErrorAction SilentlyContinue } else { ConvertTo-Json -InputObject @($quedan.ToArray()) | Set-Content -Path $f -Encoding ASCII }
+    } catch { Write-Log "No se pudo quitar la exclusion: $($_.Exception.Message)" -Tipo AVISO }
+}
+
 $Script:ChecklistOptimizacionRegistro = @(
     @{ Categoria='Disco'; Nombre='Desactivar actualizacion de "ultimo acceso" en NTFS (menos escritura en disco)'; Tipo='Accion'; ValorOn='Accion-NtfsUltimoAccesoOff' },
     @{ Categoria='Disco'; Nombre='Reactivar actualizacion de "ultimo acceso" en NTFS'; Tipo='Accion'; ValorOn='Accion-NtfsUltimoAccesoOn' },
+
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Revisar estado del SSD: tipo, desgaste, TRIM, espacio libre (solo lectura)'; Tipo='Accion'; ValorOn='Accion-SsdRevisarEstado' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Verificar y activar TRIM (mantiene la velocidad de escritura del SSD)'; Tipo='Accion'; ValorOn='Accion-SsdTrimActivar' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Ejecutar TRIM ahora en el disco del sistema (solo si es SSD)'; Tipo='Accion'; ValorOn='Accion-SsdTrimAhora' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Desactivar nombres cortos 8.3 en NTFS (menos escrituras con miles de archivos nuevos)'; Tipo='Accion'; ValorOn='Accion-SsdNombresCortosOff' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Restaurar nombres cortos 8.3 a su valor original'; Tipo='Accion'; ValorOn='Accion-SsdNombresCortosOn' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Pausar el indexado de Windows Search (no indexa los archivos nuevos de Steam)'; Tipo='Accion'; ValorOn='Accion-SsdIndexadoPausar' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Restaurar el indexado de Windows Search'; Tipo='Accion'; ValorOn='Accion-SsdIndexadoRestaurar' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Desactivar Delivery Optimization (sin descargas/subidas P2P de Windows Update en segundo plano)'; Tipo='Accion'; ValorOn='Accion-DeliveryOptimizationOff' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Reactivar Delivery Optimization'; Tipo='Accion'; ValorOn='Accion-DeliveryOptimizationOn' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Desactivar hibernacion (borra hiberfil.sys: ahorra GB y escrituras; tambien quita el Inicio rapido)'; Tipo='Accion'; ValorOn='Accion-HibernacionOff' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Reactivar hibernacion'; Tipo='Accion'; ValorOn='Accion-HibernacionOn' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Excluir la carpeta steamapps del analisis en tiempo real de Defender (menos lecturas/CPU al instalar; reduce la proteccion en esa carpeta)'; Tipo='Accion'; ValorOn='Accion-SsdSteamExcluirDefender' },
+    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Quitar la exclusion de Defender agregada por esta herramienta'; Tipo='Accion'; ValorOn='Accion-SsdSteamQuitarExclusion' },
 
     @{ Categoria='Memoria'; Nombre='Mantener nucleo/controladores en RAM (no paginar a disco)'; Tipo='Accion'; ValorOn='Accion-NoPaginarNucleoOn' },
     @{ Categoria='Memoria'; Nombre='Restaurar paginado normal de nucleo/controladores'; Tipo='Accion'; ValorOn='Accion-NoPaginarNucleoOff' },
