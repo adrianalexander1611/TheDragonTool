@@ -36,6 +36,7 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 Marcar-Arranque 'carga de librerias WPF'
 $Script:Autor = "Adrian Barrientos"
 $Script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Script:RutaScriptActual = $MyInvocation.MyCommand.Path
 if (-not $Script:ScriptDir) { $Script:ScriptDir = (Get-Location).Path }
 
 # ---------------------------------------------------------------------------
@@ -17256,9 +17257,12 @@ Marcar-Arranque 'funciones y recursos'
         <Border Grid.Row="0" Margin="10,10,10,0" Padding="8,6" CornerRadius="14" BorderThickness="1.5"
                 BorderBrush="{DynamicResource NeonBrush}" Background="#33141C30">
             <DockPanel LastChildFill="True">
-                <Button x:Name="BtnMenuLateral" DockPanel.Dock="Left" Content="☰  MENÚ" Width="120" Height="34" Margin="0,0,14,0"
+                <Button x:Name="BtnMenuLateral" DockPanel.Dock="Left" Content="☰  MENÚ" Width="120" Height="34" Margin="0,0,10,0"
                         Padding="0" HorizontalContentAlignment="Center" FontWeight="Bold"
                         Background="#33141C30" BorderBrush="{DynamicResource NeonBrush}" ToolTip="Abrir el menu de secciones"/>
+                <Button x:Name="BtnInstalarPrograma" DockPanel.Dock="Left" Content="💾  INSTALAR" Width="132" Height="34" Margin="0,0,14,0"
+                        Padding="0" HorizontalContentAlignment="Center" FontWeight="Bold"
+                        Background="#33141C30" BorderBrush="{StaticResource Acento}"/>
                 <Grid x:Name="ZonaBusqueda" DockPanel.Dock="Right" Width="300" Margin="14,0,0,0" VerticalAlignment="Center">
                     <TextBox x:Name="TxtBusquedaGlobal" Height="34" Padding="10,0" VerticalContentAlignment="Center" FontSize="13"
                              ToolTip="Escribe lo que buscas (bateria, disco, usb, java, camara...) y pulsa Enter o elige el resultado para saltar directo a esa funcion. Atajo: Ctrl+F"/>
@@ -22056,6 +22060,176 @@ function Global:Mostrar-ResultadosBusqueda {
     $pop.IsOpen = $true
 }
 
+# ===== Instalar el programa en el equipo (copia local + accesos directos) =====
+# Abre mas rapido porque no consulta GitHub, no descarga 1.4 MB y no lanza un segundo PowerShell.
+$Script:DirInstalacionApp = Join-Path $env:ProgramData 'TheDragonTool\app'
+
+function Global:Get-EstadoInstalacion {
+    $dir = $Script:DirInstalacionApp
+    $ps1 = Join-Path $dir 'TheDragonTool.ps1'
+    $inst = Test-Path -LiteralPath $ps1
+    $fecha = $null
+    if ($inst) { try { $fecha = (Get-Item -LiteralPath $ps1).LastWriteTime } catch {} }
+    $esEsta = $false
+    try {
+        if ($inst -and $Script:RutaScriptActual) {
+            $esEsta = ([IO.Path]::GetFullPath($Script:RutaScriptActual) -ieq [IO.Path]::GetFullPath($ps1))
+        }
+    } catch {}
+    return [PSCustomObject]@{ Dir = $dir; Ps1 = $ps1; Instalado = $inst; Fecha = $fecha; EsEstaCopia = $esEsta }
+}
+
+function Global:Actualizar-BotonInstalar {
+    try {
+        $b = $window.FindName('BtnInstalarPrograma')
+        if (-not $b) { return }
+        $e = Get-EstadoInstalacion
+        $b.Content = $(if ($e.Instalado) { '✔  INSTALADO' } else { '💾  INSTALAR' })
+    } catch {}
+}
+
+function Global:Nuevo-AccesoDirecto {
+    param([string]$Ruta, [string]$Destino, [string]$Argumentos, [string]$Icono, [string]$Descripcion, [switch]$Admin, [switch]$Minimizado)
+    $sh = New-Object -ComObject WScript.Shell
+    try {
+        $l = $sh.CreateShortcut($Ruta)
+        $l.TargetPath = $Destino
+        $l.Arguments = $Argumentos
+        $l.WorkingDirectory = (Split-Path -Parent $Ruta)
+        $l.Description = $Descripcion
+        if ($Icono -and (Test-Path -LiteralPath $Icono)) { $l.IconLocation = $Icono }
+        if ($Minimizado) { $l.WindowStyle = 7 }
+        $l.Save()
+    } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($sh) }
+    if ($Admin) {
+        # Marca "Ejecutar como administrador" en el acceso directo (bit SLDF_RUNAS_USER)
+        $bytes = [IO.File]::ReadAllBytes($Ruta)
+        $bytes[0x15] = [byte]($bytes[0x15] -bor 0x20)
+        [IO.File]::WriteAllBytes($Ruta, $bytes)
+    }
+    return (Test-Path -LiteralPath $Ruta)
+}
+
+function Global:Crear-IconoDesdePng {
+    param([string]$Png, [string]$Ico)
+    try {
+        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+        $src = [System.Drawing.Image]::FromFile($Png)
+        $bmp = New-Object System.Drawing.Bitmap 64, 64
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.DrawImage($src, 0, 0, 64, 64)
+        $g.Dispose()
+        $ic = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+        $fs = [IO.File]::Create($Ico)
+        try { $ic.Save($fs) } finally { $fs.Close() }
+        $ic.Dispose(); $bmp.Dispose(); $src.Dispose()
+        return (Test-Path -LiteralPath $Ico)
+    } catch { return $false }
+}
+
+function Global:Get-RutasAccesosInstalacion {
+    $esc = [Environment]::GetFolderPath('CommonDesktopDirectory')
+    $menu = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'The Dragon Tool'
+    return [PSCustomObject]@{
+        Escritorio = Join-Path $esc 'The Dragon Tool.lnk'
+        MenuDir = $menu
+        MenuApp = Join-Path $menu 'The Dragon Tool.lnk'
+        MenuActualizar = Join-Path $menu 'The Dragon Tool - Actualizar a la ultima version.lnk'
+    }
+}
+
+function Accion-QuitarInstalacion {
+    $e = Get-EstadoInstalacion
+    $r = Get-RutasAccesosInstalacion
+    $problemas = New-Object System.Collections.Generic.List[string]
+    foreach ($f in @($r.Escritorio, $r.MenuApp, $r.MenuActualizar)) {
+        if (Test-Path -LiteralPath $f) { try { Remove-Item -LiteralPath $f -Force -ErrorAction Stop } catch { $problemas.Add("No se pudo borrar el acceso directo $f") } }
+    }
+    try { if ((Test-Path -LiteralPath $r.MenuDir) -and -not (Get-ChildItem -LiteralPath $r.MenuDir -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $r.MenuDir -Force -ErrorAction SilentlyContinue } } catch {}
+    if (Test-Path -LiteralPath $e.Dir) {
+        try { Remove-Item -LiteralPath $e.Dir -Recurse -Force -ErrorAction Stop }
+        catch { $problemas.Add("No se pudo borrar la carpeta instalada ($($e.Dir)). Si estas usando esa copia, abre el programa con el comando de GitHub y vuelve a intentarlo.") }
+    }
+    $sigue = Test-Path -LiteralPath $e.Ps1
+    Actualizar-BotonInstalar
+    if ($sigue -or $problemas.Count -gt 0) {
+        Write-Log "Quitar instalacion: quedaron restos. $($problemas -join ' ')" -Tipo AVISO
+        Show-Aviso "No se pudo quitar todo:`n$($problemas -join "`n")" "Quitar instalacion"
+    } else {
+        Write-Log "Programa instalado quitado (accesos directos y copia local)." -Tipo OK
+        Show-Aviso "Listo: se quitaron la copia instalada y los accesos directos. Tus datos y ajustes guardados no se tocaron." "Quitar instalacion"
+    }
+}
+
+function Accion-InstalarPrograma {
+    if (-not (Test-Admin)) {
+        Show-Aviso "Para instalar el programa (accesos directos para todos los usuarios) hay que abrirlo como administrador. Usa el boton 'Abrir como administrador'." "Se necesita administrador"
+        return
+    }
+    $origen = $Script:RutaScriptActual
+    if (-not $origen -or -not (Test-Path -LiteralPath $origen)) {
+        Show-Aviso "El programa no se esta ejecutando desde un archivo, asi que no hay nada que copiar.`n`nAbrelo con el comando de GitHub (iniciar.ps1), que lo descarga a tu equipo, y pulsa Instalar de nuevo." "No se puede instalar"
+        return
+    }
+    $e = Get-EstadoInstalacion
+    if ($e.Instalado) {
+        $txt = "Ya esta instalado (copia del $($e.Fecha.ToString('dd/MM/yyyy HH:mm'))).`n`nSI = reemplazar la copia instalada por esta version`nNO = quitar el programa instalado (copia y accesos directos)`nCANCELAR = no hacer nada"
+        $resp = [System.Windows.MessageBox]::Show($txt, 'The Dragon Tool instalado', 'YesNoCancel', 'Question')
+        if ($resp -eq 'Cancel') { return }
+        if ($resp -eq 'No') { Accion-QuitarInstalacion; return }
+    } else {
+        if (-not (Show-Confirm "Se instalara una copia del programa en:`n$($e.Dir)`n`ny se crearan accesos directos (Escritorio y menu Inicio) que lo abren directo como administrador, sin descargar nada. Abre mas rapido.`n`nPara actualizar luego, usa el acceso 'Actualizar a la ultima version' del menu Inicio. ¿Instalar?" "Instalar The Dragon Tool")) { return }
+    }
+
+    $res = New-Object System.Collections.Generic.List[string]
+    $fallos = 0
+    try {
+        New-Item -ItemType Directory -Force -Path $e.Dir | Out-Null
+        # 1) Copia del programa (si ya se esta ejecutando la copia instalada, no se copia sobre si misma)
+        if (-not $e.EsEstaCopia) {
+            Copy-Item -LiteralPath $origen -Destination $e.Ps1 -Force -ErrorAction Stop
+            Unblock-File -LiteralPath $e.Ps1 -ErrorAction SilentlyContinue
+        }
+        $h1 = (Get-FileHash -LiteralPath $origen -Algorithm SHA256).Hash
+        $h2 = (Get-FileHash -LiteralPath $e.Ps1 -Algorithm SHA256).Hash
+        if ($h1 -eq $h2) { $res.Add("✔ Copia del programa comprobada (SHA-256 igual al original)") } else { $res.Add("✖ La copia no coincide con el original"); $fallos++ }
+        # 2) Logo e icono
+        $logoOrig = Join-Path $Script:ScriptDir 'logo.png'
+        $logoDest = Join-Path $e.Dir 'logo.png'
+        if ((Test-Path -LiteralPath $logoOrig) -and -not ([IO.Path]::GetFullPath($logoOrig) -ieq [IO.Path]::GetFullPath($logoDest))) { Copy-Item -LiteralPath $logoOrig -Destination $logoDest -Force -ErrorAction SilentlyContinue }
+        $icono = Join-Path $e.Dir 'dragon.ico'
+        $tieneIco = $false
+        if (Test-Path -LiteralPath $logoDest) { $tieneIco = Crear-IconoDesdePng -Png $logoDest -Ico $icono }
+        if (-not $tieneIco) { $icono = "$env:windir\System32\WindowsPowerShell\v1.0\powershell.exe,0"; $res.Add("• Sin logo.png: se usa el icono de PowerShell") } else { $res.Add("✔ Icono creado a partir del logo") }
+        # 3) Accesos directos
+        $r = Get-RutasAccesosInstalacion
+        New-Item -ItemType Directory -Force -Path $r.MenuDir | Out-Null
+        $psExe = "$env:windir\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $argApp = "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$($e.Ps1)`""
+        $argAct = "-NoProfile -ExecutionPolicy Bypass -Command `"irm https://raw.githubusercontent.com/adrianalexander1611/TheDragonTool/main/iniciar.ps1 | iex`""
+        $a1 = Nuevo-AccesoDirecto -Ruta $r.Escritorio -Destino $psExe -Argumentos $argApp -Icono $icono -Descripcion 'The Dragon Tool' -Admin -Minimizado
+        $a2 = Nuevo-AccesoDirecto -Ruta $r.MenuApp -Destino $psExe -Argumentos $argApp -Icono $icono -Descripcion 'The Dragon Tool' -Admin -Minimizado
+        $a3 = Nuevo-AccesoDirecto -Ruta $r.MenuActualizar -Destino $psExe -Argumentos $argAct -Icono $icono -Descripcion 'Descarga la ultima version de The Dragon Tool desde GitHub' -Admin
+        foreach ($par in @(@('Escritorio', $a1), @('Menu Inicio', $a2), @('Menu Inicio (Actualizar)', $a3))) {
+            if ($par[1]) { $res.Add("✔ Acceso directo creado: $($par[0])") } else { $res.Add("✖ No se pudo crear el acceso directo: $($par[0])"); $fallos++ }
+        }
+    } catch {
+        $fallos++
+        $res.Add("✖ Error: $($_.Exception.Message)")
+        Write-Log "Instalar programa: $($_.Exception.Message)" -Tipo AVISO
+    }
+    Actualizar-BotonInstalar
+    $titulo = if ($fallos -eq 0) { 'Instalacion completada' } else { 'Instalacion con errores' }
+    Write-Log "Instalar programa: $(if ($fallos -eq 0) { 'completado y comprobado' } else { "$fallos problema(s)" })." -Tipo $(if ($fallos -eq 0) { 'OK' } else { 'AVISO' })
+    Show-Aviso (($res.ToArray() -join "`n") + "`n`nDe ahora en adelante abre el programa con el icono 'The Dragon Tool' del Escritorio.") $titulo
+}
+
+$window.FindName('BtnInstalarPrograma').Add_Click({
+    try { Accion-InstalarPrograma } catch { Registrar-FalloInterno 'instalar programa' $_ }
+})
+Actualizar-BotonInstalar
+
 # --- Barra de busqueda global ---
 $Script:IndiceBusqueda = $null
 try {
@@ -22381,6 +22555,7 @@ $Global:AyudaControles = @{
     'BtnNavCtrlGoogle' = 'Busca en Google el controlador de tu equipo.'
     'BtnNavCtrlExterno' = 'Abre esta pagina en tu navegador externo (Chrome, Edge...).'
     # --- Programas ---
+    'BtnInstalarPrograma' = 'Instala el programa en este equipo: copia local + accesos directos en el Escritorio y el menu Inicio que lo abren como administrador sin descargar nada (abre mas rapido). Si ya esta instalado, permite reemplazar la copia o quitarla.'
     'TxtBusquedaGlobal' = 'Busca cualquier funcion del programa (bateria, disco, usb, java, camara...). Enter abre el primer resultado; con la flecha abajo eliges otro. Atajo: Ctrl+F.'
     'CmbSeccionProgramas' = 'Cambia entre instalar programas, complementos (DirectX, .NET, Java, Visual C++), desinstalar, archivos ISO y Microsoft Store.'
     'BtnComplementosDetectar' = 'Revisa en el equipo (archivos, registro y carpetas de .NET) que complementos ya estan instalados. No instala nada.'
