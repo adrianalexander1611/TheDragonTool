@@ -20178,6 +20178,70 @@ Marcar-Arranque 'funciones y recursos'
                 </DockPanel>
             </TabItem>
 
+            <TabItem Header="📊 Analisis">
+                <DockPanel Margin="14">
+                    <TextBlock DockPanel.Dock="Top" Text="Selecciona una opcion:" Foreground="#66AEFF" FontWeight="Bold" FontSize="14" Margin="0,0,0,6"/>
+                    <ComboBox x:Name="CmbSeccionAnalisis" DockPanel.Dock="Top" Margin="0,0,0,14" Width="360" HorizontalAlignment="Left">
+                        <ComboBoxItem Content="Almacenamiento" IsSelected="True"/>
+                    </ComboBox>
+                    <Grid x:Name="PanelAnaAlmacenamiento">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Border Grid.Row="0" Style="{StaticResource TarjetaSeccion}" Margin="0,0,0,10">
+                            <StackPanel>
+                                <TextBlock Text="💽 Analisis del almacenamiento" Foreground="{StaticResource TextoAcento}" FontWeight="Bold" FontSize="15" Margin="0,0,0,8"/>
+                                <TextBlock Foreground="White" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"
+                                           Text="Mide de verdad que esta cargando el disco y que lo llena. Haz clic derecho sobre una fila y elige 'Eliminar consumo': el programa solo actua sobre lo seguro, lo registra para poder deshacerlo y vuelve a medir para comprobar que bajo de verdad."/>
+                                <WrapPanel>
+                                    <ComboBox x:Name="CmbAnaModo" Width="330" Margin="0,0,10,6">
+                                        <ComboBoxItem Content="Actividad del disco: que lo esta usando ahora" IsSelected="True"/>
+                                        <ComboBoxItem Content="Espacio ocupado: que llena el disco"/>
+                                    </ComboBox>
+                                    <ComboBox x:Name="CmbAnaDuracion" Width="120" Margin="0,0,10,6">
+                                        <ComboBoxItem Content="10 segundos"/>
+                                        <ComboBoxItem Content="20 segundos" IsSelected="True"/>
+                                        <ComboBoxItem Content="40 segundos"/>
+                                        <ComboBoxItem Content="60 segundos"/>
+                                    </ComboBox>
+                                    <Button x:Name="BtnAnaAnalizar" Content="🔍 Analizar" Width="140" Height="36" Margin="0,0,10,6" BorderBrush="{StaticResource Acento}"/>
+                                    <Button x:Name="BtnAnaDetener" Content="⏹️ Detener" Width="120" Height="36" Margin="0,0,10,6" IsEnabled="False"/>
+                                    <Button x:Name="BtnAnaCambios" Content="↩️ Ver y deshacer cambios" Width="200" Height="36" Margin="0,0,0,6"/>
+                                </WrapPanel>
+                                <TextBlock x:Name="TxtAnaEstado" Foreground="#66AEFF" TextWrapping="Wrap" FontSize="12" Margin="0,4,0,0" Text="Pulsa Analizar. Para ver lo que carga el disco, usa el equipo con normalidad durante la medicion."/>
+                                <TextBlock x:Name="TxtAnaResumen" Foreground="White" TextWrapping="Wrap" FontSize="12" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <Grid Grid.Row="1" MinHeight="260">
+                            <DataGrid x:Name="GridAnaActividad" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" ToolTip="Clic derecho sobre una fila para ver las acciones">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Proceso / servicio" Binding="{Binding Proceso}" Width="2*"/>
+                                    <DataGridTextColumn Header="Lectura" Binding="{Binding Lectura}" Width="0.8*"/>
+                                    <DataGridTextColumn Header="Escritura" Binding="{Binding Escritura}" Width="0.8*"/>
+                                    <DataGridTextColumn Header="Total" Binding="{Binding Total}" Width="0.7*"/>
+                                    <DataGridTextColumn Header="Parte" Binding="{Binding Parte}" Width="0.5*"/>
+                                    <DataGridTextColumn Header="Tipo" Binding="{Binding Tipo}" Width="1.2*"/>
+                                    <DataGridTextColumn Header="Que hara 'Eliminar consumo'" Binding="{Binding Sugerencia}" Width="3*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <DataGrid x:Name="GridAnaEspacio" AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Visibility="Collapsed" ToolTip="Clic derecho sobre una fila para ver las acciones">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="Elemento" Binding="{Binding Elemento}" Width="2*"/>
+                                    <DataGridTextColumn Header="Tamano" Binding="{Binding Tamano}" Width="0.8*"/>
+                                    <DataGridTextColumn Header="Tipo" Binding="{Binding Tipo}" Width="1.3*"/>
+                                    <DataGridTextColumn Header="Ubicacion" Binding="{Binding Ubicacion}" Width="2.4*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                        <Border Grid.Row="2" Style="{StaticResource TarjetaSeccion}" Margin="0,10,0,0">
+                            <TextBlock x:Name="TxtAnaDetalle" Foreground="White" TextWrapping="Wrap" FontSize="12" Text="Selecciona una fila para ver que es y que hara 'Eliminar consumo'."/>
+                        </Border>
+                    </Grid>
+                </DockPanel>
+            </TabItem>
+
             <TabItem Header="ℹ️ Acerca de">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel Margin="20" MaxWidth="700" HorizontalAlignment="Left">
@@ -20553,6 +20617,43 @@ $window.FindName("CmbSeccionModificacion").Add_SelectionChanged({
         'Parlante'       { Mostrar-SeccionModificacion -Seccion 'Parlante' }
         'Almacenamiento' { Mostrar-SeccionModificacion -Seccion 'Almacenamiento' }
     }
+})
+
+# --- Pestana Analisis > Almacenamiento: menus de clic derecho y botones ---
+$Global:ANEnCurso = $false; $Global:ANCancelar = $false
+$Script:_anaCMActividad = New-Object System.Windows.Controls.ContextMenu
+$Script:_anaCMEspacio = New-Object System.Windows.Controls.ContextMenu
+function Global:Nuevo-ItemMenuAN {
+    param($Menu, [string]$Texto, [scriptblock]$Accion)
+    $mi = New-Object System.Windows.Controls.MenuItem
+    $mi.Header = $Texto
+    $mi.Add_Click($Accion)
+    [void]$Menu.Items.Add($mi)
+    return $mi
+}
+[void](Nuevo-ItemMenuAN $Script:_anaCMActividad '🧯 Eliminar consumo' { $f = $window.FindName('GridAnaActividad').SelectedItem; if ($f) { try { Eliminar-ConsumoActividadAN -Fila $f } catch { Registrar-FalloInterno 'eliminar consumo (actividad)' $_ } } })
+[void](Nuevo-ItemMenuAN $Script:_anaCMActividad '⬇️ Bajar prioridad de CPU del programa' { $f = $window.FindName('GridAnaActividad').SelectedItem; if ($f) { try { Bajar-PrioridadActividadAN -Fila $f } catch { Registrar-FalloInterno 'bajar prioridad' $_ } } })
+[void](Nuevo-ItemMenuAN $Script:_anaCMActividad '📂 Abrir ubicacion del archivo' { $f = $window.FindName('GridAnaActividad').SelectedItem; if ($f -and $f.Ruta -and (Test-Path -LiteralPath $f.Ruta)) { Start-Process explorer.exe -ArgumentList "/select,`"$($f.Ruta)`"" } else { Show-Aviso 'No se conoce la ubicacion del archivo (proceso protegido o ya cerrado).' 'Sin ubicacion' } })
+[void](Nuevo-ItemMenuAN $Script:_anaCMActividad '📋 Copiar detalle' { $f = $window.FindName('GridAnaActividad').SelectedItem; if ($f) { try { [System.Windows.Clipboard]::SetText((Texto-DetalleActividadAN -F $f)) } catch {} } })
+[void](Nuevo-ItemMenuAN $Script:_anaCMEspacio '🧯 Eliminar consumo' { $f = $window.FindName('GridAnaEspacio').SelectedItem; if ($f) { try { Eliminar-ConsumoEspacioAN -Fila $f } catch { Registrar-FalloInterno 'eliminar consumo (espacio)' $_ } } })
+[void](Nuevo-ItemMenuAN $Script:_anaCMEspacio '📂 Abrir ubicacion' { $f = $window.FindName('GridAnaEspacio').SelectedItem; if ($f) { foreach ($r in $f.Rutas) { if (Test-Path -LiteralPath $r) { $it = Get-Item -LiteralPath $r -Force; if ($it.PSIsContainer) { Start-Process explorer.exe -ArgumentList "`"$r`"" } else { Start-Process explorer.exe -ArgumentList "/select,`"$r`"" }; break } } } })
+[void](Nuevo-ItemMenuAN $Script:_anaCMEspacio '📋 Copiar detalle' { $f = $window.FindName('GridAnaEspacio').SelectedItem; if ($f) { try { [System.Windows.Clipboard]::SetText("$($f.Elemento) - $($f.Tamano)`n$($f.Que)`n$($f.Ubicacion)") } catch {} } })
+$gridAnaA = $window.FindName('GridAnaActividad'); $gridAnaE = $window.FindName('GridAnaEspacio')
+$gridAnaA.ContextMenu = $Script:_anaCMActividad; $gridAnaE.ContextMenu = $Script:_anaCMEspacio
+$gridAnaA.Add_PreviewMouseRightButtonDown({ param($s, $e) Seleccionar-FilaClicDerechoAN -Grid $s -Evento $e })
+$gridAnaE.Add_PreviewMouseRightButtonDown({ param($s, $e) Seleccionar-FilaClicDerechoAN -Grid $s -Evento $e })
+$gridAnaA.Add_SelectionChanged({ $f = $window.FindName('GridAnaActividad').SelectedItem; if ($f) { $window.FindName('TxtAnaDetalle').Text = (Texto-DetalleActividadAN -F $f) } })
+$gridAnaE.Add_SelectionChanged({ $f = $window.FindName('GridAnaEspacio').SelectedItem; if ($f) { $window.FindName('TxtAnaDetalle').Text = "$($f.Elemento) - $($f.Tamano)`n$($f.Que)`nUbicacion: $($f.Ubicacion)" } })
+$window.FindName('BtnAnaAnalizar').Add_Click({ Analizar-AlmacenamientoAN })
+$window.FindName('BtnAnaDetener').Add_Click({ $Global:ANCancelar = $true })
+$window.FindName('BtnAnaCambios').Add_Click({ try { Show-CambiosOG } catch { Registrar-FalloInterno 'ver cambios' $_ } })
+$window.FindName('CmbAnaModo').Add_SelectionChanged({
+    $i = $window.FindName('CmbAnaModo').SelectedIndex
+    $window.FindName('GridAnaActividad').Visibility = $(if ($i -eq 0) { 'Visible' } else { 'Collapsed' })
+    $window.FindName('GridAnaEspacio').Visibility = $(if ($i -eq 1) { 'Visible' } else { 'Collapsed' })
+    $window.FindName('CmbAnaDuracion').Visibility = $(if ($i -eq 0) { 'Visible' } else { 'Collapsed' })
+    $window.FindName('TxtAnaResumen').Text = ''
+    $window.FindName('TxtAnaEstado').Text = $(if ($i -eq 0) { 'Pulsa Analizar. Para ver lo que carga el disco, usa el equipo con normalidad durante la medicion.' } else { 'Pulsa Analizar para medir cuanto ocupa cada elemento (puede tardar un minuto o mas).' })
 })
 
 # --- Pestaña Modificacion: Pantalla ---
@@ -23395,6 +23496,489 @@ $Script:SinonimosBusqueda = @(
 )
 
 # Panel (oculto/visible segun la seccion elegida) -> como mostrarlo
+# ===========================================================================
+#  PESTANA ANALISIS > ALMACENAMIENTO
+#  Modo 1: ACTIVIDAD del disco (que procesos lo usan ahora), medida de verdad.
+#  Modo 2: ESPACIO ocupado (que llena el disco), con tamanos reales.
+#  Clic derecho > "Eliminar consumo": solo actua sobre lo seguro, lo registra
+#  (se puede deshacer) y vuelve a medir para comprobar que bajo.
+# ===========================================================================
+$Script:ProcProtegidosAN = '^(System|Idle|Registry|Secure System|Memory Compression|MemCompression|smss|csrss|wininit|winlogon|services|lsass|lsaiso|fontdrvhost|dwm|explorer|sihost|ctfmon|taskhostw|audiodg|MsMpEng|NisSrv|MpDefenderCoreService|SecurityHealthService|SecurityHealthSystray|conhost|RuntimeBroker|ShellExperienceHost|StartMenuExperienceHost|SearchHost|TrustedInstaller|TiWorker|WmiPrvSE|dllhost|WUDFHost|powershell|pwsh|vmmem|vmcompute)$'
+$Script:ExplicacionesAN = @{
+    'msmpeng'       = 'Antimalware Service Executable (Microsoft Defender): analiza archivos en tiempo real o hace un analisis programado. Es normal que suba al instalar o descargar muchos archivos (por ejemplo juegos) y baja solo al terminar. No se debe detener.'
+    'tiworker'      = 'Instalador de actualizaciones de Windows (Windows Modules Installer Worker). Esta aplicando una actualizacion: deja que termine; detenerlo puede dejar Windows a medias.'
+    'trustedinstaller' = 'Servicio instalador de Windows Update. Trabaja con TiWorker; espera a que termine.'
+    'searchindexer' = 'Indexador de Windows Search: lee y cataloga archivos para las busquedas. Genera mucha lectura tras copiar o instalar muchos archivos. Se puede detener (las busquedas de Windows seran mas lentas).'
+    'system'        = 'Proceso del sistema: incluye cache de escritura, archivo de paginacion y controladores. Su actividad suele reflejar la de otros programas; no se puede detener.'
+    'onedrive'      = 'OneDrive sincronizando archivos. Se puede pausar desde su icono o quitar del inicio.'
+    'steam'         = 'Cliente de Steam: descargando o verificando archivos de juegos. Es consumo legitimo mientras instala o actualiza.'
+    'steamwebhelper'= 'Componente de Steam (interfaz). Su actividad suele ser cache; baja al cerrar Steam.'
+    'chrome'        = 'Google Chrome: cache y perfil del navegador. Cerrar pestanas o el navegador reduce su actividad.'
+    'msedge'        = 'Microsoft Edge: cache y perfil del navegador. Cerrar pestanas o el navegador reduce su actividad.'
+    'svchost'       = 'Proceso que aloja servicios de Windows. Se muestra junto al servicio que contiene.'
+    'explorer'      = 'Explorador de Windows: actividad normal al abrir carpetas con muchos archivos o miniaturas.'
+}
+
+function Global:Fmt-MBAN { param([double]$Bytes) if ($Bytes -ge 1GB) { return ("{0:N1} GB" -f ($Bytes / 1GB)) } elseif ($Bytes -ge 1MB) { return ("{0:N1} MB" -f ($Bytes / 1MB)) } else { return ("{0:N0} KB" -f ($Bytes / 1KB)) } }
+
+# --- MEDICION DE ACTIVIDAD (otro hilo; la ventana sigue viva) ---------------
+function Global:Medir-ActividadDiscoAN {
+    param([int]$Segundos = 20, [switch]$Silencioso)
+    $Global:ANCancelar = $false
+    $sync = [hashtable]::Synchronized(@{ Cancelar = $false; Muestra = 0; Total = 0 })
+    $bloque = {
+        param($dur, $int, $sync)
+        $ErrorActionPreference = 'SilentlyContinue'
+        $acum = @{}; $ult = @{}
+        $ocu = New-Object System.Collections.Generic.List[double]
+        $lec = New-Object System.Collections.Generic.List[double]
+        $esc = New-Object System.Collections.Generic.List[double]
+        $cola = New-Object System.Collections.Generic.List[double]
+        $t0 = Get-Date
+        $n = [Math]::Max(2, [int][Math]::Floor($dur / $int) + 1)
+        $sync.Total = $n
+        for ($i = 0; $i -lt $n; $i++) {
+            if ($sync.Cancelar) { break }
+            foreach ($p in @(Get-CimInstance Win32_Process)) {
+                $id = [int]$p.ProcessId
+                if ($id -eq 0) { continue }
+                $r = [double]$p.ReadTransferCount; $w = [double]$p.WriteTransferCount
+                if (-not $acum.ContainsKey($id)) { $acum[$id] = @{ N = "$($p.Name)"; Ruta = "$($p.ExecutablePath)"; Lec = 0.0; Esc = 0.0 } }
+                if ($ult.ContainsKey($id)) {
+                    $dr = $r - $ult[$id].R; if ($dr -gt 0) { $acum[$id].Lec += $dr }
+                    $dw = $w - $ult[$id].W; if ($dw -gt 0) { $acum[$id].Esc += $dw }
+                }
+                $ult[$id] = @{ R = $r; W = $w }
+            }
+            try {
+                $d = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'"
+                if ($d) { $ocu.Add([Math]::Min(100.0, [double]$d.PercentDiskTime)); $lec.Add([double]$d.DiskReadBytesPersec); $esc.Add([double]$d.DiskWriteBytesPersec); $cola.Add([double]$d.AvgDiskQueueLength) }
+            } catch {}
+            $sync.Muestra = $i + 1
+            if ($i -lt ($n - 1)) { Start-Sleep -Seconds $int }
+        }
+        $seg = ((Get-Date) - $t0).TotalSeconds
+        $procs = New-Object System.Collections.Generic.List[object]
+        foreach ($id in $acum.Keys) { $a = $acum[$id]; $procs.Add(@{ Pid = [int]$id; Nombre = "$($a.N)"; Ruta = "$($a.Ruta)"; Lec = [double]$a.Lec; Esc = [double]$a.Esc }) }
+        $svcs = New-Object System.Collections.Generic.List[object]
+        foreach ($s in @(Get-CimInstance Win32_Service | Where-Object { $_.State -eq 'Running' })) { $svcs.Add(@{ Nombre = "$($s.Name)"; Display = "$($s.DisplayName)"; Pid = [int]$s.ProcessId }) }
+        $prom = { param($l) if ($l.Count -eq 0) { 0 } else { [Math]::Round(($l | Measure-Object -Average).Average, 2) } }
+        $mx = 0; if ($ocu.Count -gt 0) { $mx = ($ocu | Measure-Object -Maximum).Maximum }
+        @{ Seg = [double]$seg; Procs = $procs.ToArray(); Servicios = $svcs.ToArray(); Ocupado = (& $prom $ocu); OcupadoMax = [double]$mx
+           LecBs = (& $prom $lec); EscBs = (& $prom $esc); Cola = (& $prom $cola); Muestras = $ocu.Count }
+    }
+    $ps = $null; $res = $null; $cancel = $false
+    try {
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript($bloque.ToString()); [void]$ps.AddArgument($Segundos); [void]$ps.AddArgument(2); [void]$ps.AddArgument($sync)
+        $ar = $ps.BeginInvoke()
+        $t0 = Get-Date
+        $txt = $null; try { $txt = $window.FindName('TxtAnaEstado') } catch {}
+        while (-not $ar.IsCompleted) {
+            Wait-UI -Milisegundos 200
+            $el = ((Get-Date) - $t0).TotalSeconds
+            if ($Global:ANCancelar) { $cancel = $true; $sync.Cancelar = $true; try { [void]$ps.BeginStop($null, $null) } catch {}; break }
+            if ($el -gt ($Segundos + 90)) { try { [void]$ps.BeginStop($null, $null) } catch {}; break }
+            if ($txt -and -not $Silencioso) { try { $txt.Text = "Midiendo el uso real del disco: $([int][math]::Min($Segundos, $el)) de $Segundos s. Sigue usando el equipo con normalidad, asi se ve lo que de verdad lo carga." } catch {} }
+        }
+        if ($ar.IsCompleted) {
+            try {
+                foreach ($x in $ps.EndInvoke($ar)) {
+                    $h = $x.PSObject.BaseObject
+                    if ($h -is [hashtable]) {
+                        $res = [PSCustomObject]@{ Seg = [double]$h['Seg']; Procs = @($h['Procs']); Servicios = @($h['Servicios']); Ocupado = [double]$h['Ocupado']; OcupadoMax = [double]$h['OcupadoMax']
+                            LecBs = [double]$h['LecBs']; EscBs = [double]$h['EscBs']; Cola = [double]$h['Cola']; Muestras = [int]$h['Muestras'] }
+                    }
+                }
+            } catch {}
+        }
+    } catch {} finally { if ($ps) { try { $ps.Dispose() } catch {} } }
+    if ($cancel) { return 'CANCELADO' }
+    return $res
+}
+
+function Global:Get-EntradaInicioAN {
+    param([string]$Base)
+    $rutas = @(
+        @{ Run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'; Ap = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' },
+        @{ Run = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'; Ap = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run' },
+        @{ Run = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run'; Ap = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32' })
+    foreach ($r in $rutas) {
+        $props = Get-ItemProperty -Path $r.Run -ErrorAction SilentlyContinue
+        if (-not $props) { continue }
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -match '^PS(Path|ParentPath|ChildName|Drive|Provider)$') { continue }
+            $cmd = "$($p.Value)"; $exe = ''
+            if ($cmd -match '^\s*"([^"]+)"') { $exe = $Matches[1] } elseif ($cmd -match '^\s*(\S+\.exe)') { $exe = $Matches[1] } else { $exe = ($cmd.Trim() -split '\s+')[0] }
+            $leaf = ''; try { $leaf = [System.IO.Path]::GetFileNameWithoutExtension($exe) } catch {}
+            if ($leaf -and ($leaf -ieq $Base)) {
+                return [PSCustomObject]@{ Tipo = 'Inicio'; Titulo = "Programa de inicio: $($p.Name)"; Clave = $p.Name; Ruta = $r.Run; RutaAp = $r.Ap; Ram = 0; Cpu = 0 }
+            }
+        }
+    }
+    return $null
+}
+
+# --- Filas de la tabla de actividad ----------------------------------------
+function Global:Get-FilasActividadAN {
+    param($M)
+    $seg = [math]::Max(1.0, [double]$M.Seg)
+    $svcPorPid = @{}
+    foreach ($s in $M.Servicios) { $k = [int]$s.Pid; if ($k -gt 0) { if (-not $svcPorPid.ContainsKey($k)) { $svcPorPid[$k] = New-Object System.Collections.Generic.List[object] }; $svcPorPid[$k].Add($s) } }
+    $grupos = @{}
+    $totalB = 0.0
+    foreach ($p in $M.Procs) {
+        $b = [double]$p.Lec + [double]$p.Esc
+        if ($b -le 0) { continue }
+        $totalB += $b
+        $base = ("$($p.Nombre)" -replace '\.exe$', '')
+        $k = $base.ToLower(); if ($base -ieq 'svchost') { $k = "svchost#$($p.Pid)" }
+        if (-not $grupos.ContainsKey($k)) { $grupos[$k] = @{ Base = $base; Lec = 0.0; Esc = 0.0; Pids = New-Object System.Collections.Generic.List[int]; Svcs = New-Object System.Collections.Generic.List[object]; Ruta = "$($p.Ruta)" } }
+        $g = $grupos[$k]; $g.Lec += [double]$p.Lec; $g.Esc += [double]$p.Esc; $g.Pids.Add([int]$p.Pid)
+        if (-not $g.Ruta -and $p.Ruta) { $g.Ruta = "$($p.Ruta)" }
+        if ($svcPorPid.ContainsKey([int]$p.Pid)) { foreach ($s in $svcPorPid[[int]$p.Pid]) { $g.Svcs.Add($s) } }
+    }
+    $filas = New-Object System.Collections.Generic.List[object]
+    foreach ($g in $grupos.Values) {
+        $tot = $g.Lec + $g.Esc
+        if ($tot -lt 262144) { continue }   # menos de 256 KB en toda la medicion: ruido
+        $nomSvc = @($g.Svcs | ForEach-Object { "$($_.Nombre)" })
+        $cat = @($Script:CatalogoServiciosOG | Where-Object { $nomSvc -contains $_.N })
+        $compartido = ($cat.Count -gt 0 -and $cat.Count -lt $g.Svcs.Count)   # el proceso aloja tambien servicios que Windows necesita: no se puede atribuir el consumo a uno solo
+        if ($compartido) { $cat = @() }
+        $protegido = ($g.Base -match $Script:ProcProtegidosAN) -or ($g.Base -match $Script:PatronInicioProtegidoOG) -or ($g.Pids -contains $PID)
+        $ini = $null; if (-not $protegido -and $g.Svcs.Count -eq 0) { $ini = Get-EntradaInicioAN -Base $g.Base }
+        $tipo = ''; $sug = ''; $clase = ''
+        if ($cat.Count -gt 0) { $tipo = 'Servicio (se puede detener)'; $clase = 'ServicioCat'; $sug = "Detener y desactivar: $(($cat | ForEach-Object { $_.T }) -join '; '). Se registra y se puede deshacer." }
+        elseif ($g.Svcs.Count -gt 0) { $tipo = 'Servicio de Windows'; $clase = 'ServicioWin'; $sug = $(if ($compartido) { 'Este proceso comparte servicios que Windows necesita: el consumo no se puede atribuir a uno solo, asi que no se desactiva. Si es una actualizacion o un analisis, baja solo al terminar.' } else { 'Servicio que Windows necesita: no se desactiva desde aqui. Si es una actualizacion o un analisis, baja solo al terminar.' }) }
+        elseif ($protegido) { $tipo = 'Sistema / protegido'; $clase = 'Protegido'; $sug = 'Proceso del sistema o de seguridad: no se toca. Mira la explicacion para saber por que consume.' }
+        else { $tipo = 'Programa'; $clase = 'Programa'; $sug = $(if ($ini) { 'Cerrar el programa y quitarlo del inicio de Windows (se puede deshacer).' } else { 'Cerrar el programa (guarda tu trabajo antes).' }) }
+        $nombre = $g.Base
+        if ($g.Base -ieq 'svchost' -and $g.Svcs.Count -gt 0) { $nombre = 'Servicio: ' + (($g.Svcs | Select-Object -First 2 | ForEach-Object { $_.Display }) -join ' + ') }
+        elseif ($g.Pids.Count -gt 1) { $nombre = "$($g.Base) (x$($g.Pids.Count))" }
+        $origen = if ($g.Svcs.Count -gt 0) { (($g.Svcs | Select-Object -First 3 | ForEach-Object { $_.Nombre }) -join ', ') } else { '-' }
+        $filas.Add([PSCustomObject]@{
+            Proceso = $nombre; Lectura = ("{0:N2} MB/s" -f ($g.Lec / $seg / 1MB)); Escritura = ("{0:N2} MB/s" -f ($g.Esc / $seg / 1MB))
+            Total = (Fmt-MBAN $tot); Parte = $(if ($totalB -gt 0) { ("{0:N0}%" -f (100.0 * $tot / $totalB)) } else { '0%' })
+            Tipo = $tipo; Servicio = $origen; Sugerencia = $sug
+            TotalB = $tot; Base = $g.Base; Pids = $g.Pids.ToArray(); Clase = $clase; Cat = $cat; Inicio = $ini; Ruta = "$($g.Ruta)"
+            LecMBs = [double]($g.Lec / $seg / 1MB); EscMBs = [double]($g.Esc / $seg / 1MB)
+        })
+    }
+    $orden = @($filas.ToArray() | Sort-Object -Property TotalB -Descending | Select-Object -First 40)
+    return ,$orden
+}
+
+function Global:Texto-ResumenActividadAN {
+    param($M, [string]$TipoDisco)
+    $lec = $M.LecBs / 1MB; $esc = $M.EscBs / 1MB
+    $t = "Disco del sistema ($TipoDisco), medido $([int]$M.Seg) s: ocupado en promedio $([math]::Round($M.Ocupado, 0))% (pico $([math]::Round($M.OcupadoMax, 0))%), lectura $([math]::Round($lec, 1)) MB/s, escritura $([math]::Round($esc, 1)) MB/s, cola media $([math]::Round($M.Cola, 1))."
+    if ($M.Ocupado -ge 80) { $t += " DISCO SATURADO: eso explica la lentitud; mira arriba que lo carga." }
+    elseif ($M.Ocupado -ge 40) { $t += " Carga moderada." }
+    else { $t += " El disco NO esta saturado ahora: si el equipo va lento, la causa probable no es el disco en este momento (repite la medicion cuando se ponga lento)." }
+    $t += " Nota: la columna por proceso cuenta toda su E/S (disco, red y dispositivos), no solo disco; el porcentaje de ocupacion del disco de arriba si es solo del disco."
+    return $t
+}
+
+function Global:Texto-DetalleActividadAN {
+    param($F)
+    if (-not $F) { return '' }
+    $l = New-Object System.Collections.Generic.List[string]
+    $l.Add("$($F.Proceso) - lectura $($F.Lectura), escritura $($F.Escritura), $($F.Total) en total ($($F.Parte) de la E/S de todos los procesos).")
+    $e = $Script:ExplicacionesAN["$($F.Base)".ToLower()]
+    if ($e) { $l.Add($e) }
+    if ($F.Ruta) { $l.Add("Archivo: $($F.Ruta)") }
+    $l.Add("Que hara 'Eliminar consumo': $($F.Sugerencia)")
+    return ($l -join "`n")
+}
+
+# --- ELIMINAR CONSUMO (actividad) ------------------------------------------
+function Global:Eliminar-ConsumoActividadAN {
+    param($Fila)
+    if (-not $Fila) { return }
+    if ($Fila.Clase -eq 'Protegido' -or $Fila.Clase -eq 'ServicioWin') {
+        $e = $Script:ExplicacionesAN["$($Fila.Base)".ToLower()]
+        $m = "'$($Fila.Proceso)' es parte de Windows o de la seguridad del equipo: no se detiene desde aqui porque podria dejar el sistema inestable."
+        if ($e) { $m += "`n`n$e" }
+        $m += "`n`nSi el consumo es continuo durante horas, revisa el estado del disco (S.M.A.R.T.) en Diagnosticar equipo."
+        Show-Aviso $m 'No se puede eliminar este consumo'
+        return
+    }
+    if (-not (Requiere-Admin)) { return }
+    $antes = $Fila.LecMBs + $Fila.EscMBs
+    $sesion = 'analisis-' + (Get-Date).ToString('yyyyMMdd-HHmm')
+    if ($Fila.Clase -eq 'ServicioCat') {
+        $n = ($Fila.Cat | ForEach-Object { $_.T }) -join "`n- "
+        $notas = (@($Fila.Cat | Where-Object { $_.Nota } | ForEach-Object { "- $($_.T): $($_.Nota)" }) -join "`n")
+        if ($notas) { $n += "`n`nTen en cuenta:`n$notas" }
+        if (-not (Show-Confirm "Se va a detener y desactivar:`n- $n`n`nQueda registrado y se puede deshacer en 'Cambios de la optimizacion guiada' (Perfiles de optimizacion). Despues se vuelve a medir para comprobar que bajo. ¿Continuar?")) { return }
+        foreach ($c in $Fila.Cat) {
+            $it = [PSCustomObject]@{ Tipo = 'Servicio'; Titulo = "$($c.T)"; Clave = "$($c.N)"; Ruta = ''; RutaAp = ''; Ram = 0; Cpu = 0 }
+            try { Aplicar-ServicioOG -It $it -SesionId $sesion } catch { Write-Log "No se pudo desactivar $($c.N): $($_.Exception.Message)" -Tipo AVISO }
+        }
+    } else {
+        $msg = "Se va a cerrar '$($Fila.Proceso)' (se perdera lo que no hayas guardado)."
+        if ($Fila.Inicio) { $msg += "`nTambien se quitara del inicio de Windows (entrada '$($Fila.Inicio.Clave)'); se puede deshacer." }
+        if (-not (Show-Confirm "$msg`n`nDespues se vuelve a medir para comprobar que bajo. ¿Continuar?")) { return }
+        if ($Fila.Inicio) { try { Aplicar-InicioOG -It $Fila.Inicio -SesionId $sesion } catch { Write-Log "No se pudo quitar del inicio: $($_.Exception.Message)" -Tipo AVISO } }
+        foreach ($id in $Fila.Pids) {
+            try { $p = Get-Process -Id $id -ErrorAction Stop; [void]$p.CloseMainWindow(); [void]$p.WaitForExit(3000); if (-not $p.HasExited) { Stop-Process -Id $id -Force -ErrorAction Stop } } catch {}
+        }
+    }
+    $txt = $window.FindName('TxtAnaDetalle'); if ($txt) { $txt.Text = "Comprobando: midiendo de nuevo 8 s..." }
+    $m2 = Medir-ActividadDiscoAN -Segundos 8 -Silencioso
+    if ($m2 -isnot [PSCustomObject]) { Show-Aviso 'Se aplico el cambio, pero no se pudo medir de nuevo. Pulsa Analizar para comprobarlo.' 'Cambio aplicado'; return }
+    $despues = 0.0; $sigue = $false
+    $pidsAhora = @{}; foreach ($p in $m2.Procs) { $pidsAhora[[int]$p.Pid] = $p }
+    foreach ($p in $m2.Procs) {
+        if (("$($p.Nombre)" -replace '\.exe$', '') -ieq $Fila.Base -and ($Fila.Base -ine 'svchost')) { $despues += ([double]$p.Lec + [double]$p.Esc) / [math]::Max(1.0, $m2.Seg) / 1MB; $sigue = $true }
+    }
+    if ($Fila.Base -ieq 'svchost') { foreach ($id in $Fila.Pids) { if ($pidsAhora.ContainsKey($id)) { $p = $pidsAhora[$id]; $despues += ([double]$p.Lec + [double]$p.Esc) / [math]::Max(1.0, $m2.Seg) / 1MB; $sigue = $true } } }
+    $res = "Antes: $([math]::Round($antes, 2)) MB/s de E/S. Ahora (medido 8 s): $([math]::Round($despues, 2)) MB/s" + $(if ($sigue) { ' - el proceso sigue en ejecucion.' } else { ' - el proceso ya no esta en ejecucion.' }) + "`nDisco ocupado ahora: $([math]::Round($m2.Ocupado, 0))% (antes de actuar: ver resumen)."
+    if ($sigue -and $despues -ge ($antes * 0.8) -and $antes -gt 0.05) { $res += "`nOJO: el consumo NO bajo de forma apreciable (el servicio puede ser reiniciado por Windows o hay otro proceso que lo causa)." }
+    Write-Log "Eliminar consumo de '$($Fila.Proceso)': $res" -Tipo $(if ($sigue -and $despues -ge ($antes * 0.8) -and $antes -gt 0.05) { 'AVISO' } else { 'OK' })
+    if ($txt) { $txt.Text = $res }
+    Show-Aviso $res 'Resultado comprobado'
+}
+
+function Global:Bajar-PrioridadActividadAN {
+    param($Fila)
+    if (-not $Fila) { return }
+    if ($Fila.Clase -ne 'Programa') { Show-Aviso 'Solo se baja la prioridad de programas (no de servicios ni procesos de Windows).' 'No aplicable'; return }
+    $ok = 0; $tot = 0
+    foreach ($id in $Fila.Pids) {
+        $tot++
+        try { $p = Get-Process -Id $id -ErrorAction Stop; $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal; $p.Refresh(); if ("$($p.PriorityClass)" -eq 'BelowNormal') { $ok++ } } catch {}
+    }
+    $m = "Prioridad de CPU de '$($Fila.Proceso)' bajada a 'Por debajo de lo normal' en $ok de $tot proceso(s) (comprobado). Es temporal: vuelve a lo normal al reiniciar el programa. OJO: esto reduce la prioridad de CPU, no limita la lectura/escritura de disco; para bajar el disco usa 'Eliminar consumo'."
+    Write-Log $m -Tipo $(if ($ok -gt 0) { 'OK' } else { 'AVISO' })
+    Show-Aviso $m 'Prioridad'
+}
+
+# --- ESPACIO: elementos conocidos que llenan el disco -----------------------
+function Global:Get-ElementosEspacioAN {
+    $u = $env:USERPROFILE; $w = $env:WINDIR; $sd = $env:SystemDrive
+    $l = New-Object System.Collections.Generic.List[object]
+    $a = { param($id, $nom, $rutas, $clase, $que, $fn) $l.Add([PSCustomObject]@{ Id = $id; Nombre = $nom; Rutas = @($rutas); Clase = $clase; Que = $que; Fn = $fn }) }
+    & $a 'tempu'  'Temporales del usuario'               @($env:TEMP) 'Limpiar' 'Borra el contenido de la carpeta temporal del usuario (lo que este en uso se omite).' ''
+    & $a 'tempw'  'Temporales de Windows'                @("$w\Temp") 'Limpiar' 'Borra el contenido de Windows\Temp (lo que este en uso se omite).' ''
+    & $a 'inet'   'Cache de internet de Windows'         @("$env:LOCALAPPDATA\Microsoft\Windows\INetCache") 'Limpiar' 'Borra la cache de internet de Windows (se regenera sola).' ''
+    & $a 'wu'     'Descargas de Windows Update'          @("$w\SoftwareDistribution\Download") 'Accion' 'Limpia la cache de descargas de Windows Update (usa la funcion del programa).' 'Accion-LimpiarWindowsUpdate'
+    & $a 'wer'    'Informes de errores de Windows'       @("$env:ProgramData\Microsoft\Windows\WER") 'Limpiar' 'Borra los informes de errores ya generados.' ''
+    & $a 'dump'   'Volcados de memoria (pantallas azules)' @("$w\Minidump", "$w\MEMORY.DMP", "$w\LiveKernelReports") 'Accion' 'Borra los volcados de memoria (usa la funcion del programa). Pierdes el detalle para diagnosticar pantallas azules pasadas.' 'Accion-LimpiarVolcadosMemoria'
+    & $a 'thumb'  'Cache de miniaturas'                  @("$env:LOCALAPPDATA\Microsoft\Windows\Explorer") 'Accion' 'Borra la cache de miniaturas (usa la funcion del programa; reinicia el Explorador).' 'Accion-LimpiarMiniaturas'
+    & $a 'papel'  'Papelera de reciclaje'                @("$sd\`$Recycle.Bin") 'Accion' 'Vacia la papelera (usa la funcion del programa).' 'Accion-VaciarPapelera'
+    & $a 'hiber'  'Archivo de hibernacion (hiberfil.sys)' @("$sd\hiberfil.sys") 'Accion' 'Desactiva la hibernacion y borra el archivo (ocupa cerca del tamano de la RAM). Se revierte con "Reactivar hibernacion". Tambien quita el Inicio rapido.' 'Accion-HibernacionOff'
+    & $a 'page'   'Archivo de paginacion (pagefile.sys)'  @("$sd\pagefile.sys") 'Info' 'Memoria virtual de Windows: necesaria. Se ajusta desde Memoria y rendimiento > Memoria virtual.' ''
+    & $a 'swap'   'Archivo swapfile.sys'                 @("$sd\swapfile.sys") 'Info' 'Usado por apps de la Tienda: no se toca.' ''
+    & $a 'old'    'Instalacion anterior de Windows (Windows.old)' @("$sd\Windows.old") 'Accion' 'Abre el Liberador de espacio para eliminarla con seguridad (Windows la borra solo si es seguro).' 'Accion-LiberadorEspacio'
+    & $a 'sxs'    'Componentes de Windows (WinSxS)'      @("$w\WinSxS") 'Accion' 'No se borra a mano. La limpieza profunda (DISM) quita solo lo reemplazado; puede tardar.' 'Accion-LimpiezaDISM'
+    & $a 'pkg'    'Paquetes de instaladores (ProgramData\Package Cache)' @("$env:ProgramData\Package Cache") 'Info' 'Usados para reparar o desinstalar programas: no se borra a mano.' ''
+    & $a 'edge'   'Cache de Microsoft Edge'              @("$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache", "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Code Cache") 'LimpiarNav' 'Borra la cache de Edge (cierra Edge antes; no borra contrasenas ni historial).' ''
+    & $a 'chrome' 'Cache de Google Chrome'               @("$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache", "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Code Cache") 'LimpiarNav' 'Borra la cache de Chrome (cierra Chrome antes; no borra contrasenas ni historial).' ''
+    & $a 'down'   'Carpeta Descargas'                    @("$u\Downloads") 'Info' 'Son archivos del usuario: no se borran desde aqui. Abre la carpeta y revisa con el cliente.' ''
+    & $a 'desk'   'Escritorio'                           @("$u\Desktop") 'Info' 'Archivos del usuario: no se borran desde aqui.' ''
+    & $a 'docs'   'Documentos'                           @("$u\Documents") 'Info' 'Archivos del usuario: no se borran desde aqui.' ''
+    & $a 'pics'   'Imagenes'                             @("$u\Pictures") 'Info' 'Archivos del usuario: no se borran desde aqui.' ''
+    & $a 'vids'   'Videos'                               @("$u\Videos") 'Info' 'Archivos del usuario: no se borran desde aqui.' ''
+    & $a 'music'  'Musica'                               @("$u\Music") 'Info' 'Archivos del usuario: no se borran desde aqui.' ''
+    & $a 'appl'   'Datos de programas (AppData\Local)'   @("$u\AppData\Local") 'Info' 'Caches y datos de programas. Incluye cosas ya contadas arriba; libera desinstalando lo que no se use (Programas > Desinstalar).' ''
+    & $a 'appr'   'Datos de programas (AppData\Roaming)' @("$u\AppData\Roaming") 'Info' 'Configuracion y datos de programas.' ''
+    return ,$l.ToArray()
+}
+
+function Global:Medir-EspacioAN {
+    param($Elementos)
+    $Global:ANCancelar = $false
+    $sync = [hashtable]::Synchronized(@{ Cancelar = $false; Actual = ''; Hecho = 0 })
+    $entrada = @($Elementos | ForEach-Object { @{ Id = $_.Id; Nombre = $_.Nombre; Rutas = @($_.Rutas) } })
+    $bloque = {
+        param($items, $sync)
+        $ErrorActionPreference = 'SilentlyContinue'
+        $tam = {
+            param($ruta)
+            if (-not (Test-Path -LiteralPath $ruta)) { return -1.0 }
+            $fi = Get-Item -LiteralPath $ruta -Force -ErrorAction SilentlyContinue
+            if ($fi -and -not $fi.PSIsContainer) { return [double]$fi.Length }
+            $t = 0.0; $st = New-Object System.Collections.Generic.Stack[string]; $st.Push($ruta)
+            while ($st.Count -gt 0) {
+                if ($sync.Cancelar) { break }
+                $d = $st.Pop()
+                try {
+                    $di = New-Object System.IO.DirectoryInfo $d
+                    foreach ($f in $di.EnumerateFiles()) { $t += [double]$f.Length }
+                    foreach ($s in $di.EnumerateDirectories()) { if (-not ($s.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { $st.Push($s.FullName) } }
+                } catch {}
+            }
+            return $t
+        }
+        $out = New-Object System.Collections.Generic.List[object]
+        foreach ($it in $items) {
+            if ($sync.Cancelar) { break }
+            $sync.Actual = "$($it.Nombre)"
+            $suma = 0.0; $existe = $false
+            foreach ($r in $it.Rutas) { $v = & $tam $r; if ($v -ge 0) { $suma += $v; $existe = $true } }
+            $out.Add(@{ Id = "$($it.Id)"; Bytes = $suma; Existe = $existe })
+            $sync.Hecho = $sync.Hecho + 1
+        }
+        ,$out.ToArray()
+    }
+    $ps = $null; $res = $null; $cancel = $false
+    try {
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript($bloque.ToString()); [void]$ps.AddArgument($entrada); [void]$ps.AddArgument($sync)
+        $ar = $ps.BeginInvoke()
+        $t0 = Get-Date
+        $txt = $null; try { $txt = $window.FindName('TxtAnaEstado') } catch {}
+        while (-not $ar.IsCompleted) {
+            Wait-UI -Milisegundos 200
+            if ($Global:ANCancelar) { $cancel = $true; $sync.Cancelar = $true; try { [void]$ps.BeginStop($null, $null) } catch {}; break }
+            if (((Get-Date) - $t0).TotalSeconds -gt 600) { $sync.Cancelar = $true; try { [void]$ps.BeginStop($null, $null) } catch {}; break }
+            if ($txt) { try { $txt.Text = "Midiendo tamanos reales: $($sync.Hecho) de $($entrada.Count) - $($sync.Actual)..." } catch {} }
+        }
+        if ($ar.IsCompleted) {
+            try {
+                foreach ($x in $ps.EndInvoke($ar)) {
+                    $lista = $x.PSObject.BaseObject
+                    $tmp = New-Object System.Collections.Generic.List[object]
+                    foreach ($e in @($lista)) { $h = $e.PSObject.BaseObject; if ($h -is [hashtable]) { $tmp.Add([PSCustomObject]@{ Id = "$($h['Id'])"; Bytes = [double]$h['Bytes']; Existe = [bool]$h['Existe'] }) } }
+                    if ($tmp.Count -gt 0) { $res = $tmp.ToArray() }
+                }
+            } catch {}
+        }
+    } catch {} finally { if ($ps) { try { $ps.Dispose() } catch {} } }
+    if ($cancel) { return 'CANCELADO' }
+    return ,$res
+}
+
+function Global:Get-FilasEspacioAN {
+    param($Elementos, $Medidas)
+    $mapa = @{}; foreach ($m in $Medidas) { $mapa[$m.Id] = $m }
+    $filas = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $Elementos) {
+        $m = $mapa[$e.Id]
+        if (-not $m -or -not $m.Existe) { continue }
+        if ($m.Bytes -lt 1MB -and $e.Clase -ne 'Accion') { continue }
+        if ($m.Bytes -le 0) { continue }
+        $tipo = switch ($e.Clase) { 'Limpiar' { 'Se puede limpiar' } 'LimpiarNav' { 'Se puede limpiar (cerrar el navegador)' } 'Accion' { 'Limpieza guiada' } default { 'Solo informativo' } }
+        $filas.Add([PSCustomObject]@{ Elemento = $e.Nombre; Tamano = (Fmt-MBAN $m.Bytes); Tipo = $tipo; Ubicacion = (@($e.Rutas) -join '  |  '); Que = $e.Que
+            Bytes = [double]$m.Bytes; Id = $e.Id; Clase = $e.Clase; Rutas = @($e.Rutas); Fn = "$($e.Fn)" })
+    }
+    return ,@($filas.ToArray() | Sort-Object -Property Bytes -Descending)
+}
+
+function Global:Medir-BytesRutasAN {
+    param($Rutas)
+    $el = @([PSCustomObject]@{ Id = 'x'; Nombre = 'comprobacion'; Rutas = @($Rutas) })
+    $r = Medir-EspacioAN -Elementos $el
+    if ($r -is [string] -or -not $r) { return -1.0 }
+    foreach ($x in @($r)) { return [double]$x.Bytes }
+    return -1.0
+}
+
+function Global:Eliminar-ConsumoEspacioAN {
+    param($Fila)
+    if (-not $Fila) { return }
+    if ($Fila.Clase -eq 'Info') {
+        Show-Aviso "$($Fila.Elemento)`n`n$($Fila.Que)`n`nTamano medido: $($Fila.Tamano). Usa 'Abrir ubicacion' del menu para revisarlo." 'Solo informativo: no se borra desde aqui'
+        return
+    }
+    if (-not (Requiere-Admin)) { return }
+    $antes = [double]$Fila.Bytes
+    if ($Fila.Clase -eq 'Accion') {
+        $confirmaSola = @('Accion-LimpiarVolcadosMemoria', 'Accion-LiberadorEspacio', 'Accion-LimpiezaDISM', 'Accion-LimpiarMiniaturas') -contains $Fila.Fn
+        if (-not $confirmaSola) { if (-not (Show-Confirm "$($Fila.Elemento) ($($Fila.Tamano))`n`n$($Fila.Que)`n`n¿Continuar?")) { return } }
+        try { & $Fila.Fn } catch { Write-Log "No se pudo completar: $($_.Exception.Message)" -Tipo AVISO }
+        if (@('old', 'sxs') -contains $Fila.Id) {
+            $txt0 = $window.FindName('TxtAnaDetalle')
+            $m0 = "Se inicio la herramienta oficial de Windows para '$($Fila.Elemento)'. Su tamano aparente no se vuelve a medir aqui (incluye archivos compartidos); pulsa Analizar mas tarde para ver el espacio libre real."
+            if ($txt0) { $txt0.Text = $m0 }
+            return
+        }
+    } else {
+        if ($Fila.Clase -eq 'LimpiarNav') {
+            $nav = if ($Fila.Id -eq 'edge') { 'msedge' } else { 'chrome' }
+            if (Get-Process -Name $nav -ErrorAction SilentlyContinue) { Show-Aviso "Cierra el navegador ($nav) antes de limpiar su cache y vuelve a intentarlo." 'Navegador abierto'; return }
+        }
+        if (-not (Show-Confirm "$($Fila.Elemento) ($($Fila.Tamano))`n`n$($Fila.Que)`n`nSe vuelve a medir despues para comprobar cuanto se libero. ¿Continuar?")) { return }
+        [void](Invoke-EnSegundoPlano -Argumentos @(, @($Fila.Rutas)) -TimeoutSeg 300 -Bloque {
+            param($rutas)
+            foreach ($r in $rutas) {
+                if (-not (Test-Path -LiteralPath $r)) { continue }
+                foreach ($h in @(Get-ChildItem -LiteralPath $r -Force -ErrorAction SilentlyContinue)) { try { Remove-Item -LiteralPath $h.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
+            }
+        })
+    }
+    $txt = $window.FindName('TxtAnaDetalle'); if ($txt) { $txt.Text = 'Comprobando: midiendo de nuevo el tamano...' }
+    $despues = Medir-BytesRutasAN -Rutas $Fila.Rutas
+    if ($despues -lt 0) { $despues = 0.0 }
+    $lib = [math]::Max(0.0, $antes - $despues)
+    $res = "$($Fila.Elemento): antes $(Fmt-MBAN $antes), ahora $(Fmt-MBAN $despues). Liberado (medido): $(Fmt-MBAN $lib)."
+    if ($lib -lt 1MB -and $antes -ge 10MB) { $res += "`nNo se libero casi nada: los archivos estan en uso o Windows los protege. Cierra programas, reinicia y vuelve a intentar." }
+    Write-Log $res -Tipo $(if ($lib -ge 1MB) { 'OK' } else { 'AVISO' })
+    if ($txt) { $txt.Text = $res }
+    Show-Aviso $res 'Resultado comprobado'
+}
+
+# --- Orquestacion del boton Analizar ----------------------------------------
+function Global:Analizar-AlmacenamientoAN {
+    $cmbModo = $window.FindName('CmbAnaModo'); $cmbDur = $window.FindName('CmbAnaDuracion')
+    $btn = $window.FindName('BtnAnaAnalizar'); $btnStop = $window.FindName('BtnAnaDetener')
+    $txt = $window.FindName('TxtAnaEstado'); $res = $window.FindName('TxtAnaResumen'); $det = $window.FindName('TxtAnaDetalle')
+    if ($Global:ANEnCurso) { return }
+    $Global:ANEnCurso = $true
+    try {
+        $btn.IsEnabled = $false; $btnStop.IsEnabled = $true
+        $modo = "$($cmbModo.SelectedIndex)"
+        $dgA = $window.FindName('GridAnaActividad'); $dgE = $window.FindName('GridAnaEspacio')
+        if ($modo -eq '0') {
+            $seg = 20; try { $seg = [int](("$($cmbDur.SelectedItem.Content)") -replace '[^\d]', '') } catch {}
+            if ($seg -lt 6) { $seg = 20 }
+            $m = Medir-ActividadDiscoAN -Segundos $seg
+            if ($m -is [string]) { $txt.Text = 'Analisis detenido: no se cambio nada.'; return }
+            if ($m -isnot [PSCustomObject]) { $txt.Text = 'No se pudo medir el disco (WMI no respondio). Pulsa Analizar para intentarlo de nuevo.'; return }
+            $tipo = 'tipo no detectado'; try { $tipo = "$(Get-TipoDiscoSistema)" } catch {}
+            $filas = Get-FilasActividadAN -M $m
+            $Global:ANFilasActividad = $filas
+            $dgA.ItemsSource = $null; $dgA.ItemsSource = @($filas)
+            $res.Text = Texto-ResumenActividadAN -M $m -TipoDisco $tipo
+            $txt.Text = if (@($filas).Count -eq 0) { 'Medicion terminada: ningun proceso hizo actividad apreciable en ese tiempo.' } else { "Medicion terminada: $(@($filas).Count) proceso(s) con actividad. Clic derecho sobre uno > Eliminar consumo." }
+            Write-Log "Analisis de disco: ocupado $([math]::Round($m.Ocupado, 0))% medio, $(@($filas).Count) procesos con actividad." -Tipo INFO -SinRegistro
+        } else {
+            $els = Get-ElementosEspacioAN
+            $med = Medir-EspacioAN -Elementos $els
+            if ($med -is [string]) { $txt.Text = 'Analisis detenido: no se cambio nada.'; return }
+            if (-not $med) { $txt.Text = 'No se pudo medir el espacio. Pulsa Analizar para intentarlo de nuevo.'; return }
+            $filas = Get-FilasEspacioAN -Elementos $els -Medidas $med
+            $Global:ANFilasEspacio = $filas
+            $dgE.ItemsSource = $null; $dgE.ItemsSource = @($filas)
+            $di = $null; try { $di = New-Object System.IO.DriveInfo("$($env:SystemDrive)") } catch {}
+            $limp = 0.0; foreach ($f in $filas) { if ($f.Clase -ne 'Info') { $limp += $f.Bytes } }
+            $r = ''
+            if ($di) { $usado = $di.TotalSize - $di.AvailableFreeSpace; $pct = [math]::Round(100.0 * $di.AvailableFreeSpace / [math]::Max(1, $di.TotalSize), 0)
+                $r = "Disco $($di.Name): $(Fmt-MBAN $usado) usados de $(Fmt-MBAN $di.TotalSize); libres $(Fmt-MBAN $di.AvailableFreeSpace) ($pct%)." + $(if ($pct -lt 15) { ' POCO ESPACIO LIBRE: Windows y el SSD rinden peor con menos del 15% libre.' } else { '' }) + ' ' }
+            $res.Text = $r + "Se pueden recuperar hasta $(Fmt-MBAN $limp) con limpieza segura (lo marcado 'Se puede limpiar' o 'Limpieza guiada'). Los tamanos de carpetas de usuario son informativos: nunca se borran desde aqui."
+            $txt.Text = "Medicion terminada: $(@($filas).Count) elementos. Clic derecho sobre uno > Eliminar consumo."
+        }
+        if ($det) { $det.Text = 'Selecciona una fila para ver que es y que hara "Eliminar consumo".' }
+    } catch {
+        Registrar-FalloInterno 'analisis de almacenamiento' $_
+        try { $txt.Text = 'El analisis fallo; el detalle quedo en el registro de errores.' } catch {}
+    } finally {
+        $Global:ANEnCurso = $false
+        try { $btn.IsEnabled = $true; $btnStop.IsEnabled = $false } catch {}
+    }
+}
+
+function Global:Seleccionar-FilaClicDerechoAN {
+    param($Grid, $Evento)
+    try {
+        $d = $Evento.OriginalSource
+        while ($d -and $d -isnot [System.Windows.Controls.DataGridRow]) { $d = [System.Windows.Media.VisualTreeHelper]::GetParent($d) }
+        if ($d) { $Grid.SelectedItem = $d.Item }
+    } catch {}
+}
+
 $Script:RutasPaneles = @{
     'PanelInstalarProgramas'      = @('CmbSeccionProgramas', 'Instalar programas', 'Instalar programas')
     'PanelComplementos'           = @('CmbSeccionProgramas', 'Complementos (DirectX, .NET, Java, VC++)', 'Complementos')
@@ -23414,6 +23998,7 @@ $Script:RutasPaneles = @{
     'PanelModTeclado'             = @('CmbSeccionModificacion', 'Teclado', 'Teclado')
     'PanelModParlante'            = @('CmbSeccionModificacion', 'Parlante', 'Parlante')
     'PanelModAlmacenamiento'      = @('CmbSeccionModificacion', 'Almacenamiento', 'Almacenamiento')
+    'PanelAnaAlmacenamiento'      = @('CmbSeccionAnalisis', 'Almacenamiento', 'Almacenamiento')
 }
 
 function Global:Get-TextoControlBusqueda {
@@ -24077,6 +24662,7 @@ $Global:AyudaPestanas = [ordered]@{
     'Diagnosticar equipo' = "DIAGNOSTICAR EQUIPO - pruebas por componente`n• Diagnostico completo automatico`n• Sistema general, Procesador (CPU), Memoria RAM`n• Disco duro / SSD (12 pruebas, S.M.A.R.T., superficie, estres)`n• Graficos y pantalla, Audio, Teclado y mouse, Camara`n• Red y Wi-Fi, Energia y refrigeracion, Puertos USB`n• Copiar, guardar o exportar en PDF el informe"
     'Registro de errores' = "REGISTRO DE ERRORES Y MONITOREO`n• Errores del programa y del hardware con solucion sugerida`n• Monitoreo en tiempo real con notificaciones (se activa o desactiva aqui)`n• Escanear hardware e informe de lentitud`n• Filtros, busqueda, copiar, exportar a archivo o PDF y limpiar"
     'Modificacion' = "MODIFICACION - ajustes de hardware`n• Camara: abrir en ventana, rotar, voltear y capturar`n• Pantalla: frecuencia de actualizacion (Hz)`n• Teclado: remapear o bloquear teclas`n• Parlante: silenciar y subir volumen / Equalizer APO`n• Almacenamiento: quitar solo lectura, analizar y corregir errores, firmware"
+    'Analisis' = "ANALISIS - mide que consume el equipo`n• Almacenamiento: actividad real del disco por proceso/servicio y espacio que ocupa cada elemento`n• Clic derecho > Eliminar consumo: actua solo sobre lo seguro, lo registra para deshacerlo y vuelve a medir para comprobar el resultado"
     'Acerca de' = "ACERCA DE`n• Autor, version y novedades del programa`n• Como ejecutarlo desde GitHub con un solo comando"
 }
 
@@ -24338,6 +24924,12 @@ $Global:AyudaControles = @{
     'BtnCopiarErrores' = 'Copia todo el registro de errores al portapapeles.'
     'BtnExportarErrores' = 'Guarda el registro de errores en un archivo de texto.'
     'BtnExportarPdfErrores' = 'Genera un informe PDF con los errores y sus soluciones.'
+    'BtnAnaAnalizar' = 'Mide el disco: en modo Actividad, durante los segundos elegidos, que procesos y servicios lo cargan; en modo Espacio, cuanto ocupa cada elemento.'
+    'BtnAnaDetener' = 'Detiene el analisis en curso sin cambiar nada.'
+    'BtnAnaCambios' = 'Abre la lista de cambios hechos por el programa (optimizacion guiada y Eliminar consumo) para deshacerlos uno por uno.'
+    'CmbAnaModo' = 'Actividad: que usa el disco ahora (lectura/escritura por proceso). Espacio: que llena el disco (temporales, caches, archivos del sistema).'
+    'CmbAnaDuracion' = 'Segundos que dura la medicion de actividad. Mas tiempo = resultado mas fiable; usa el equipo con normalidad.'
+    'CmbSeccionAnalisis' = 'Elige que analizar.'
     'BtnLimpiarErrores' = 'Vacia por completo el registro de errores (no se puede deshacer).'
     'BtnIrPruebaError' = 'Lleva a la prueba del programa que confirma la causa probable del registro seleccionado (escribe su nombre en la barra de busqueda y abre la funcion).'
     'BtnLineaTiempo' = 'Muestra en orden cronologico lo que paso en el equipo del cliente (apagado, error de disco, pantalla azul...) y marca las secuencias donde algo ocurrio poco antes de una falla.'
