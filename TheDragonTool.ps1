@@ -14131,7 +14131,33 @@ $Script:ChecklistManual = @(
     @{ Categoria='Servicios en segundo plano'; Nombre='Fax'; Tipo='Servicio'; Valor='Fax' },
     @{ Categoria='Servicios de Xbox (si no usas Xbox/Game Pass)'; Nombre='Xbox Auth Manager'; Tipo='Servicio'; Valor='XblAuthManager' },
     @{ Categoria='Servicios de Xbox (si no usas Xbox/Game Pass)'; Nombre='Xbox Game Save'; Tipo='Servicio'; Valor='XblGameSave' },
-    @{ Categoria='Servicios de Xbox (si no usas Xbox/Game Pass)'; Nombre='Xbox Live Networking'; Tipo='Servicio'; Valor='XboxNetApiSvc' }
+    @{ Categoria='Servicios de Xbox (si no usas Xbox/Game Pass)'; Nombre='Xbox Live Networking'; Tipo='Servicio'; Valor='XboxNetApiSvc' },
+    @{ Categoria='Servicios de Xbox (si no usas Xbox/Game Pass)'; Nombre='Xbox Accessory Management (XboxGipSvc)'; Tipo='Servicio'; Valor='XboxGipSvc' },
+    @{ Categoria='Apariencia y respuesta'; Nombre='Desactivar todos los efectos visuales y animaciones (rendimiento maximo)'; Tipo='Accion'; ValorOn='Accion-EfectosRendimientoMaximo'; Ayuda='Quita sombras, animaciones y transparencias de Windows. El equipo se siente mas agil en CPU/GPU modestas. Se revierte con "Restaurar configuracion predeterminada".' },
+    @{ Categoria='Apariencia y respuesta'; Nombre='Menus instantaneos (sin retraso al abrir)'; Tipo='Accion'; ValorOn='Accion-MenuInstantaneoOn'; Ayuda='Pone a 0 el retraso al abrir menus. Solo cambia una clave del usuario actual.' },
+    @{ Categoria='Apariencia y respuesta'; Nombre='Quitar animacion al minimizar/maximizar ventanas'; Tipo='Accion'; ValorOn='Accion-AnimacionMinimizarOff'; Ayuda='Las ventanas se minimizan sin animacion: respuesta mas rapida.' },
+    @{ Categoria='Apariencia y respuesta'; Nombre='Quitar animaciones de la barra de tareas'; Tipo='Accion'; ValorOn='Accion-AnimacionTaskbarOff'; Ayuda='Desactiva las animaciones de la barra de tareas.' },
+    @{ Categoria='Apariencia y respuesta'; Nombre='Desactivar aceleracion del mouse (punteria 1:1)'; Tipo='Accion'; ValorOn='Accion-AceleracionMouseOff'; Ayuda='No es de rendimiento del equipo, pero mejora la punteria en juegos. Se revierte desde Windows (Mouse).' },
+    @{ Categoria='Apariencia y respuesta'; Nombre='Quitar el panel de Widgets de la barra de tareas'; Tipo='Accion'; ValorOn='Accion-WidgetsOff'; Ayuda='Evita que se carguen los procesos de Widgets (Windows 11).' },
+    @{ Categoria='Inicio y apagado'; Nombre='Desactivar programas de inicio no esenciales (Spotify, Discord, Steam, Teams...)'; Tipo='Accion'; ValorOn='Accion-InicioNoEsencialOff'; Ayuda='Los desactiva del inicio sin desinstalarlos (se pueden volver a activar). El ahorro se nota al reiniciar.' },
+    @{ Categoria='Inicio y apagado'; Nombre='Eliminar el retraso artificial de inicio de apps'; Tipo='Accion'; ValorOn='Accion-RetrasoInicioAppsOff'; Ayuda='Quita la espera que Windows impone antes de abrir los programas de inicio.' },
+    @{ Categoria='Inicio y apagado'; Nombre='Reducir el tiempo de espera de apps que no responden'; Tipo='Accion'; ValorOn='Accion-TiempoEsperaAppsReducir'; Ayuda='Windows cierra antes las apps colgadas al apagar.' },
+    @{ Categoria='Inicio y apagado'; Nombre='Reducir el tiempo de espera de servicios al apagar'; Tipo='Accion'; ValorOn='Accion-TiempoEsperaServiciosReducir'; Ayuda='Apagado mas rapido: Windows espera menos a que terminen los servicios.' },
+    @{ Categoria='Memoria y procesos en segundo plano'; Nombre='Optimizar la memoria para programas (no para cache de archivos)'; Tipo='Accion'; ValorOn='Accion-MemoriaOptimizarProgramas'; Ayuda='Valor normal para un equipo de escritorio o laptop. Requiere reiniciar.' },
+    @{ Categoria='Memoria y procesos en segundo plano'; Nombre='Detener la instalacion de apps de Microsoft Store en segundo plano (wsappx)'; Tipo='Accion'; ValorOn='Accion-FrenarStoreAppx'; Ayuda='Detiene AppXSvc y ClipSVC ahora mismo; Windows los vuelve a iniciar cuando se necesitan.' },
+    @{ Categoria='Disco y SSD'; Nombre='Limpiar archivos temporales'; Tipo='Accion'; ValorOn='Accion-LimpiarTemporales'; Ayuda='Borra temporales de usuario/Windows y cache de internet. En disco mecanico conserva Prefetch.' },
+    @{ Categoria='Disco y SSD'; Nombre='Dejar de registrar el "ultimo acceso" en NTFS (menos escrituras)'; Tipo='Accion'; ValorOn='Accion-NtfsUltimoAccesoOff'; Ayuda='Evita una escritura de metadatos en cada lectura de archivo. Util en SSD y HDD.' },
+    @{ Categoria='Disco y SSD'; Nombre='Desactivar almacenamiento reservado de Windows (libera varios GB)'; Tipo='Accion'; ValorOn='Accion-AlmacenamientoReservadoOff'; Ayuda='Usa DISM; si hay actualizaciones pendientes puede no aplicarse y lo avisa.' },
+    @{ Categoria='Disco y SSD'; Nombre='Verificar y activar TRIM (SSD)'; Tipo='Accion'; ValorOn='Accion-SsdTrimActivar'; Ayuda='Mantiene la velocidad de escritura del SSD. Verifica el estado real despues de aplicarlo.' },
+    @{ Categoria='Disco y SSD'; Nombre='Desactivar nombres cortos 8.3 en NTFS (menos escrituras con muchos archivos)'; Tipo='Accion'; ValorOn='Accion-SsdNombresCortosOff'; Ayuda='Solo afecta archivos nuevos. Util al instalar juegos con miles de archivos. Se restaura desde Optimizacion > SSD.' },
+    @{ Categoria='Privacidad y telemetria (menos procesos y red en segundo plano)'; Nombre='Reducir la telemetria de Windows al minimo'; Tipo='Accion'; ValorOn='Accion-TelemetriaMinima'; Ayuda='Aplica la directiva AllowTelemetry=0 (algunas ediciones de Windows no la respetan).' },
+    @{ Categoria='Privacidad y telemetria (menos procesos y red en segundo plano)'; Nombre='Desactivar el ID de publicidad'; Tipo='Accion'; ValorOn='Accion-AdvertisingIdOff'; Ayuda='Windows deja de usar un ID para anuncios personalizados.' },
+    @{ Categoria='Privacidad y telemetria (menos procesos y red en segundo plano)'; Nombre='Desactivar el historial de actividades (Timeline)'; Tipo='Accion'; ValorOn='Accion-HistorialActividadesOff'; Ayuda='Windows deja de registrar y sincronizar tu actividad.' },
+    @{ Categoria='Privacidad y telemetria (menos procesos y red en segundo plano)'; Nombre='Desactivar apps sugeridas y caracteristicas de consumidor'; Tipo='Accion'; ValorOn='Accion-CaracteristicasConsumidorOff'; Ayuda='Evita que Windows instale apps promocionadas solo.' },
+    @{ Categoria='Privacidad y telemetria (menos procesos y red en segundo plano)'; Nombre='Desactivar sugerencias web en el cuadro de busqueda'; Tipo='Accion'; ValorOn='Accion-SugerenciasBusquedaOff'; Ayuda='La busqueda del menu Inicio deja de consultar internet.' },
+    @{ Categoria='Privacidad y telemetria (menos procesos y red en segundo plano)'; Nombre='Desactivar informes de errores de Windows (WER)'; Tipo='Accion'; ValorOn='Accion-InformesErroresOff'; Ayuda='Menos procesos y escrituras al fallar una app. Reduce informacion de diagnostico.' },
+    @{ Categoria='Red'; Nombre='Liberar la reserva de ancho de banda QoS (0% en vez de 20%)'; Tipo='Accion'; ValorOn='Accion-QoSLiberarAncho'; Ayuda='Windows no reserva ancho de banda para uso propio.' },
+    @{ Categoria='Red'; Nombre='Desactivar el algoritmo de Nagle (menor latencia)'; Tipo='Accion'; ValorOn='Accion-DesactivarNagleOn'; Ayuda='Menor latencia en juegos/en linea, con algo mas de paquetes pequenos.' }
 )
 
 function Show-VentanaManual {
@@ -24362,6 +24388,7 @@ function Global:Texto-AyudaItem {
     param($Item)
     $n = "$($Item.Nombre)"
     if ($Item.WingetId) { return "Instala $n con winget (gestor de paquetes de Windows). Marca la casilla y pulsa 'Instalar seleccionados'." }
+    if ($Item.Ayuda) { return "$n`n$($Item.Ayuda)" }
     if ($Item.Tipo -eq 'Servicio') { return "$n`nCambia el servicio de Windows '$($Item.Valor)'. Marca la casilla y pulsa el boton de aplicar." }
     return "$n`nMarca la casilla y pulsa el boton de aplicar para ejecutar este ajuste. Si no estas seguro, crea antes un punto de restauracion."
 }
