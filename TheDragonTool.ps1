@@ -15026,64 +15026,6 @@ function Accion-SsdIndexadoRestaurar {
     } catch { Write-Log "No se pudo restaurar el indexado." -Tipo AVISO }
 }
 
-function Get-BibliotecasSteam {
-    $rutas = New-Object System.Collections.Generic.List[string]
-    $raiz = $null
-    foreach ($k in @('HKCU:\Software\Valve\Steam', 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam', 'HKLM:\SOFTWARE\Valve\Steam')) {
-        try { $v = (Get-ItemProperty $k -ErrorAction Stop); $c = if ($v.SteamPath) { "$($v.SteamPath)" } elseif ($v.InstallPath) { "$($v.InstallPath)" } else { '' }
-              if ($c) { $raiz = $c.Replace('/', '\'); break } } catch {}
-    }
-    if (-not $raiz -or -not (Test-Path $raiz)) { return ,@() }
-    $rutas.Add($raiz)
-    $vdf = Join-Path $raiz 'steamapps\libraryfolders.vdf'
-    if (Test-Path $vdf) {
-        foreach ($m in [regex]::Matches((Get-Content $vdf -Raw -ErrorAction SilentlyContinue), '"path"\s+"([^"]+)"')) {
-            $p = $m.Groups[1].Value.Replace('\\', '\')
-            if ($p -and (Test-Path $p) -and -not ($rutas -contains $p)) { $rutas.Add($p) }
-        }
-    }
-    return ,$rutas.ToArray()
-}
-
-function Accion-SsdSteamExcluirDefender {
-    if (-not (Requiere-Admin)) { return }
-    $bib = Get-BibliotecasSteam
-    if ($null -eq $bib) { $bib = @() }
-    if ($bib.Count -eq 0) { Write-Log "No se encontro Steam instalado en este equipo: no se agrego ninguna exclusion." -Tipo AVISO; return }
-    try { [void](Get-MpPreference -ErrorAction Stop) } catch { Write-Log "Microsoft Defender no esta activo/gestionable (puede haber otro antivirus): no se cambio nada." -Tipo AVISO; return }
-    try {
-        if (-not (Test-Path $Script:DirSsd)) { New-Item -Path $Script:DirSsd -ItemType Directory -Force | Out-Null }
-        $f = Join-Path $Script:DirSsd 'steam_exclusiones.json'
-        $hechas = New-Object System.Collections.Generic.List[string]
-        if (Test-Path $f) { foreach ($x in @((Get-Content $f -Raw | ConvertFrom-Json))) { if ($x) { $hechas.Add("$x") } } }
-        $ok = 0
-        foreach ($b in $bib) {
-            $sa = Join-Path $b 'steamapps'
-            if (-not (Test-Path $sa)) { continue }
-            $ya = @((Get-MpPreference).ExclusionPath) -contains $sa
-            if (-not $ya) { Add-MpPreference -ExclusionPath $sa -ErrorAction Stop; if (-not ($hechas -contains $sa)) { $hechas.Add($sa) } }
-            if (@((Get-MpPreference).ExclusionPath) -contains $sa) { $ok++; Write-Log "Exclusion de Defender verificada: $sa" -Tipo OK }
-        }
-        ConvertTo-Json -InputObject @($hechas.ToArray()) | Set-Content -Path $f -Encoding ASCII
-        if ($ok -eq 0) { Write-Log "No se pudo confirmar ninguna exclusion." -Tipo AVISO }
-        else { Write-Log "Defender ya no analiza cada archivo que Steam escribe/lee en $ok biblioteca(s): menos lecturas extra y menos CPU al instalar. COMPROMISO: un juego pirata/modificado en esa carpeta no se analizaria; quitalo con 'Quitar exclusion'." -Tipo INFO }
-    } catch { Write-Log "No se pudo agregar la exclusion de Defender: $($_.Exception.Message)" -Tipo AVISO }
-}
-function Accion-SsdSteamQuitarExclusion {
-    if (-not (Requiere-Admin)) { return }
-    $f = Join-Path $Script:DirSsd 'steam_exclusiones.json'
-    if (-not (Test-Path $f)) { Write-Log "Esta herramienta no habia agregado exclusiones de Steam: no se quita nada (no se tocan las exclusiones propias del cliente)." -Tipo INFO; return }
-    try {
-        $quedan = New-Object System.Collections.Generic.List[string]
-        foreach ($x in @((Get-Content $f -Raw | ConvertFrom-Json))) {
-            if (-not $x) { continue }
-            Remove-MpPreference -ExclusionPath "$x" -ErrorAction SilentlyContinue
-            if (@((Get-MpPreference).ExclusionPath) -contains "$x") { $quedan.Add("$x"); Write-Log "No se pudo quitar: $x" -Tipo AVISO } else { Write-Log "Exclusion quitada: $x" -Tipo OK }
-        }
-        if ($quedan.Count -eq 0) { Remove-Item $f -Force -ErrorAction SilentlyContinue } else { ConvertTo-Json -InputObject @($quedan.ToArray()) | Set-Content -Path $f -Encoding ASCII }
-    } catch { Write-Log "No se pudo quitar la exclusion: $($_.Exception.Message)" -Tipo AVISO }
-}
-
 $Script:ChecklistOptimizacionRegistro = @(
     @{ Categoria='Disco'; Nombre='Desactivar actualizacion de "ultimo acceso" en NTFS (menos escritura en disco)'; Tipo='Accion'; ValorOn='Accion-NtfsUltimoAccesoOff' },
     @{ Categoria='Disco'; Nombre='Reactivar actualizacion de "ultimo acceso" en NTFS'; Tipo='Accion'; ValorOn='Accion-NtfsUltimoAccesoOn' },
@@ -15099,8 +15041,6 @@ $Script:ChecklistOptimizacionRegistro = @(
     @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Reactivar Delivery Optimization'; Tipo='Accion'; ValorOn='Accion-DeliveryOptimizationOn' },
     @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Desactivar hibernacion (borra hiberfil.sys: ahorra GB y escrituras; tambien quita el Inicio rapido)'; Tipo='Accion'; ValorOn='Accion-HibernacionOff' },
     @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Reactivar hibernacion'; Tipo='Accion'; ValorOn='Accion-HibernacionOn' },
-    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Excluir la carpeta steamapps del analisis en tiempo real de Defender (menos lecturas/CPU al instalar; reduce la proteccion en esa carpeta)'; Tipo='Accion'; ValorOn='Accion-SsdSteamExcluirDefender' },
-    @{ Categoria='SSD y descargas de juegos (Steam)'; Nombre='Quitar la exclusion de Defender agregada por esta herramienta'; Tipo='Accion'; ValorOn='Accion-SsdSteamQuitarExclusion' },
 
     @{ Categoria='Memoria'; Nombre='Mantener nucleo/controladores en RAM (no paginar a disco)'; Tipo='Accion'; ValorOn='Accion-NoPaginarNucleoOn' },
     @{ Categoria='Memoria'; Nombre='Restaurar paginado normal de nucleo/controladores'; Tipo='Accion'; ValorOn='Accion-NoPaginarNucleoOff' },
