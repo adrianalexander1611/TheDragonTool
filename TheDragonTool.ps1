@@ -17259,6 +17259,17 @@ Marcar-Arranque 'funciones y recursos'
                 <Button x:Name="BtnMenuLateral" DockPanel.Dock="Left" Content="☰  MENÚ" Width="120" Height="34" Margin="0,0,14,0"
                         Padding="0" HorizontalContentAlignment="Center" FontWeight="Bold"
                         Background="#33141C30" BorderBrush="{DynamicResource NeonBrush}" ToolTip="Abrir el menu de secciones"/>
+                <Grid x:Name="ZonaBusqueda" DockPanel.Dock="Right" Width="300" Margin="14,0,0,0" VerticalAlignment="Center">
+                    <TextBox x:Name="TxtBusquedaGlobal" Height="34" Padding="10,0" VerticalContentAlignment="Center" FontSize="13"
+                             ToolTip="Escribe lo que buscas (bateria, disco, usb, java, camara...) y pulsa Enter o elige el resultado para saltar directo a esa funcion. Atajo: Ctrl+F"/>
+                    <TextBlock x:Name="TxtBusquedaHint" Text="🔎  Buscar funcion...  (Ctrl+F)" Foreground="#7C93BD" FontSize="13" Margin="12,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+                    <Popup x:Name="PopBusqueda" PlacementTarget="{Binding ElementName=TxtBusquedaGlobal}" Placement="Bottom" HorizontalOffset="-230" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade">
+                        <Border Background="#F2151B27" BorderBrush="{DynamicResource NeonBrush}" BorderThickness="1.5" CornerRadius="10" Padding="4" Margin="0,4,0,10">
+                            <ListBox x:Name="LstBusqueda" MaxHeight="380" MinWidth="520" Background="Transparent" BorderThickness="0" Foreground="White"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"/>
+                        </Border>
+                    </Popup>
+                </Grid>
                 <TextBlock x:Name="TxtSeccionActual" Text="" Foreground="{StaticResource TextoPrimario}" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
             </DockPanel>
         </Border>
@@ -21767,6 +21778,332 @@ $window.Add_Closed({
     try { if ($Script:TimerModPantallaEnergia) { $Script:TimerModPantallaEnergia.Stop() } } catch {}
 })
 
+# ===== Busqueda global: escribe "bateria" y salta directo a esa funcion =====
+function Global:Normalizar-Busqueda {
+    param([string]$Texto)
+    if (-not $Texto) { return '' }
+    $d = $Texto.Normalize([Text.NormalizationForm]::FormD)
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($c in $d.ToCharArray()) {
+        if ([Globalization.CharUnicodeInfo]::GetUnicodeCategory($c) -ne [Globalization.UnicodeCategory]::NonSpacingMark) { [void]$sb.Append($c) }
+    }
+    return $sb.ToString().ToLowerInvariant()
+}
+
+# Palabras equivalentes: si el texto de una funcion contiene una, tambien se encuentra con las demas.
+$Script:SinonimosBusqueda = @(
+    @('bateria','battery','carga','autonomia'),
+    @('pantalla','monitor','display','panel','edid','resolucion','brillo'),
+    @('ram','memoria'),
+    @('disco','ssd','hdd','almacenamiento','smart','unidad'),
+    @('wifi','red','internet','conexion','ethernet'),
+    @('usb','puerto','puertos'),
+    @('teclado','keyboard','tecla','teclas'),
+    @('camara','webcam'),
+    @('audio','sonido','parlante','bocina','microfono'),
+    @('cpu','procesador'),
+    @('gpu','grafica','video','tarjeta'),
+    @('temperatura','calor','ventilador','refrigeracion'),
+    @('driver','drivers','controlador','controladores'),
+    @('virus','antivirus','defender','malware'),
+    @('actualizar','update','actualizacion','actualizaciones'),
+    @('bsod','pantallazo','azul'),
+    @('instalar','programa','programas','app','aplicacion'),
+    @('desinstalar','quitar','eliminar'),
+    @('java','jre','jdk'),
+    @('vc','redistributable','runtime')
+)
+
+# Panel (oculto/visible segun la seccion elegida) -> como mostrarlo
+$Script:RutasPaneles = @{
+    'PanelInstalarProgramas'      = @('CmbSeccionProgramas', 'Instalar programas', 'Instalar programas')
+    'PanelComplementos'           = @('CmbSeccionProgramas', 'Complementos (DirectX, .NET, Java, VC++)', 'Complementos')
+    'PanelDesinstalarProgramas'   = @('CmbSeccionProgramas', 'Desinstalar programas', 'Desinstalar programas')
+    'PanelArchivosISO'            = @('CmbSeccionProgramas', 'Archivos ISO', 'Archivos ISO')
+    'PanelMicrosoftStore'         = @('CmbSeccionProgramas', 'Microsoft Store', 'Microsoft Store')
+    'PanelPerfiles'               = @('CmbCategoriaOptimizar', 'Perfiles de Optimizacion', 'Perfiles de optimizacion')
+    'PanelAcelerarCPU'            = @('CmbCategoriaOptimizar', 'Acelerar funcionamiento del procesador', 'Acelerar procesador')
+    'PanelLiberarRAM'             = @('CmbCategoriaOptimizar', 'Liberar RAM', 'Liberar RAM')
+    'PanelBuscadorControladores'  = @('CmbSeccionControladores', 'Buscador de controladores', 'Buscador de controladores')
+    'PanelExploradorControladores' = @('CmbSeccionControladores', 'Explorador de controladores instalados', 'Controladores instalados')
+    'PanelEdicionRegistro'        = @('CmbSeccionRegistro', 'Edicion del registro', 'Edicion del registro')
+    'PanelOptimizacionRegistro'   = @('CmbSeccionRegistro', 'Optimizacion', 'Optimizacion del registro')
+    'PanelAnalisisRegistro'       = @('CmbSeccionRegistro', 'Analisis y reparacion de errores', 'Analisis y reparacion')
+    'PanelModCamara'              = @('CmbSeccionModificacion', 'Camara', 'Camara')
+    'PanelModPantalla'            = @('CmbSeccionModificacion', 'Pantalla', 'Pantalla')
+    'PanelModTeclado'             = @('CmbSeccionModificacion', 'Teclado', 'Teclado')
+    'PanelModParlante'            = @('CmbSeccionModificacion', 'Parlante', 'Parlante')
+    'PanelModAlmacenamiento'      = @('CmbSeccionModificacion', 'Almacenamiento', 'Almacenamiento')
+}
+
+function Global:Get-TextoControlBusqueda {
+    param($Ctl)
+    $c = $Ctl.Content
+    if ($c -is [string]) { return $c.Trim() }
+    $partes = New-Object System.Collections.Generic.List[string]
+    if ($c -is [System.Windows.DependencyObject]) {
+        $pila = New-Object System.Collections.Generic.Stack[object]
+        $pila.Push($c)
+        $orden = New-Object System.Collections.Generic.List[object]
+        while ($pila.Count -gt 0) {
+            $x = $pila.Pop()
+            if ($x -is [System.Windows.Controls.TextBlock]) { $orden.Add($x) }
+            elseif ($x -is [System.Windows.DependencyObject]) {
+                $hijos = @([System.Windows.LogicalTreeHelper]::GetChildren($x) | Where-Object { $_ -is [System.Windows.DependencyObject] })
+                for ($i = $hijos.Count - 1; $i -ge 0; $i--) { $pila.Push($hijos[$i]) }
+            }
+        }
+        foreach ($tb in $orden.ToArray()) {
+            $t = "$($tb.Text)".Trim()
+            if (-not $t -or $t.Length -le 2 -or $t -match 'prueba\(s\)\s*$') { continue }
+            $partes.Add($t)
+        }
+    }
+    return ($partes.ToArray() -join ' - ')
+}
+
+function Global:Construir-IndiceBusqueda {
+    $tc = $window.FindName('TabControlPrincipal')
+    $lista = New-Object System.Collections.Generic.List[object]
+    if (-not $tc) { return $lista.ToArray() }
+    $vistos = @{}
+    $agregar = {
+        param($tipo, $titulo, $ayuda, $ruta, $ctl, $tab, $comboNombre, $comboItem, $extra)
+        $t = "$titulo".Trim()
+        if (-not $t) { return }
+        $clave = "$tipo|$t|$ruta"
+        if ($vistos.ContainsKey($clave)) { return }
+        $vistos[$clave] = $true
+        $pajar = Normalizar-Busqueda "$t $ayuda $ruta $extra"
+        $tokens = @($pajar -split '[^a-z0-9\+\.]+' | Where-Object { $_ })
+        foreach ($g in $Script:SinonimosBusqueda) {
+            $hay = $false
+            foreach ($w in $g) { if ($tokens -contains $w) { $hay = $true; break } }
+            if ($hay) { $pajar += ' ' + ($g -join ' ') }
+        }
+        $lista.Add([PSCustomObject]@{ Tipo = $tipo; Titulo = $t; TituloN = (Normalizar-Busqueda $t); Ayuda = "$ayuda"; Ruta = $ruta
+            Pajar = $pajar; Control = $ctl; Tab = $tab; Combo = $comboNombre; ComboItem = $comboItem })
+    }
+    foreach ($tab in $tc.Items) {
+        $cab = "$($tab.Header)".Trim()
+        & $agregar 'Pestana' $cab "Abre la pestana $cab" 'Menu' $null $tab $null $null ''
+        $pila = New-Object System.Collections.Generic.Stack[object]
+        $pila.Push($tab)
+        while ($pila.Count -gt 0) {
+            $x = $pila.Pop()
+            if ($x -isnot [System.Windows.DependencyObject]) { continue }
+            foreach ($h in @([System.Windows.LogicalTreeHelper]::GetChildren($x))) { if ($h -is [System.Windows.DependencyObject]) { $pila.Push($h) } }
+            if ($x -is [System.Windows.Controls.ComboBox] -and $x.Name -match '^Cmb(Seccion|Categoria)') {
+                foreach ($it in $x.Items) {
+                    if ($it -is [System.Windows.Controls.ComboBoxItem]) {
+                        & $agregar 'Seccion' "$($it.Content)" "Abre la seccion $($it.Content) de $cab" $cab $null $tab $x.Name "$($it.Content)" ''
+                    }
+                }
+                continue
+            }
+            if ($x -is [System.Windows.Controls.Primitives.ButtonBase] -and $x -isnot [System.Windows.Controls.RadioButton]) {
+                $nombre = "$($x.Name)"
+                if ($nombre -match '^(BtnVolver|BtnDiagVolver|BtnCerrar|BtnMenu|BtnMin|BtnLimpiarLog)') { continue }
+                $titulo = Get-TextoControlBusqueda -Ctl $x
+                if (-not $titulo -or $titulo -match 'Volver\s*$') { continue }
+                $ayuda = ''
+                if ($nombre -and $Global:AyudaControles -and $Global:AyudaControles.ContainsKey($nombre)) { $ayuda = [string]$Global:AyudaControles[$nombre] }
+                elseif ($x.Tag -is [hashtable] -and $x.Tag.Nota) { $ayuda = [string]$x.Tag.Nota }
+                elseif ($x.ToolTip -is [string]) { $ayuda = $x.ToolTip }
+                # Seccion del panel que lo contiene (el primero conocido hacia arriba)
+                $ruta = $cab; $panel = $null
+                $p = [System.Windows.LogicalTreeHelper]::GetParent($x)
+                while ($p -and $p -ne $tab) {
+                    $pn = "$($p.Name)"
+                    if ($pn -and $Script:RutasPaneles.ContainsKey($pn)) { $panel = $pn; $ruta = "$cab › $($Script:RutasPaneles[$pn][2])"; break }
+                    if ($pn -match '^PanelDiag_(.+)$') { $panel = $pn; $ruta = "$cab › $($Matches[1])"; break }
+                    $p = [System.Windows.LogicalTreeHelper]::GetParent($p)
+                }
+                $titulo = ($titulo -replace '\s+(✅ instalado|⬜ no detectado|❔.*)$', '')
+                $tipoE = if ($x -is [System.Windows.Controls.CheckBox]) { 'Opcion' } else { 'Funcion' }
+                & $agregar $tipoE $titulo $ayuda $ruta $x $tab $null $null ''
+            } elseif ($x -is [System.Windows.Controls.CheckBox] -and $x.Content -is [string]) {
+                $ayuda = ''
+                if ($x.Tag -is [hashtable] -and $x.Tag.Nota) { $ayuda = [string]$x.Tag.Nota }
+                $ruta = $cab; $p = [System.Windows.LogicalTreeHelper]::GetParent($x)
+                while ($p -and $p -ne $tab) {
+                    $pn = "$($p.Name)"
+                    if ($pn -and $Script:RutasPaneles.ContainsKey($pn)) { $ruta = "$cab › $($Script:RutasPaneles[$pn][2])"; break }
+                    $p = [System.Windows.LogicalTreeHelper]::GetParent($p)
+                }
+                $titulo = ($x.Content -replace '\s+(✅ instalado|⬜ no detectado|❔.*)$', '')
+                & $agregar 'Opcion' $titulo $ayuda $ruta $x $tab $null $null ''
+            }
+        }
+    }
+    return $lista.ToArray()
+}
+
+# Busca en el indice: todas las palabras deben aparecer; gana lo que coincide en el titulo.
+function Global:Buscar-EnIndice {
+    param($Indice, [string]$Consulta, [int]$Maximo = 12)
+    $q = Normalizar-Busqueda $Consulta
+    $tokens = @($q -split '\s+' | Where-Object { $_ })
+    if ($tokens.Count -eq 0) { return @() }
+    $res = New-Object System.Collections.Generic.List[object]
+    foreach ($e in $Indice) {
+        $ok = $true; $pt = 0
+        foreach ($t in $tokens) {
+            if ($e.Pajar.IndexOf($t, [StringComparison]::Ordinal) -lt 0) { $ok = $false; break }
+            $i = $e.TituloN.IndexOf($t, [StringComparison]::Ordinal)
+            if ($i -ge 0) { $pt += 10; if ($i -eq 0) { $pt += 5 } }
+        }
+        if (-not $ok) { continue }
+        switch ($e.Tipo) { 'Funcion' { $pt += 3 } 'Seccion' { $pt += 2 } 'Pestana' { $pt += 1 } }
+        if ($e.TituloN -eq $q) { $pt += 20 }
+        $res.Add([PSCustomObject]@{ Puntos = $pt; Entrada = $e })
+    }
+    $orden = $res.ToArray() | Sort-Object -Property @{ Expression = 'Puntos'; Descending = $true }, @{ Expression = { $_.Entrada.Titulo }; Descending = $false }
+    return @($orden | Select-Object -First $Maximo | ForEach-Object { $_.Entrada })
+}
+
+function Global:Resaltar-ControlBusqueda {
+    param($Ctl)
+    try {
+        $viejo = $Ctl.Effect
+        $fx = New-Object System.Windows.Media.Effects.DropShadowEffect
+        $fx.Color = [System.Windows.Media.Color]::FromRgb(0, 229, 255)
+        $fx.BlurRadius = 28; $fx.ShadowDepth = 0; $fx.Opacity = 1
+        $Ctl.Effect = $fx
+        $tm = New-Object System.Windows.Threading.DispatcherTimer
+        $tm.Interval = [TimeSpan]::FromMilliseconds(2400)
+        $tm.Add_Tick({ $tm.Stop(); try { $Ctl.Effect = $viejo } catch {} }.GetNewClosure())
+        $tm.Start()
+    } catch {}
+}
+
+function Global:Ir-ResultadoBusqueda {
+    param($E)
+    if (-not $E) { return }
+    $tc = $window.FindName('TabControlPrincipal')
+    if ($tc -and $E.Tab) { $tc.SelectedItem = $E.Tab }
+    if ($E.Tipo -eq 'Seccion') {
+        $cmb = $window.FindName($E.Combo)
+        if ($cmb) { foreach ($it in $cmb.Items) { if ("$($it.Content)" -eq $E.ComboItem) { $cmb.SelectedItem = $it; break } } }
+        return
+    }
+    if ($E.Tipo -ne 'Funcion' -and $E.Tipo -ne 'Opcion') { return }
+    $ctl = $E.Control
+    # Mostrar la seccion que contiene la funcion
+    $p = [System.Windows.LogicalTreeHelper]::GetParent($ctl)
+    while ($p -and $p -ne $E.Tab) {
+        $pn = "$($p.Name)"
+        if ($pn -match '^PanelDiag_(.+)$') { try { Mostrar-CategoriaDiag -Clave $Matches[1] } catch {}; break }
+        if ($pn -and $Script:RutasPaneles.ContainsKey($pn)) {
+            $r = $Script:RutasPaneles[$pn]
+            $cmb = $window.FindName($r[0])
+            if ($cmb -and $p.Visibility -ne [System.Windows.Visibility]::Visible) {
+                foreach ($it in $cmb.Items) { if ("$($it.Content)" -eq $r[1]) { $cmb.SelectedItem = $it; break } }
+            }
+            break
+        }
+        $p = [System.Windows.LogicalTreeHelper]::GetParent($p)
+    }
+    Wait-UI -Milisegundos 90
+    try { $ctl.BringIntoView() } catch {}
+    if ($ctl.IsVisible) { Resaltar-ControlBusqueda -Ctl $ctl }
+    else { Write-Log "La funcion '$($E.Titulo)' aparece solo en cierto estado (por ejemplo tras detectar algo); se abrio su seccion." -Tipo INFO -SinRegistro }
+}
+
+function Global:Mostrar-ResultadosBusqueda {
+    $caja = $window.FindName('TxtBusquedaGlobal')
+    $lst = $window.FindName('LstBusqueda')
+    $pop = $window.FindName('PopBusqueda')
+    $hint = $window.FindName('TxtBusquedaHint')
+    if (-not $caja -or -not $lst -or -not $pop) { return }
+    $txt = "$($caja.Text)".Trim()
+    if ($hint) { $hint.Visibility = $(if ($caja.Text) { 'Collapsed' } else { 'Visible' }) }
+    if (-not $txt) { $pop.IsOpen = $false; return }
+    if (-not $Script:IndiceBusqueda) { $Script:IndiceBusqueda = Construir-IndiceBusqueda }
+    $res = @(Buscar-EnIndice -Indice $Script:IndiceBusqueda -Consulta $txt -Maximo 12)
+    $lst.Items.Clear()
+    if ($res.Count -eq 0) {
+        $vacio = New-Object System.Windows.Controls.TextBlock
+        $vacio.Text = "Sin resultados para '$txt'. Prueba con otra palabra (por ejemplo: bateria, disco, usb, java)."
+        $vacio.Foreground = [System.Windows.Media.Brushes]::LightGray; $vacio.Margin = '10'; $vacio.TextWrapping = 'Wrap'; $vacio.Width = 480
+        [void]$lst.Items.Add($vacio)
+    } else {
+        foreach ($e in $res) {
+            $sp = New-Object System.Windows.Controls.StackPanel
+            $sp.Width = 500
+            $t1 = New-Object System.Windows.Controls.TextBlock
+            $icono = switch ($e.Tipo) { 'Pestana' { '📑' } 'Seccion' { '📂' } default { '▶' } }
+            $t1.Text = "$icono  $($e.Titulo)"
+            $t1.Foreground = [System.Windows.Media.Brushes]::White; $t1.FontWeight = 'SemiBold'; $t1.TextTrimming = 'CharacterEllipsis'
+            $t2 = New-Object System.Windows.Controls.TextBlock
+            $t2.Text = $e.Ruta
+            $t2.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#66AEFF'); $t2.FontSize = 11
+            [void]$sp.Children.Add($t1); [void]$sp.Children.Add($t2)
+            if ($e.Ayuda) {
+                $t3 = New-Object System.Windows.Controls.TextBlock
+                $a = ($e.Ayuda -replace '\s+', ' ')
+                $t3.Text = $(if ($a.Length -gt 110) { $a.Substring(0, 110) + '...' } else { $a })
+                $t3.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#7C93BD'); $t3.FontSize = 10.5; $t3.TextTrimming = 'CharacterEllipsis'
+                [void]$sp.Children.Add($t3)
+            }
+            $li = New-Object System.Windows.Controls.ListBoxItem
+            $li.Content = $sp; $li.Tag = $e; $li.Padding = '8,5'
+            $popRef = $pop
+            $li.Add_PreviewMouseLeftButtonUp({ param($s, $a) $popRef.IsOpen = $false; Ir-ResultadoBusqueda $s.Tag }.GetNewClosure())
+            [void]$lst.Items.Add($li)
+        }
+    }
+    $pop.IsOpen = $true
+}
+
+# --- Barra de busqueda global ---
+$Script:IndiceBusqueda = $null
+try {
+    $cajaBusq = $window.FindName('TxtBusquedaGlobal')
+    $lstBusq = $window.FindName('LstBusqueda')
+    $cajaBusq.Add_TextChanged({ try { Mostrar-ResultadosBusqueda } catch { Registrar-FalloInterno 'busqueda global' $_ } })
+    $cajaBusq.Add_GotKeyboardFocus({ $window.FindName('TxtBusquedaHint').Visibility = 'Collapsed' })
+    $cajaBusq.Add_LostKeyboardFocus({ if (-not $window.FindName('TxtBusquedaGlobal').Text) { $window.FindName('TxtBusquedaHint').Visibility = 'Visible' } })
+    $cajaBusq.Add_PreviewKeyDown({
+        param($s, $e)
+        try {
+            $lst = $window.FindName('LstBusqueda'); $pop = $window.FindName('PopBusqueda')
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape) { $s.Text = ''; $pop.IsOpen = $false; $e.Handled = $true }
+            elseif ($e.Key -eq [System.Windows.Input.Key]::Down -and $pop.IsOpen -and $lst.Items.Count -gt 0) {
+                $lst.SelectedIndex = 0
+                $it = $lst.ItemContainerGenerator.ContainerFromIndex(0); if ($it) { [void]$it.Focus() }
+                $e.Handled = $true
+            }
+            elseif ($e.Key -eq [System.Windows.Input.Key]::Enter) {
+                $primero = $null
+                if ($lst.Items.Count -gt 0 -and $lst.Items[0] -is [System.Windows.Controls.ListBoxItem]) { $primero = $lst.Items[0].Tag }
+                if ($primero) { $pop.IsOpen = $false; $s.Text = ''; Ir-ResultadoBusqueda $primero }
+                $e.Handled = $true
+            }
+        } catch { Registrar-FalloInterno 'busqueda global (teclado)' $_ }
+    })
+    $lstBusq.Add_PreviewKeyDown({
+        param($s, $e)
+        try {
+            if ($e.Key -eq [System.Windows.Input.Key]::Enter -and $s.SelectedItem -is [System.Windows.Controls.ListBoxItem]) {
+                $dest = $s.SelectedItem.Tag
+                $window.FindName('PopBusqueda').IsOpen = $false; $window.FindName('TxtBusquedaGlobal').Text = ''
+                Ir-ResultadoBusqueda $dest; $e.Handled = $true
+            } elseif ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+                $window.FindName('PopBusqueda').IsOpen = $false; [void]$window.FindName('TxtBusquedaGlobal').Focus(); $e.Handled = $true
+            } elseif ($e.Key -eq [System.Windows.Input.Key]::Up -and $s.SelectedIndex -le 0) {
+                [void]$window.FindName('TxtBusquedaGlobal').Focus(); $e.Handled = $true
+            }
+        } catch { Registrar-FalloInterno 'busqueda global (lista)' $_ }
+    })
+    $window.Add_PreviewKeyDown({
+        param($s, $e)
+        if ($e.Key -eq [System.Windows.Input.Key]::F -and ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) {
+            $c = $window.FindName('TxtBusquedaGlobal'); [void]$c.Focus(); $c.SelectAll(); $e.Handled = $true
+        }
+    })
+} catch { Write-Log "No se pudo preparar la barra de busqueda: $($_.Exception.Message)" -Tipo AVISO }
+
 # --- Navegacion lateral neon (reemplaza la franja de pestañas) ----------
 # Cada TabItem del TabControl (oculto) se convierte automaticamente en un
 # boton redondeado semitransparente del panel izquierdo; si en el futuro se
@@ -22044,6 +22381,7 @@ $Global:AyudaControles = @{
     'BtnNavCtrlGoogle' = 'Busca en Google el controlador de tu equipo.'
     'BtnNavCtrlExterno' = 'Abre esta pagina en tu navegador externo (Chrome, Edge...).'
     # --- Programas ---
+    'TxtBusquedaGlobal' = 'Busca cualquier funcion del programa (bateria, disco, usb, java, camara...). Enter abre el primer resultado; con la flecha abajo eliges otro. Atajo: Ctrl+F.'
     'CmbSeccionProgramas' = 'Cambia entre instalar programas, complementos (DirectX, .NET, Java, Visual C++), desinstalar, archivos ISO y Microsoft Store.'
     'BtnComplementosDetectar' = 'Revisa en el equipo (archivos, registro y carpetas de .NET) que complementos ya estan instalados. No instala nada.'
     'BtnComplementosRecomendados' = 'Marca solo los complementos recomendados que NO estan instalados: DirectX, Visual C++ 2005-2022, .NET Framework 3.5, .NET Desktop 8 y 10, Java 21 y WebView2.'
