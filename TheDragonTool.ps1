@@ -15646,17 +15646,29 @@ function Accion-InstalarCatalogoSeleccionado {
 # (archivos, registro, carpetas de .NET o lista de programas) antes y despues de instalar; el resultado mostrado es
 # lo que se encontro, no lo que "deberia" haber pasado.
 $Script:CatalogoComplementos = @(
+    @{ Categoria='Juegos: fisica y audio'; Nombre='NVIDIA PhysX System Software'; WingetId='Nvidia.PhysX'; DetTipo='prog'; DetValor='^NVIDIA PhysX System Software'; Nota='Motor de fisica que piden muchos juegos (funciona con cualquier tarjeta; no es un controlador de video).' },
+    @{ Categoria='Juegos: fisica y audio'; Nombre='NVIDIA PhysX (Legacy, juegos de 2007 o anteriores)'; WingetId='Nvidia.PhysXLegacy'; DetTipo='desconocido'; Nota='Version antigua de PhysX para juegos de 2007 o anteriores. No deja una marca fiable en el registro: se comprueba con winget al instalar.' },
+    @{ Categoria='Juegos: fisica y audio'; Nombre='OpenAL (audio 3D de juegos)'; WingetId='CreativeTechnology.OpenAL'; DetTipo='dll'; DetValor='OpenAL32.dll'; Nota='Libreria de audio (OpenAL32.dll) que piden varios juegos.' },
+
     @{ Categoria='DirectX'; Nombre='DirectX End-User Runtime (d3dx9/10/11, XInput, XAudio: juegos y programas)'; WingetId='Microsoft.DirectX'; DetTipo='dx'; Recomendado=$true; Nota='Las DLL antiguas de DirectX que piden muchos juegos y programas ("falta d3dx9_43.dll", "xinput1_3.dll"...). DirectX 12 ya viene dentro de Windows 10/11.' },
 
+    @{ Categoria='.NET Framework'; Nombre='.NET Framework 4.8.1 (Developer Pack: instala o actualiza a 4.8.1)'; WingetId='Microsoft.DotNet.Framework.DeveloperPack_4'; DetTipo='netfx481'; Nota='Instala .NET Framework 4.8.1 junto con sus paquetes de desarrollo. En Windows 10 22H2 y 11 22H2 o superior ya viene incluido.' },
     @{ Categoria='.NET Framework'; Nombre='.NET Framework 3.5 (incluye 2.0 y 3.0)'; Metodo='netfx35'; DetTipo='netfx35'; Recomendado=$true; Nota='Se activa como caracteristica de Windows (necesita Internet o Windows Update). Lo piden programas antiguos.' },
 
     @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 6 (fin de soporte, para programas viejos)'; WingetId='Microsoft.DotNet.DesktopRuntime.6'; DetTipo='desktop'; DetValor='6'; Nota='Para programas de escritorio hechos en .NET 6.' },
     @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 8 (LTS)'; WingetId='Microsoft.DotNet.DesktopRuntime.8'; DetTipo='desktop'; DetValor='8'; Recomendado=$true; Nota='Para programas de escritorio hechos en .NET 8 (version con soporte a largo plazo).' },
     @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 9'; WingetId='Microsoft.DotNet.DesktopRuntime.9'; DetTipo='desktop'; DetValor='9'; Nota='Para programas de escritorio hechos en .NET 9.' },
     @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 10 (LTS)'; WingetId='Microsoft.DotNet.DesktopRuntime.10'; DetTipo='desktop'; DetValor='10'; Recomendado=$true; Nota='Para programas de escritorio hechos en .NET 10 (version con soporte a largo plazo).' },
+    @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Desktop Runtime 8 (x86, 32 bits)'; WingetId='Microsoft.DotNet.DesktopRuntime.8.x86'; DetTipo='desktopx86'; DetValor='8'; Nota='Para programas de escritorio de 32 bits hechos en .NET 8.' },
     @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Runtime 8 (consola y servicios)'; WingetId='Microsoft.DotNet.Runtime.8'; DetTipo='core'; DetValor='8'; Nota='Runtime base de .NET 8 (sin interfaz de ventanas).' },
     @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Runtime 9 (consola y servicios)'; WingetId='Microsoft.DotNet.Runtime.9'; DetTipo='core'; DetValor='9'; Nota='Runtime base de .NET 9 (sin interfaz de ventanas).' },
     @{ Categoria='.NET (runtimes modernos)'; Nombre='.NET Runtime 10 (consola y servicios)'; WingetId='Microsoft.DotNet.Runtime.10'; DetTipo='core'; DetValor='10'; Nota='Runtime base de .NET 10 (sin interfaz de ventanas).' },
+
+    @{ Categoria='.NET (ASP.NET Core y SDK)'; Nombre='ASP.NET Core Runtime 8'; WingetId='Microsoft.DotNet.AspNetCore.8'; DetTipo='asp'; DetValor='8'; Nota='Para ejecutar aplicaciones y servicios web hechos en ASP.NET Core 8.' },
+    @{ Categoria='.NET (ASP.NET Core y SDK)'; Nombre='ASP.NET Core Runtime 9'; WingetId='Microsoft.DotNet.AspNetCore.9'; DetTipo='asp'; DetValor='9'; Nota='Para ejecutar aplicaciones y servicios web hechos en ASP.NET Core 9.' },
+    @{ Categoria='.NET (ASP.NET Core y SDK)'; Nombre='ASP.NET Core Runtime 10'; WingetId='Microsoft.DotNet.AspNetCore.10'; DetTipo='asp'; DetValor='10'; Nota='Para ejecutar aplicaciones y servicios web hechos en ASP.NET Core 10.' },
+    @{ Categoria='.NET (ASP.NET Core y SDK)'; Nombre='.NET SDK 8 (para programar)'; WingetId='Microsoft.DotNet.SDK.8'; DetTipo='sdk'; DetValor='8'; Nota='Herramientas para compilar y desarrollar en .NET 8 (incluye los runtimes).' },
+    @{ Categoria='.NET (ASP.NET Core y SDK)'; Nombre='.NET SDK 10 (para programar)'; WingetId='Microsoft.DotNet.SDK.10'; DetTipo='sdk'; DetValor='10'; Nota='Herramientas para compilar y desarrollar en .NET 10 (incluye los runtimes).' },
 
     @{ Categoria='Java'; Nombre='Java 8 (Oracle JRE)'; WingetId='Oracle.JavaRuntimeEnvironment'; DetTipo='prog'; DetValor='^Java( \d+)? Update \d+'; Nota='Java 8 oficial de Oracle. Lo piden programas y juegos antiguos.' },
     @{ Categoria='Java'; Nombre='Java 8 (Eclipse Temurin JRE)'; WingetId='EclipseAdoptium.Temurin.8.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 8u'; Nota='Java 8 libre (OpenJDK) de Eclipse Adoptium.' },
@@ -15664,6 +15676,10 @@ $Script:CatalogoComplementos = @(
     @{ Categoria='Java'; Nombre='Java 17 (Eclipse Temurin JRE)'; WingetId='EclipseAdoptium.Temurin.17.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 17[\.\+u-]'; Nota='Java 17 libre (OpenJDK) de Eclipse Adoptium.' },
     @{ Categoria='Java'; Nombre='Java 21 (Eclipse Temurin JRE, LTS)'; WingetId='EclipseAdoptium.Temurin.21.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 21[\.\+u-]'; Recomendado=$true; Nota='Java 21 libre (OpenJDK) con soporte a largo plazo. Es el recomendado para programas modernos (por ejemplo Minecraft reciente).' },
     @{ Categoria='Java'; Nombre='Java 25 (Eclipse Temurin JRE, LTS)'; WingetId='EclipseAdoptium.Temurin.25.JRE'; DetTipo='prog'; DetValor='^Eclipse Temurin JRE with Hotspot 25[\.\+u-]'; Nota='Java 25 libre (OpenJDK) con soporte a largo plazo.' },
+
+    @{ Categoria='Java (kits de desarrollo, JDK)'; Nombre='Java 17 JDK (Eclipse Temurin)'; WingetId='EclipseAdoptium.Temurin.17.JDK'; DetTipo='prog'; DetValor='^Eclipse Temurin JDK with Hotspot 17[\.\+u-]'; Nota='Kit completo de Java 17 (incluye el entorno de ejecucion).' },
+    @{ Categoria='Java (kits de desarrollo, JDK)'; Nombre='Java 21 JDK (Eclipse Temurin)'; WingetId='EclipseAdoptium.Temurin.21.JDK'; DetTipo='prog'; DetValor='^Eclipse Temurin JDK with Hotspot 21[\.\+u-]'; Nota='Kit completo de Java 21 (incluye el entorno de ejecucion).' },
+    @{ Categoria='Java (kits de desarrollo, JDK)'; Nombre='Java 21 JDK (Microsoft Build of OpenJDK)'; WingetId='Microsoft.OpenJDK.21'; DetTipo='prog'; DetValor='^Microsoft Build of OpenJDK with Hotspot 21[\.\+u-]'; Nota='OpenJDK 21 compilado por Microsoft.' },
 
     @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2015-2022 (x64)'; WingetId='Microsoft.VCRedist.2015+.x64'; DetTipo='prog'; DetValor='Visual C\+\+\s+(2015|2017|2019|2022|v14)\S*\s+Redistributable'; DetSi='x64'; Recomendado=$true; Nota='El mas usado: cubre casi todos los programas y juegos actuales de 64 bits.' },
     @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2015-2022 (x86)'; WingetId='Microsoft.VCRedist.2015+.x86'; DetTipo='prog'; DetValor='Visual C\+\+\s+(2015|2017|2019|2022|v14)\S*\s+Redistributable'; DetNo='x64|arm64'; Recomendado=$true; Nota='Para programas de 32 bits (tambien se necesita en Windows de 64 bits).' },
@@ -15678,6 +15694,14 @@ $Script:CatalogoComplementos = @(
     @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2005 (x64)'; WingetId='Microsoft.VCRedist.2005.x64'; DetTipo='prog'; DetValor='Visual C\+\+\s+2005\s+Redistributable'; DetSi='x64'; Nota='Programas muy antiguos (msvcr80.dll).' },
     @{ Categoria='Visual C++ (Redistributable)'; Nombre='Visual C++ 2005 (x86)'; WingetId='Microsoft.VCRedist.2005.x86'; DetTipo='prog'; DetValor='Visual C\+\+\s+2005\s+Redistributable'; DetNo='x64|arm64'; Nota='Programas muy antiguos (msvcr80.dll, 32 bits).' },
 
+    @{ Categoria='Lenguajes y herramientas'; Nombre='Python 3.14'; WingetId='Python.Python.3.14'; DetTipo='prog'; DetValor='^Python 3\.14\.'; Nota='Python 3.14 (version mas reciente).' },
+    @{ Categoria='Lenguajes y herramientas'; Nombre='Python 3.13'; WingetId='Python.Python.3.13'; DetTipo='prog'; DetValor='^Python 3\.13\.'; Nota='Python 3.13.' },
+    @{ Categoria='Lenguajes y herramientas'; Nombre='Python 3.12'; WingetId='Python.Python.3.12'; DetTipo='prog'; DetValor='^Python 3\.12\.'; Nota='Python 3.12 (la que piden muchos programas y librerias).' },
+    @{ Categoria='Lenguajes y herramientas'; Nombre='Node.js (version LTS)'; WingetId='OpenJS.NodeJS.LTS'; DetTipo='prog'; DetValor='^Node\.js'; Nota='Node.js con soporte a largo plazo.' },
+    @{ Categoria='Lenguajes y herramientas'; Nombre='PowerShell 7'; WingetId='Microsoft.PowerShell'; DetTipo='prog'; DetValor='^PowerShell 7'; Nota='PowerShell moderno (se instala junto al Windows PowerShell 5.1, no lo reemplaza).' },
+
+    @{ Categoria='Otros componentes'; Nombre='Microsoft Access Database Engine 2016 (leer Excel/Access)'; WingetId='Microsoft.AccessDatabaseEngine2016'; DetTipo='prog'; DetValor='^Microsoft Access database engine 2016'; Nota='Conector para que programas lean archivos de Access y Excel (ACE OLEDB 16).' },
+    @{ Categoria='Otros componentes'; Nombre='Microsoft VCLibs 14 (Desktop)'; WingetId='Microsoft.VCLibs.Desktop.14'; DetTipo='desconocido'; Nota='Libreria que piden algunas apps empaquetadas de Windows. Se comprueba con winget al instalar.' },
     @{ Categoria='Otros componentes'; Nombre='Microsoft Edge WebView2 Runtime'; WingetId='Microsoft.EdgeWebView2Runtime'; DetTipo='webview2'; Recomendado=$true; Nota='Lo usan muchos programas modernos para mostrar paginas web dentro de su ventana.' },
     @{ Categoria='Otros componentes'; Nombre='Microsoft XNA Framework Redistributable'; WingetId='Microsoft.XNARedist'; DetTipo='prog'; DetValor='^Microsoft XNA Framework Redistributable'; Nota='Lo piden juegos antiguos hechos con XNA.' }
 )
@@ -15709,6 +15733,20 @@ $Script:BloqueHechosComplementos = {
             }
         }
     }
+    $x86 = ${env:ProgramFiles(x86)}
+    $dx86 = New-Object System.Collections.Generic.List[string]
+    if ($x86) {
+        $d = Join-Path $x86 'dotnet\shared\Microsoft.WindowsDesktop.App'
+        if (Test-Path -LiteralPath $d) { foreach ($sub in (Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue)) { if ($sub.Name -match '^(\d+)\.') { $dx86.Add($Matches[1]) } } }
+    }
+    $asp = New-Object System.Collections.Generic.List[string]
+    $d = Join-Path $raiz 'Microsoft.AspNetCore.App'
+    if (Test-Path -LiteralPath $d) { foreach ($sub in (Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue)) { if ($sub.Name -match '^(\d+)\.') { $asp.Add($Matches[1]) } } }
+    $sdk = New-Object System.Collections.Generic.List[string]
+    $d = Join-Path $env:ProgramFiles 'dotnet\sdk'
+    if (Test-Path -LiteralPath $d) { foreach ($sub in (Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue)) { if ($sub.Name -match '^(\d+)\.') { $sdk.Add($Matches[1]) } } }
+    $dlls = New-Object System.Collections.Generic.List[string]
+    foreach ($dll in 'OpenAL32.dll') { if ([IO.File]::Exists("$sys\$dll") -or ($wow -and [IO.File]::Exists("$wow\$dll"))) { $dlls.Add($dll) } }
     $nf35 = $false
     try { $nf35 = ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v3.5' -ErrorAction SilentlyContinue).Install -eq 1) } catch {}
     $rel = 0
@@ -15719,6 +15757,7 @@ $Script:BloqueHechosComplementos = {
     }
     [PSCustomObject]@{
         Programas = $nombres.ToArray(); DxFaltan = $faltan.ToArray(); Desktop = $desktop.ToArray(); Core = $core.ToArray()
+        DesktopX86 = $dx86.ToArray(); Asp = $asp.ToArray(); Sdk = $sdk.ToArray(); Dlls = $dlls.ToArray()
         NetFx35 = $nf35; NetFxRelease = $rel; WebView2 = $wv
     }
 }
@@ -15731,6 +15770,12 @@ function Global:Test-ComplementoInstalado {
         'netfx35'  { return [bool]$H.NetFx35 }
         'desktop'  { return (@($H.Desktop) -contains [string]$Item.DetValor) }
         'core'     { return (@($H.Core) -contains [string]$Item.DetValor) }
+        'desktopx86' { return (@($H.DesktopX86) -contains [string]$Item.DetValor) }
+        'asp'      { return (@($H.Asp) -contains [string]$Item.DetValor) }
+        'sdk'      { return (@($H.Sdk) -contains [string]$Item.DetValor) }
+        'dll'      { return (@($H.Dlls) -contains [string]$Item.DetValor) }
+        'netfx481' { return ([int]$H.NetFxRelease -ge 533320) }
+        'desconocido' { return $null }
         'webview2' { return [bool]$H.WebView2 }
         'prog' {
             foreach ($n in @($H.Programas)) {
@@ -15765,10 +15810,11 @@ function Global:Actualizar-ChecklistComplementos {
         $it = $cb.Tag
         $inst = Test-ComplementoInstalado -Item $it -H $h
         $total++
-        if ($inst) { $ok++; $cb.Content = "$($it.Nombre)   ✅ instalado"; $cb.IsChecked = $false }
+        if ($null -eq $inst) { $cb.Content = "$($it.Nombre)   ❔ sin deteccion previa (se comprueba al instalar)"; $total-- }
+        elseif ($inst) { $ok++; $cb.Content = "$($it.Nombre)   ✅ instalado"; $cb.IsChecked = $false }
         else { $cb.Content = "$($it.Nombre)   ⬜ no detectado" }
     }
-    if ($txt) { $txt.Text = "Detectado: $ok de $total complementos ya instalados. $(Get-TextoNetFx4 -Release $h.NetFxRelease)" }
+    if ($txt) { $txt.Text = "Detectado: $ok de $total complementos ya instalados (los marcados con ❔ no se pueden detectar de antemano). $(Get-TextoNetFx4 -Release $h.NetFxRelease)" }
 }
 
 function Accion-InstalarComplementos {
@@ -17613,7 +17659,8 @@ Marcar-Arranque 'funciones y recursos'
                                         <TextBlock x:Name="TxtComplementosEstado" Foreground="{StaticResource TextoSecundario}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10" Text="Abre esta seccion para detectar lo instalado."/>
                                         <WrapPanel Margin="0,0,0,10">
                                             <Button x:Name="BtnComplementosDetectar" Content="🔎 Detectar" Width="130" Height="36" Margin="0,0,8,0"/>
-                                            <Button x:Name="BtnComplementosRecomendados" Content="✅ Marcar los que faltan (recomendados)" Height="36"/>
+                                            <Button x:Name="BtnComplementosRecomendados" Content="✅ Marcar los que faltan (recomendados)" Height="36" Margin="0,0,8,0"/>
+                                            <Button x:Name="BtnComplementosLimpiar" Content="Quitar marcas" Height="36"/>
                                         </WrapPanel>
                                         <StackPanel x:Name="PanelChecklistComplementos"/>
                                         <Button x:Name="BtnComplementosInstalar" Content="⬇️ Instalar seleccionados" Height="42" Margin="0,14,0,0" BorderBrush="{StaticResource Acento}"/>
@@ -19185,6 +19232,9 @@ $window.FindName("BtnComplementosRecomendados").Add_Click({
             $cb.IsChecked = ([bool]$cb.Tag.Recomendado -and ($inst -eq $false))
         }
     } catch { Registrar-FalloInterno 'marcar complementos recomendados' $_ }
+})
+$window.FindName("BtnComplementosLimpiar").Add_Click({
+    foreach ($cb in $Script:_checkboxesComplementos.ToArray()) { $cb.IsChecked = $false }
 })
 $window.FindName("BtnComplementosInstalar").Add_Click({
     try {
@@ -21997,6 +22047,7 @@ $Global:AyudaControles = @{
     'CmbSeccionProgramas' = 'Cambia entre instalar programas, complementos (DirectX, .NET, Java, Visual C++), desinstalar, archivos ISO y Microsoft Store.'
     'BtnComplementosDetectar' = 'Revisa en el equipo (archivos, registro y carpetas de .NET) que complementos ya estan instalados. No instala nada.'
     'BtnComplementosRecomendados' = 'Marca solo los complementos recomendados que NO estan instalados: DirectX, Visual C++ 2005-2022, .NET Framework 3.5, .NET Desktop 8 y 10, Java 21 y WebView2.'
+    'BtnComplementosLimpiar' = 'Desmarca todos los complementos de la lista.'
     'BtnComplementosInstalar' = 'Instala los complementos marcados desde su fuente oficial (winget o caracteristica de Windows) y al terminar comprueba que de verdad quedaron instalados.'
     'BtnInstalarSeleccionados' = 'Instala con winget todos los programas que marcaste en la lista.'
     'BtnVerProgramasInstalados' = 'Abre la lista de programas instalados con buscador, desinstalacion limpia (sin dejar rastros) y forzada.'
